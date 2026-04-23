@@ -65,9 +65,19 @@ typedef nProtoBuf::Reflection Reflection;
 #else
 #define REFL_GET( function, message, field )        function( message, field )
 #define REFL_SET( function, message, field, value ) function( message, field, value )
+
 #define REFL_GET_REP( function, message, field, index )        function( message, field, index )
 #define REFL_SET_REP( function, message, field, index, value ) function( message, field, index, value )
 #define REFLECTION_CONST Reflection const
+#endif
+
+// FieldDescriptor::label() was removed in protobuf 28 as part of the
+// "editions" API cleanup; is_repeated() was available well before that.
+// Use FIELD_IS_REPEATED() throughout to stay compatible with both.
+#if GOOGLE_PROTOBUF_VERSION >= 5028000
+#  define FIELD_IS_REPEATED(f) ((f)->is_repeated())
+#else
+#  define FIELD_IS_REPEATED(f) ((f)->label() == FieldDescriptor::LABEL_REPEATED)
 #endif
 
 // wrappers fake-leaky for protobuf functions
@@ -260,9 +270,9 @@ void nProtoBufMessageBase::Filter( nProtoBuf & buf )
     for( int i = 0; i < count; ++i )
     {
         FieldDescriptor const * field = descriptor->field( i );
-        tASSERT( field );
+        if ( !field ) continue;
         
-        if ( field->is_repeated() )
+        if ( FIELD_IS_REPEATED(field) )
         {
             for( int j = r->REFL_GET( FieldSize, buf, field ) - 1; j >= 0; --j )
             {
@@ -429,7 +439,8 @@ void nProtoBufMessageBase::OnRead( unsigned char const * & buffer, unsigned char
         
         if ( inCache )
         {
-            work.ParsePartialFromArray( payload, header.len );
+            if (!work.ParsePartialFromArray( payload, header.len ))
+                nReadError( true );
             DiscardUnknownFields(work);
             
 #ifdef DEBUG_STRINGS
@@ -446,7 +457,8 @@ void nProtoBufMessageBase::OnRead( unsigned char const * & buffer, unsigned char
         else
         {
             // just read directly
-            out.ParsePartialFromArray( payload, header.len );
+            if (!out.ParsePartialFromArray( payload, header.len ))
+                nReadError( true );
 
             DiscardUnknownFields(out);
         }
@@ -603,7 +615,7 @@ void nProtoBufDescriptorBase::StreamFromDefault( nStreamMessage & in, nProtoBuf 
         // out.PrintDebugString();
 
         FieldDescriptor const * field = descriptor->field( i );
-        tASSERT( field );
+        if ( !field ) continue;
 
         if ( in.End() )
         {
@@ -628,7 +640,7 @@ void nProtoBufDescriptorBase::StreamFromDefault( nStreamMessage & in, nProtoBuf 
             continue;
         }
 
-        if ( field->is_repeated() )
+        if ( FIELD_IS_REPEATED(field) )
         {
             if ( i != 0 )
             {
@@ -775,6 +787,7 @@ void nProtoBufDescriptorBase::StreamToDefault( nProtoBuf const & in, nStreamMess
     for( int i = 0; i < count; ++i )
     {
         FieldDescriptor const * field = descriptor->field( i );
+        if ( !field ) continue;
 
         if ( FieldDescriptor::kLastReservedNumber < field->number() )
         {
@@ -794,7 +807,7 @@ void nProtoBufDescriptorBase::StreamToDefault( nProtoBuf const & in, nStreamMess
             continue;
         }
 
-        if ( field->is_repeated() )
+        if ( FIELD_IS_REPEATED(field) )
         {
             if ( i != 0 )
             {
@@ -908,7 +921,7 @@ void nProtoBufDescriptorBase::EstimateMessageDifference( nProtoBuf const & a,
     // get reflection interface
     const Reflection * ra = GetReflection(a);
     Descriptor const * descriptor  = GetDescriptor(a);
-    const Reflection * rb = GetReflection(a);
+    const Reflection * rb = GetReflection(b);
     tASSERT( descriptor == GetDescriptor(b) );
 
 #ifdef DEBUG
@@ -921,12 +934,12 @@ void nProtoBufDescriptorBase::EstimateMessageDifference( nProtoBuf const & a,
     for( int i = 0; i < count; ++i )
     {
         FieldDescriptor const * field = descriptor->field( i );
-        tASSERT( field );
+        if ( !field ) continue;
 
         int weight = 0;
         bool differ = false;
 
-        if ( field->is_repeated() )
+        if ( FIELD_IS_REPEATED(field) )
         {
             continue;
         }
@@ -1014,9 +1027,9 @@ void nProtoBufDescriptorBase::DiffMessages( nProtoBuf const & base,
     for( int i = 0; i < count; ++i )
     {
         FieldDescriptor const * field = descriptor->field( i );
-        tASSERT( field );
+        if ( !field ) continue;
 
-        if ( field->is_repeated() )
+        if ( FIELD_IS_REPEATED(field) )
         {
             continue;
         }
@@ -1087,9 +1100,9 @@ void nProtoBufDescriptorBase::ClearRepeated( nProtoBuf & message )
     for( int i = 0; i < count; ++i )
     {
         FieldDescriptor const * field = descriptor->field( i );
-        tASSERT( field );
+        if ( !field ) continue;
 
-        if ( field->is_repeated() )
+        if ( FIELD_IS_REPEATED(field) )
         {
             // clear the field
             reflection->REFL_GET( ClearField, &message, field );
@@ -1419,12 +1432,12 @@ static void sn_CheckMessage
     unsigned long lastMessageID     // last cached message ID
     )
 {
-    nProtoBuf const & cached = message->GetProtoBuf();
-
-    if ( !message && message->MessageIDBig() == 0 )
+    if ( !message || message->MessageIDBig() == 0 )
     {
         return;
     }
+
+    nProtoBuf const & cached = message->GetProtoBuf();
 
     // ignore messages that are older than the first message in the queue.
     // they may already be expired on the receiver side.

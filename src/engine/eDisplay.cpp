@@ -30,6 +30,9 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 #include "rSDL.h"
 
 #include "tConfiguration.h"
+#include <cstring>
+#include <cmath>
+#include <algorithm>
 
 // floor mirror
 #ifndef DEDICATED
@@ -47,6 +50,12 @@ static tSettingItem<REAL> f_m("FLOOR_MIRROR_INT",sr_floorMirror_strength);
 #include "eSensor.h"
 #include "rScreen.h"
 #include "rRender.h"
+#include "rCycleRenderer.h"
+#include "rSkyFloorRenderer.h"
+#include "rZoneRenderer.h"
+#include "rRendererState.h"
+#include "rRenderQueue.h"
+#include "rVertex.h"
 #include "eWall.h"
 #include "eAdvWall.h"
 #include "eFloor.h"
@@ -137,23 +146,20 @@ static void se_SelectUpperSky()
     }
     else
     {
-        se_glFloorTexture();
+        se_SelectFloorTexture();
     }
 }
 
 // if the rip bug is activated, don't use the rim to draw the floor
 extern short se_bugRip;
 
-// passes a vertex with z-projected texture coordinates to OpenGL
-static inline void TexVertex( REAL x, REAL y, REAL h)
-{
-    glTexCoord2f(x, y);
-    glVertex3f  (x, y, h);
-}
-
 // renders a finite rectangle
-static void finite_xy_plane( const eCoord &pos,const eCoord &dir,REAL h, eRectangle rect )
+// texScaleU/V override the texture scale (0 = use default 1/gridSize)
+static void finite_xy_plane( const eCoord &pos,const eCoord &dir,REAL h, eRectangle rect,
+                             rBlendMode blend = rBlendMode::Alpha,
+                             float texScaleU = 0, float texScaleV = 0 )
 {
+#ifndef DEDICATED
     // expand plane to camera position to avoid embarrasing reflection bug
     if ( sr_floorMirror )
         rect.Include( pos );
@@ -164,80 +170,119 @@ static void finite_xy_plane( const eCoord &pos,const eCoord &dir,REAL h, eRectan
     REAL hx = rect.GetHigh().x;
     REAL hy = rect.GetHigh().y;
 
-    // draw rectangle as triangle fan (good for avoiding artefacts near pos)
-    BeginTriangleFan();
-    TexVertex( pos.x-dir.x, pos.y-dir.y, h );
-    TexVertex(lx, ly, h);
-    TexVertex(lx, hy, h);
-    TexVertex(hx, hy, h);
-    TexVertex(hx, ly, h);
-    TexVertex(lx, ly, h);
-    RenderEnd();
+    // Convert triangle fan to batch rendering
+    // Triangle fan: center vertex + ring of 5 vertices
+    // Fan vertices: v0 (center), v1(lx,ly), v2(lx,hy), v3(hx,hy), v4(hx,ly), v5(lx,ly)
+    // Triangles: (v0,v1,v2), (v0,v2,v3), (v0,v3,v4), (v0,v4,v5)
+
+    // Batch rendering using the same approach as the floor.
+    // Query bound texture and current color, build rVertex20 array, submit to queue.
+    unsigned int textureId = RenderGetBoundTexture2D();
+
+    float color[4] = {1.0f, 1.0f, 1.0f, 1.0f};
+    RenderGetColor(color);
+    uint8_t r = static_cast<uint8_t>(color[0] * 255.0f);
+    uint8_t g = static_cast<uint8_t>(color[1] * 255.0f);
+    uint8_t b = static_cast<uint8_t>(color[2] * 255.0f);
+    uint8_t a = static_cast<uint8_t>(color[3] * 255.0f);
+
+
+    // rVertex20 stores texcoords as int16 (range -1.0..1.0). World-space coords
+    // (0-200+) would overflow, so we normalize by worldScale and compensate via
+    // texture matrix: shader computes (coord/worldScale) * (worldScale/gridSize) = coord/gridSize
+    REAL gridSize = se_GridSize();
+
+    // Center vertex
+    REAL cx = pos.x - dir.x;
+    REAL cy = pos.y - dir.y;
+
+    // Compute worldScale from all vertex coordinates
+    REAL worldScale = std::abs(cx);
+    worldScale = std::max(worldScale, std::abs(cy));
+    worldScale = std::max(worldScale, std::abs(lx));
+    worldScale = std::max(worldScale, std::abs(ly));
+    worldScale = std::max(worldScale, std::abs(hx));
+    worldScale = std::max(worldScale, std::abs(hy));
+    if (worldScale < 1.0f) worldScale = 1.0f;
+
+    // Build texture matrix: scale normalized coords back to world-space tiling
+    float tsU = texScaleU != 0 ? texScaleU : static_cast<float>(1.0 / gridSize);
+    float tsV = texScaleV != 0 ? texScaleV : static_cast<float>(1.0 / gridSize);
+    float texMatrix[16] = {0};
+    texMatrix[0]  = static_cast<float>(worldScale) * tsU;
+    texMatrix[5]  = static_cast<float>(worldScale) * tsV;
+    texMatrix[10] = 1.0f;
+    texMatrix[15] = 1.0f;
+
+    // Build a 2x2 grid of quads centered at (cx, cy) instead of a triangle fan.
+    // A fan creates a singularity at the center vertex where all triangles meet,
+    // causing discontinuous texture gradients and mipmap artifacts (dark spot).
+    // The grid eliminates the singularity while still wrapping around the camera.
+    float invWS = static_cast<float>(1.0 / worldScale);
+    auto mkv = [&](float x, float y) -> rVertex20 {
+        return rVertex20(x, y, h, r, g, b, a, x * invWS, y * invWS);
+    };
+
+    // 5 unique X coordinates, 5 unique Y coordinates → 3x3 grid of vertices
+    // Center column/row at (cx, cy), edges at rectangle bounds
+    rVertex20 vBL = mkv(lx, ly), vBC = mkv(cx, ly), vBR = mkv(hx, ly);
+    rVertex20 vML = mkv(lx, cy), vMC = mkv(cx, cy), vMR = mkv(hx, cy);
+    rVertex20 vTL = mkv(lx, hy), vTC = mkv(cx, hy), vTR = mkv(hx, hy);
+
+    // 4 quads → 8 triangles → 24 vertices
+    rVertex20 verts[24] = {
+        vBL, vBC, vMC,  vBL, vMC, vML,  // bottom-left quad
+        vBC, vBR, vMR,  vBC, vMR, vMC,  // bottom-right quad
+        vML, vMC, vTC,  vML, vTC, vTL,  // top-left quad
+        vMC, vMR, vTR,  vMC, vTR, vTC,  // top-right quad
+    };
+
+    // Submit with texture
+    rRenderStateKey state;
+    if (textureId != 0)
+    {
+        state = rRenderStateKey::Textured(textureId, blend);
+        state.SetTexMatrix(texMatrix);
+    }
+    else
+    {
+        state = rRenderStateKey::Colored(blend);
+    }
+    rRenderQueue::Instance().Submit(rRenderPhase::Sky, state, verts, 24);
+#endif
 }
 
-static void infinity_xy_plane(eCoord const & pos, const eCoord &dir,REAL h=0){
-    bool use_rim=false;
-    REAL zero=0;
-
-    if (sr_highRim)
-        use_rim=true;
+static void infinity_xy_plane(eCoord const & pos, const eCoord &dir,REAL h=0,
+                              rBlendMode blend = rBlendMode::Alpha,
+                              float texScaleU = 0, float texScaleV = 0){
+    bool use_rim = !sr_infinityPlane;
 
     if ( se_bugRip )
         use_rim=false;
 
-    // always use the rim if infinity rendering is turned off
-    use_rim |= !sr_infinityPlane;
-
     if (use_rim){
-        /*
-          // the rim wall based rendering does not work properly for shaped arenas, so
-          // it's been replaced.
-
-                BeginTriangles();
-                for(int i=se_rimWalls.Len()-1;i>=0;i--){
-                    eCoord p1=se_rimWalls(i)->EndPoint(0);
-                    eCoord p2=se_rimWalls(i)->EndPoint(1);
-
-                    glTexCoord2f(pos.x, pos.y);
-                    glVertex3f  (pos.x, pos.y, h);
-
-                    glTexCoord2f(p1.x, p1.y);
-                    glVertex3f  (p1.x, p1.y, h);
-
-                    glTexCoord2f(p2.x, p2.y);
-                    glVertex3f  (p2.x, p2.y, h);
-                }
-                RenderEnd();
-        */
-        finite_xy_plane( pos, dir, h, eWallRim::GetBounds() );
+        finite_xy_plane( pos, dir, h, eWallRim::GetBounds(), blend, texScaleU, texScaleV );
     }
     else
     {
-        if (!sr_infinityPlane)
-            zero=.001;
-
-        BeginTriangleFan();
-
-        glTexCoord4f(pos.x-dir.x, pos.y-dir.y, h, 1);
-        glVertex4f  (pos.x-dir.x, pos.y-dir.y, h, 1);
-
-        glTexCoord4f(1,0.1,zero*h,zero);
-        glVertex4f  (1,0.1,zero*h,zero);
-
-        glTexCoord4f(0.1,1.1,zero*h,zero);
-        glVertex4f  (0.1,1.1,zero*h,zero);
-
-        glTexCoord4f(-1,0.1,zero*h,zero);
-        glVertex4f  (-1,0.1,zero*h,zero);
-
-
-        glTexCoord4f(0.1,-1.1,zero*h,zero);
-        glVertex4f  (0.1,-1.1,zero*h,zero);
-
-        glTexCoord4f(1,0.1,zero*h,zero);
-        glVertex4f  (1,0.1,zero*h,zero);
-
-        RenderEnd();
+#ifndef DEDICATED
+        // The old GL1 code used projective ring vertices (±1.0 world coords) that
+        // only worked as a fixed-function "infinity" trick.  In the modern renderer
+        // those coords are treated as real world-space positions (≈origin), making
+        // the floor invisible.  Simulate infinity with a large-radius rectangle
+        // centered on the camera position, extending well beyond the arena bounds.
+        const tRectangle& bounds = eWallRim::GetBounds();
+        REAL maxEdge = std::max({
+            std::abs(bounds.GetLow().x), std::abs(bounds.GetLow().y),
+            std::abs(bounds.GetHigh().x), std::abs(bounds.GetHigh().y),
+            1.0f
+        });
+        REAL largeRadius = maxEdge * 100.0f;
+        eRectangle largeRect;
+        largeRect.Include( eCoord(pos.x - largeRadius, pos.y - largeRadius) );
+        largeRect.Include( eCoord(pos.x + largeRadius, pos.y + largeRadius) );
+        finite_xy_plane( pos, dir, h, largeRect, blend, texScaleU, texScaleV );
+#endif
     }
 }
 
@@ -326,32 +371,19 @@ private:
 };
 
 void paint_sr_lowerSky(eGrid *grid, int viewer,bool sr_upperSky, eCamera* cam ){
-    TexMatrix();
-    glLoadIdentity();
-    glScalef(.005,.005,.005);
-    glEnable(GL_TEXTURE_2D);
-    glDisable(GL_CULL_FACE);
-
-    if (sr_skyWobble){
-        glTranslatef(se_GameTime()*.1,se_GameTime()*.07145,0);
-        glScalef(1+.2*sin(se_GameTime()),1+.1*cos(se_GameTime()),1);
-        glTranslatef(-300,-200,0);
-    }
-
+    // TODO: Sky texture scale (.005) and wobble effect are not yet passed to
+    // infinity_xy_plane's batch texture matrix. Currently uses gridSize-based scale.
     se_SelectSky();
 
     REAL sa=(se_lowerSkyHeight-z)*.1;
     if (sa>1) sa=1;
     if (!sr_upperSky){
         sa=1;
-        glBlendFunc(GL_SRC_ALPHA,GL_ZERO);
     }
     if (sa>0){
-        glColor4f(1,1,1,sa);
+        Color(1,1,1,sa);
         infinity_xy_plane(cam->CameraPos(),cam->CameraDir(),se_lowerSkyHeight);
     }
-    if (!sr_upperSky && sr_alphaBlend)
-        glBlendFunc(GL_SRC_ALPHA,GL_ONE_MINUS_SRC_ALPHA);
 }
 
 void eGrid::display_simple( eCamera* cam, int viewer,bool floor,
@@ -359,72 +391,59 @@ void eGrid::display_simple( eCamera* cam, int viewer,bool floor,
                             REAL flooralpha,
                             bool eWalls,bool gameObjects,
                             REAL& zNear){
-    sr_CheckGLError();
+    RenderDisableState(rCapability::DepthTest);
+    RenderDepthMask(false);
 
-    /*
-    static GLfloat S[]={1,0,0,0};
-    static GLfloat T[]={0,1,0,0};
-    static GLfloat R[]={0,0,1,0};
-    static GLfloat Q[]={0,0,0,1};
-
-    glTexGeni(GL_S,GL_TEXTURE_GEN_MODE,GL_OBJECT_LINEAR);
-    glTexGenfv(GL_S,GL_OBJECT_PLANE,S);
-
-    glTexGeni(GL_T,GL_TEXTURE_GEN_MODE,GL_OBJECT_LINEAR);
-    glTexGenfv(GL_T,GL_OBJECT_PLANE,T);
-
-    glTexGeni(GL_R,GL_TEXTURE_GEN_MODE,GL_OBJECT_LINEAR);
-    glTexGenfv(GL_R,GL_OBJECT_PLANE,R);
-
-    glTexGeni(GL_Q,GL_TEXTURE_GEN_MODE,GL_OBJECT_LINEAR);
-    glTexGenfv(GL_Q,GL_OBJECT_PLANE,Q);
-
-    glDisable(GL_TEXTURE_GEN_T);
-    glDisable(GL_TEXTURE_GEN_S);
-    glDisable(GL_TEXTURE_GEN_R);
-    glDisable(GL_TEXTURE_GEN_Q);
-    */
-
-
-    glDisable(GL_DEPTH_TEST);
-    glDepthMask(GL_FALSE);
-
-    glDisable(GL_CULL_FACE);
+    RenderDisableState(rCapability::CullFace);
 
     eCoord camPos = cam->CameraGlancePos(); 
     // eWallRim::Bound( camPos, 10 );
 
+    // Set render context for sky
+    sr_SetRenderContext(rRenderContext::Game3D_Sky);
+
     if (sr_upperSky || se_BlackSky()){
         if (se_BlackSky()){
-            //glDisable(GL_TEXTURE);
-            glDisable(GL_TEXTURE_2D);
-
-            glColor3f(0,0,0);
-
-            if ( z < se_lowerSkyHeight )
-                infinity_xy_plane(cam->CameraPos(), cam->CameraDir(), se_lowerSkyHeight);
-
-            glEnable(GL_TEXTURE_2D);
+            if (sr_useBatchedSkyFloor && z < se_lowerSkyHeight)
+            {
+                rSubmitBlackSky(
+                    static_cast<float>(cam->CameraPos().x),
+                    static_cast<float>(cam->CameraPos().y),
+                    static_cast<float>(cam->CameraDir().x),
+                    static_cast<float>(cam->CameraDir().y),
+                    static_cast<float>(se_lowerSkyHeight));
+            }
+            else
+            {
+                Color(0,0,0);
+                if ( z < se_lowerSkyHeight )
+                    infinity_xy_plane(cam->CameraPos(), cam->CameraDir(), se_lowerSkyHeight);
+            }
+            rRenderQueue::Instance().ExecutePhase(rRenderPhase::Sky);
         }
         else {
-            TexMatrix();
-            glLoadIdentity();
-            glScalef(se_upperSkyScale,se_upperSkyScale,se_upperSkyScale);
-
             se_SelectUpperSky();
-
-            glColor3f(se_upperSkyColorR,se_upperSkyColorG,se_upperSkyColorB);
-
+            Color(se_upperSkyColorR,se_upperSkyColorG,se_upperSkyColorB);
             if ( z < se_upperSkyHeight )
                 infinity_xy_plane(cam->CameraPos(), cam->CameraDir(), se_upperSkyHeight);
+            rRenderQueue::Instance().ExecutePhase(rRenderPhase::Sky);
         }
     }
 
     if (sr_lowerSky && !sr_highRim){
         paint_sr_lowerSky(this, viewer,sr_upperSky, cam);
+        rRenderQueue::Instance().ExecutePhase(rRenderPhase::Sky);
     }
 
     if (floor){
+        // Set render context for floor
+        sr_SetRenderContext(rRenderContext::Game3D_Floor);
+
+        // Set arena bounds for shader effects (floor centering)
+        const tRectangle& bounds = eWallRim::GetBounds();
+        sr_SetArenaBounds(bounds.GetLow().x, bounds.GetLow().y,
+                          bounds.GetHigh().x, bounds.GetHigh().y);
+
         sr_DepthOffset(false);
 
         su_FetchAndStoreSDLInput();
@@ -449,125 +468,106 @@ void eGrid::display_simple( eCamera* cam, int viewer,bool floor,
                 int xn=static_cast<int>(x/SIDELEN);
                 int yn=static_cast<int>(y/SIDELEN);
 
-
-                //glDisable(GL_TEXTURE);
-                glDisable(GL_TEXTURE_2D);
-
 	#define INTENSITY(x,xx) (1-(((x)-(xx))*((x)-(xx))/(EXTENSION*SIDELEN*EXTENSION*SIDELEN)))
 
+                // Get base floor color
+                se_SetFloorColor(1.0, 1.0);
+                float floorCol[4];
+                RenderGetColor(floorCol);
+                uint8_t fr = static_cast<uint8_t>(floorCol[0] * 255.0f);
+                uint8_t fg = static_cast<uint8_t>(floorCol[1] * 255.0f);
+                uint8_t fb = static_cast<uint8_t>(floorCol[2] * 255.0f);
 
-                BeginLines();
+                std::vector<rVertex20> gridLines;
+                gridLines.reserve((2*EXTENSION+1) * 4);
                 for(int i=xn-EXTENSION;i<=xn+EXTENSION;i++){
                     REAL intens=INTENSITY(i*SIDELEN,x);
                     if (intens<0) intens=0;
-                    se_glFloorColor(intens,intens);
-                    glVertex2f(i*SIDELEN,y-SIDELEN*(EXTENSION+1));
-                    glVertex2f(i*SIDELEN,y+SIDELEN*(EXTENSION+1));
+                    uint8_t a = rFloatToU8(intens);
+                    gridLines.push_back(rVertex20(i*SIDELEN, y-SIDELEN*(EXTENSION+1), 0, fr, fg, fb, a, 0, 0));
+                    gridLines.push_back(rVertex20(i*SIDELEN, y+SIDELEN*(EXTENSION+1), 0, fr, fg, fb, a, 0, 0));
                 }
                 for(int j=yn-EXTENSION;j<=yn+EXTENSION;j++){
                     REAL intens=INTENSITY(j*SIDELEN,y);
                     if (intens<0) intens=0;
-                    se_glFloorColor(intens,intens);
-                    glVertex2f(x-(EXTENSION+1)*SIDELEN,j*SIDELEN);
-                    glVertex2f(x+(EXTENSION+1)*SIDELEN,j*SIDELEN);
+                    uint8_t a = rFloatToU8(intens);
+                    gridLines.push_back(rVertex20(x-(EXTENSION+1)*SIDELEN, j*SIDELEN, 0, fr, fg, fb, a, 0, 0));
+                    gridLines.push_back(rVertex20(x+(EXTENSION+1)*SIDELEN, j*SIDELEN, 0, fr, fg, fb, a, 0, 0));
                 }
-                RenderEnd();
+                rRenderStateKey state = rRenderStateKey::Colored(rBlendMode::Alpha);
+                rRenderQueue::Instance().SubmitLines(rRenderPhase::Sky, state, gridLines.data(), gridLines.size());
+                rRenderQueue::Instance().ExecutePhase(rRenderPhase::Sky);
             }
             break;
 
         case rFLOOR_TEXTURE:
-            TexMatrix();
-            glLoadIdentity();
-            glScalef(1/se_GridSize(),1/se_GridSize(),1.);
+            // Texture matrix setup handled by batch state key in infinity_xy_plane
+            se_SelectFloorTexture();
+            se_SetFloorColor(flooralpha);
 
-            se_glFloorTexture();
-            se_glFloorColor(flooralpha);
-
-            infinity_xy_plane( cam->CameraPos(), cam->CameraDir()); 
-
-            /* old way: draw every triangle
-            for(int i=eFace::faces.Len()-1;i>=0;i--){
-            eFace *f=eFace::faces(i);
-
-            if (f->visHeight[viewer]<z){
-            glBegin(GL_TRIANGLES);
-            for(int j=0;j<=2;j++){
-            glVertex3f(f->p[j]->x,f->p[j]->y,0);
-            }
-            glEnd();
-            }
-            }
-            */
+            infinity_xy_plane( cam->CameraPos(), cam->CameraDir());
+            rRenderQueue::Instance().ExecutePhase(rRenderPhase::Sky);
 
             break;
 
         case rFLOOR_TWOTEXTURE:
-            se_glFloorColor(flooralpha);
+            {
+                REAL gs = 1.0f / se_GridSize();
 
-            TexMatrix();
-            glLoadIdentity();
-            REAL gs = 1/se_GridSize();
-            glScalef(0.01*gs,gs,1.);
+                // Original GL: two draws, same geometry, different texture scales.
+                // Pass A: normal alpha blend (SRC_ALPHA, ONE_MINUS_SRC_ALPHA)
+                // Pass B: additive blend (SRC_ALPHA, ONE) on top at same depth.
+                // The additive blend brightens where the second texture's stripes
+                // overlap with the first, creating a visible grid pattern.
 
-            se_glFloorTexture_a();
-            infinity_xy_plane( cam->CameraPos(), cam->CameraDir()); 
+                // Pass A: horizontal stretch, normal alpha blend
+                se_SetFloorColor(flooralpha);
+                se_SelectFloorTextureA();
+                infinity_xy_plane( cam->CameraPos(), cam->CameraDir(), 0,
+                                   rBlendMode::Alpha, 0.01f*gs, gs );
+                rRenderQueue::Instance().ExecutePhase(rRenderPhase::Sky);
 
-            se_glFloorColor(flooralpha);
-
-            TexMatrix();
-            glLoadIdentity();
-            glScalef(gs,.01*gs,1.);
-
-            se_glFloorTexture_b();
-
-            glDepthFunc(GL_LEQUAL);
-            glBlendFunc(GL_SRC_ALPHA,GL_ONE);
-            infinity_xy_plane( cam->CameraPos(), cam->CameraDir() );
-            glBlendFunc(GL_SRC_ALPHA,GL_ONE_MINUS_SRC_ALPHA);
-
+                // Pass B: vertical stretch, additive blend on top
+                se_SetFloorColor(flooralpha);
+                se_SelectFloorTextureB();
+                infinity_xy_plane( cam->CameraPos(), cam->CameraDir(), 0,
+                                   rBlendMode::Additive, gs, 0.01f*gs );
+                rRenderQueue::Instance().ExecutePhase(rRenderPhase::Sky);
+            }
             break;
         }
     }
 
-    glEnable(GL_DEPTH_TEST);
-    glDepthMask(GL_TRUE);
-	
-    TexMatrix();
-    glLoadIdentity();
-    ModelMatrix();
+    // TODO: Lower sky rendering needs investigation - the batch queue's state cache
+    // desyncs with the renderer's depth state, causing the sky to be depth-tested away.
+    // The sky geometry IS submitted correctly (verified via debug) but is invisible.
+    // Needs a proper fix for the state cache sync issue.
+    if(eWalls && sr_lowerSky && sr_highRim){
+        paint_sr_lowerSky(this, viewer,sr_upperSky, cam);
+        rRenderQueue::Instance().ExecutePhase(rRenderPhase::Sky);
 
-    //  glDisable(GL_TEXTURE_GEN_S);
-    //  glDisable(GL_TEXTURE_GEN_T);
-    //  glDisable(GL_TEXTURE_GEN_Q);
-    //  glDisable(GL_TEXTURE_GEN_R);
+        TexMatrix();
+        IdentityMatrix();
+        ModelMatrix();
+    }
+
+    RenderEnableState(rCapability::DepthTest);
+    RenderDepthMask(true);
+
+    TexMatrix();
+    IdentityMatrix();
+    ModelMatrix();
 
     if(eWalls){
         {
+            // Set render context for rim walls
+            sr_SetRenderContext(rRenderContext::Game3D_RimWalls);
+
             su_FetchAndStoreSDLInput();
-    
+
             eWallRim::RenderAll( cam );
         }
-
-        if (sr_lowerSky && sr_highRim){
-            //      glEnable(GL_TEXTURE_GEN_S);
-            //      glEnable(GL_TEXTURE_GEN_T);
-            //      glEnable(GL_TEXTURE_GEN_Q);
-            //      glEnable(GL_TEXTURE_GEN_R);
-
-            paint_sr_lowerSky(this, viewer,sr_upperSky, cam);
-
-            //      glDisable(GL_TEXTURE_GEN_S);
-            //      glDisable(GL_TEXTURE_GEN_T);
-            //      glDisable(GL_TEXTURE_GEN_Q);
-            //      glDisable(GL_TEXTURE_GEN_R);
-
-            TexMatrix();
-            glLoadIdentity();
-            ModelMatrix();
-        }
     }
-
-    sr_CheckGLError();
 
     if (eWalls){
         // send out sensors to find walls close to the camera
@@ -586,40 +586,36 @@ void eGrid::display_simple( eCamera* cam, int viewer,bool floor,
             }
         }
 
-        // glDisable(GL_CULL_FACE);
-        // draw_eWall(this,viewer,0,zNear,cam);
-
-        /*
-        #ifdef DEBUG
-        for(int i=sg_netPlayerWalls.Len()-1;i>=0;i--){
-          glMatrixMode(GL_MODELVIEW);
-          glPushMatrix();
-          if (sg_netPlayerWalls(i)->Preliminary())
-        glTranslatef(0,0,4);
-          else
-        glTranslatef(0,0,8);
-          if (sg_netPlayerWalls(i)->Wall())
-        sg_netPlayerWalls(i)->Wall()->RenderList(false);
-          glPopMatrix();
-          }
-        #endif
-        */
-
-        /*
-        static int oldlen=0;
-        int newlen=sg_netPlayerWalls.Len();
-        if (newlen!=oldlen){
-          con << "Number of player eWalls now " << newlen << '\n';
-          oldlen=newlen;
-        }
-        */
-
     }
 
-    sr_CheckGLError();
+    // Floor geometry is now executed immediately within each floor detail case
+    // using the Sky phase (no depth test/write) to match the original rendering state.
 
     if (gameObjects)
+    {
+        // Set render context for game objects (cycles, walls, etc.)
+        // Note: This is a generic context; specific object rendering may set more specific contexts
+        sr_SetRenderContext(rRenderContext::Game3D);
+        rBeginCycleRendering();
         eGameObject::RenderAll(this, cam);
+        rEndCycleRendering();
+
+        // Flush all opaque dynamic geometry accumulated by cycle/wall rendering.
+        // Render context is embedded in each state key at Submit time, so batched
+        // draws carry the correct context for shader hook dispatch.
+        rRenderQueue::Instance().ExecutePhase(rRenderPhase::OpaqueDynamic);
+
+        // Execute transparent phase (zones) — set Zones context so the
+        // uber shader emissive hook for zones fires. zShape.cpp only
+        // SUBMITS to the queue; the actual draw (and the context that
+        // reaches the shader) happens here when the phase flushes.
+        sr_SetRenderContext(rRenderContext::Game3D_Zones);
+        rRenderQueue::Instance().ExecutePhase(rRenderPhase::Transparent);
+
+        // Execute effects phase (explosions, sparks) - must be done while 3D camera is active
+        sr_SetRenderContext(rRenderContext::Game3D_Effects);
+        rRenderQueue::Instance().ExecutePhase(rRenderPhase::Effects);
+    }
 
     eDebugLine::Render();
 #ifdef DEBUG
@@ -627,48 +623,33 @@ void eGrid::display_simple( eCamera* cam, int viewer,bool floor,
     ePath::RenderLast();
 
     if (debug_grid){
-        //glDisable(GL_TEXTURE);
-        glDisable(GL_TEXTURE_2D);
-        glDisable(GL_LIGHTING);
-        BeginLines();
+        std::vector<rVertex20> debugLines;
+        debugLines.reserve(edges.Len() * 6 + points.Len() * 2);
 
         int i;
         for(i=edges.Len()-1;i>=0;i--){
             eHalfEdge *e=edges[i];
-            if (e->Face())
-                glColor4f(1,1,1,1);
-            else
-                glColor4f(0,0,1,1);
+            uint8_t cr, cg, cb;
+            if (e->Face()) { cr=255; cg=255; cb=255; }
+            else           { cr=0;   cg=0;   cb=255; }
 
-            glVertex3f(e->Point()->x,e->Point()->y,10);
-            glVertex3f(e->Point()->x,e->Point()->y,15);
-            glVertex3f(e->Point()->x,e->Point()->y,.1);
-            glVertex3f(e->other->Point()->x,e->other->Point()->y,.1);
-            glVertex3f(e->other->Point()->x,e->other->Point()->y,10);
-            glVertex3f(e->other->Point()->x,e->other->Point()->y,15);
-
+            debugLines.push_back(rVertex20(e->Point()->x, e->Point()->y, 10, cr, cg, cb, 255, 0, 0));
+            debugLines.push_back(rVertex20(e->Point()->x, e->Point()->y, 15, cr, cg, cb, 255, 0, 0));
+            debugLines.push_back(rVertex20(e->Point()->x, e->Point()->y, .1f, cr, cg, cb, 255, 0, 0));
+            debugLines.push_back(rVertex20(e->other->Point()->x, e->other->Point()->y, .1f, cr, cg, cb, 255, 0, 0));
+            debugLines.push_back(rVertex20(e->other->Point()->x, e->other->Point()->y, 10, cr, cg, cb, 255, 0, 0));
+            debugLines.push_back(rVertex20(e->other->Point()->x, e->other->Point()->y, 15, cr, cg, cb, 255, 0, 0));
         }
 
         for(i=points.Len()-1;i>=0;i--){
             ePoint *p=points[i];
-            glColor4f(1,0,0,1);
-            glVertex3f(p->x,p->y,0);
-            glVertex3f(p->x,p->y,(p->GetRefcount()+1)*5);
+            debugLines.push_back(rVertex20(p->x, p->y, 0, 255, 0, 0, 255, 0, 0));
+            debugLines.push_back(rVertex20(p->x, p->y, (p->GetRefcount()+1)*5, 255, 0, 0, 255, 0, 0));
         }
-        /*
-        for(int i=sg_netPlayerWalls.Len()-1;i>=0;i--){
-          eEdge *e=sg_netPlayerWalls[i]->Edge();
-        glColor4f(0,1,0,1);
 
-          glVertex3f(e->Point()->x,e->Point()->y,5);
-          glVertex3f(e->Point()->x,e->Point()->y,10);
-          glVertex3f(e->Point()->x,e->Point()->y,10);
-          glVertex3f(e->other->Point()->x,e->other->Point()->y,10);
-          glVertex3f(e->other->Point()->x,e->other->Point()->y,10);
-          glVertex3f(e->other->Point()->x,e->other->Point()->y,5);
-        }
-        */
-        RenderEnd();
+        rRenderStateKey state = rRenderStateKey::Colored(rBlendMode::Opaque);
+        rRenderQueue::Instance().SubmitLines(rRenderPhase::OpaqueDynamic, state, debugLines.data(), debugLines.size());
+        rRenderQueue::Instance().ExecutePhase(rRenderPhase::OpaqueDynamic);
     }
 #endif
 
@@ -689,10 +670,10 @@ void eGrid::Render( eCamera* cam, int viewer, REAL& zNear ){
 
 	if (sr_floorMirror){
 		ModelMatrix();
-		glScalef(1,1,-1);
+		ScaleMatrix(1,1,-1);
 
 		if (z>10) z=10;
-		glFrontFace((cam->MirrorView())?GL_CCW:GL_CW);
+		RenderFrontFace((cam->MirrorView()) ? rFrontFace::CCW : rFrontFace::CW);
 
 		bool us=false;
 		bool ls=false;
@@ -716,9 +697,9 @@ void eGrid::Render( eCamera* cam, int viewer, REAL& zNear ){
 					   sr_floorMirror>=rMIRROR_OBJECTS,
 					   zNear);
 		z=cam->CameraZ();
-		glFrontFace((cam->MirrorView())?GL_CW:GL_CCW);
+		RenderFrontFace((cam->MirrorView()) ? rFrontFace::CW : rFrontFace::CCW);
 		ModelMatrix();
-		glScalef(1,1,-1);
+		ScaleMatrix(1,1,-1);
 
 
 		cam->SetRenderingMain(true && cam->CameraMain());
@@ -730,7 +711,7 @@ void eGrid::Render( eCamera* cam, int viewer, REAL& zNear ){
 	}
 	else
 	{
-		glFrontFace((cam->MirrorView())?GL_CW:GL_CCW);
+		RenderFrontFace((cam->MirrorView()) ? rFrontFace::CW : rFrontFace::CCW);
 		cam->SetRenderingMain(true && cam->CameraMain());
 		display_simple(cam, viewer,true,
 					   sr_upperSky,sr_lowerSky,
@@ -762,15 +743,15 @@ void eViewerCrossesEdge::Render(){
   if (viewer==1){
     if (timeLeft>0){
       h=timeLeft+4;
-      glColor4f(0,0,1,.5);
+      Color(0,0,1,.5);
     }
     else{
       h=-timeLeft+4;
-      glColor4f(1,0,0,.5);
+      Color(1,0,0,.5);
     }
 
     //  else
-    //glColor4f(1,0,0,.5);
+    //Color(1,0,0,.5);
 
     static rTexture ArmageTron_invis_eWall(rTEX_WALL,"textures/eWall2.png",1,0);
     

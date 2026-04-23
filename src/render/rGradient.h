@@ -32,9 +32,12 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 #include "rColor.h"
 #include "tCoord.h"
 #include "rTexture.h"
+#include "rVertex.h"
+#include "utilities/rRenderBucket.h"
 #include <map>
 #include <deque>
 #include <utility>
+#include <vector>
 
 //! Gradient class, able to store a gradient and perform basic render functions with it
 class rGradient: public std::map<float, rColor> {
@@ -70,26 +73,25 @@ public:
     //! set the boundaries of the gradient
     void SetGradientEdges(tCoord const &edge1, tCoord const edge2);
 
-    //! set the color and texture coordinate at the given point
-    //! @param where the point in the gradient. If it lies outside the edges of the gradient the nearest possible point will be used
-    void DrawAt(tCoord const &where);
-
-    //! set the values you'd use for glDrawElements()
-    void SetValues(tCoord const &where, float *position, float *color, float *texcoords);
-
-    //! Draw a rectangle using only the colors of the edges
-    void DrawAtomicRect(tCoord const &edge1, tCoord const &edge2);
-    //!Draw a rectangle, but split it up into multiple rectangles if necessary
-    void DrawRect(tCoord const &edge1, tCoord const &edge2);
-    //! Send a single vertex with the correct color and texture information to OpenGL
-    void DrawPoint(tCoord const &where);
-
-    //! Initialize OpenGL for drawing with this gradient
-    void BeginDraw();
-
     //! Set the texture to be overlaid with the gradient
     void SetTexture(rResourceTexture const &tex) {m_tex = tex;}
     void SetTextureScale(tCoord const &scale) {m_texScale = scale;}
+
+    //! Generate vertices for a rectangle with gradient colors (batch rendering)
+    //! @param edge1 First corner
+    //! @param edge2 Opposite corner
+    //! @return Vector of vertices ready for batch submission (6 vertices = 2 triangles)
+    std::vector<rVertex20> GenerateRectVertices(tCoord const &edge1, tCoord const &edge2);
+
+    //! Generate a single vertex with gradient color (batch rendering)
+    //! @param where Position for the vertex
+    //! @return Single vertex with color and texture coordinates
+    rVertex20 GeneratePointVertex(tCoord const &where);
+
+    //! Create render state key for this gradient (batch rendering)
+    //! @param blendMode Blend mode to use (defaults to Alpha)
+    //! @return Render state key for rRenderQueue submission
+    rRenderStateKey GetRenderStateKey(rBlendMode blendMode = rBlendMode::Alpha);
 };
 
 #endif

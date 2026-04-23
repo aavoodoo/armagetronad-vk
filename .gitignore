@@ -104,6 +104,9 @@ src/.settings
 autogen.sh
 .vscode
 autogen.sh
+/build_ios/
+/build_client/
+/build_server/
 *.o
 *.a
 *.dmg

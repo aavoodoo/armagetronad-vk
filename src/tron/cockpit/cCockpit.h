@@ -53,6 +53,7 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 
 namespace cWidget {
 class Base;
+class TouchButton;
 }
 class ePlayerNetID;
 class gCycle;
@@ -122,6 +123,7 @@ private:
     gCycle *m_FocusCycle; //!< The cycle currently being watched (the one that belongs to m_ViewportPlayer)
     typedef std::vector<tJUST_CONTROLLED_PTR< cWidget::Base> > widget_list_t;
     widget_list_t m_Widgets; //!< All widgets
+    std::vector<cWidget::TouchButton *> m_TouchButtons; //!< Subset of m_Widgets that are touch buttons
 
     void ProcessWidgets(node cur); //!< Processes all Widgets within the <Cockpit> node passed to it
     std::unique_ptr<cWidget::Base> ProcessWidgetType(node cur); //!< returns a new instance of the right widget class for the given node
@@ -179,6 +181,12 @@ public:
     static bool ProcessKey3(float i=0);
     static bool ProcessKey4(float i=0);
     static bool ProcessKey5(float i=0);
+
+    //! Route a touch event (finger-down / up / motion) to on-screen buttons.
+    //! x, y are normalised [0,1] touch coordinates; type is SDL_EVENT_FINGER_*.
+    //! Returns true if the event was consumed by a button.
+    static bool ProcessTouch(float x, float y, uint32_t type, int64_t fingerId);
+
     std::multimap<int, cWidget::Base *> m_EventHandlers;
     bool HandleEvent(int id, bool state);
 

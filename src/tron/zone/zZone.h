@@ -32,7 +32,7 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 
 #include "gCycle.h"
 #include "rColor.h"
-#include <boost/shared_ptr.hpp>
+#include <memory>
 #include "zone/zEffectGroup.h"
 #include "tFunction.h"
 #include "tXmlParser.h"

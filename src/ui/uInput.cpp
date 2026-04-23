@@ -27,6 +27,10 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 
 #include <stdarg.h>
 #include "uInput.h"
+#include "uEvent.h"
+#ifndef DEDICATED
+#include "uEventSDL.h"
+#endif
 #include "tMemManager.h"
 #include "rScreen.h"
 #include "tInitExit.h"
@@ -34,6 +38,7 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 #include "rConsole.h"
 #include "uMenu.h"
 #include "tSysTime.h"
+#include "rViewport.h"
 
 #include <vector>
 #include <map>
@@ -42,8 +47,23 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 // 0:disabled
 // 1:touch control by left/right touches
 // 2:touch control by swipes and drawing
+// 3:cockpit widget buttons
 static int su_enableTouch = 0;
 static tSettingItem< int > su_enableTouchConf( "ENABLE_TOUCH", su_enableTouch );
+
+void su_EnableTouchDefault() {
+#if defined(__ANDROID__) || (defined(__APPLE__) && TARGET_OS_IOS)
+    if (su_enableTouch == 0)
+        su_enableTouch = 1;   // default to left/right touch steering on mobile
+#endif
+}
+
+int su_GetEnableTouch() { return su_enableTouch; }
+extern "C" void su_SetEnableTouch(int mode) { su_enableTouch = mode; }
+
+// Gyro camera look — when active, mouse motion events are forwarded even in touch mode.
+static int su_gyroActive = 0;
+extern "C" void su_SetGyroActive(int active) { su_gyroActive = active; }
 
 bool su_mouseGrab = false;
 
@@ -201,25 +221,22 @@ static void su_WriteSanitizedKeyname(std::ostream & s, char const * input)
     }
 }
 
+#ifndef DEDICATED
 // class that manages keyboard input
 class uKeyInput
 {
 public:
     uKeyInput()
     {
-#if SDL_VERSION_ATLEAST(2,0,0)
-        for ( int i = 0; i <= SDL_NUM_SCANCODES; ++i )
-#else
-        for ( int i = 0; i <= SDLK_LAST; ++i )
-#endif
+        // SDL3: SDL_NUM_SCANCODES → SDL_SCANCODE_COUNT
+        for ( int i = 0; i <= SDL_SCANCODE_COUNT; ++i )
         {
             tString displayID;
             tString persistentID;
             tString alternativePersistentID;
-#ifndef DEDICATED
-#if SDL_VERSION_ATLEAST(2,0,0)
+            // SDL3: SDL_GetKeyFromScancode now requires modstate and key_event params
             SDL_Scancode scancode = static_cast<SDL_Scancode>(i);
-            SDL_Keycode key = SDL_GetKeyFromScancode(scancode);
+            SDL_Keycode key = SDL_GetKeyFromScancode(scancode, SDL_KMOD_NONE, false);
             displayID = SDL_GetKeyName(key);
             switch(scancode)
             {
@@ -271,11 +288,6 @@ public:
                 persistentID = "SCANCODE_KP_RIGHTBRACE";
                 break;
             }
-#else
-            SDLKey key = static_cast<SDLKey>(i);
-            displayID = SDL_GetKeyName(key);
-#endif
-#endif
             if(displayID.size() == 0)
             {
                 std::ostringstream s;
@@ -310,11 +322,7 @@ public:
     {
     }
 
-#if SDL_VERSION_ATLEAST(2,0,0)
-    uInput * sdl_keys[SDL_NUM_SCANCODES+1];
-#else
-    uInput * sdl_keys[SDLK_LAST+1];
-#endif
+    uInput * sdl_keys[SDL_SCANCODE_COUNT+1];
 };
 
 static uKeyInput const & su_GetKeyInput()
@@ -322,24 +330,32 @@ static uKeyInput const & su_GetKeyInput()
     static uKeyInput filler;
     return filler;
 }
+#endif // DEDICATED (uKeyInput)
 
 #ifndef DEDICATED
-#if SDL_VERSION_ATLEAST(2,0,0)
 class uTouchInput
 {
 public:
-    uTouchInput() {
-        turnLeft  = su_NewInput( "TOUCH_LEFT_TURN", "touch left turn" );
-        turnRight = su_NewInput( "TOUCH_RIGHT_TURN", "touch right turn" );
-        brake     = su_NewInput( "TOUCH_BRAKE", "touch brake" );
+    explicit uTouchInput(int playerN = 1) {
+        tString leftID("TOUCH_LEFT_TURN");
+        tString rightID("TOUCH_RIGHT_TURN");
+        tString brakeID("TOUCH_BRAKE");
+        if (playerN > 1) {
+            leftID  << "_" << playerN;
+            rightID << "_" << playerN;
+            brakeID << "_" << playerN;
+        }
+        turnLeft  = su_NewInput( leftID,  tString("touch left turn") );
+        turnRight = su_NewInput( rightID, tString("touch right turn") );
+        brake     = su_NewInput( brakeID, tString("touch brake") );
 
         uAction * actLeft  = uAction::Find( "CYCLE_TURN_LEFT" );
         uAction * actRight = uAction::Find( "CYCLE_TURN_RIGHT" );
         uAction * actBrake = uAction::Find( "CYCLE_BRAKE" );
 
-        tJUST_CONTROLLED_PTR< uBind > bindLeft  = uBindPlayer::NewBind(actLeft, 1);
-        tJUST_CONTROLLED_PTR< uBind > bindRight = uBindPlayer::NewBind(actRight, 1);
-        tJUST_CONTROLLED_PTR< uBind > bindBrake = uBindPlayer::NewBind(actBrake, 1);
+        tJUST_CONTROLLED_PTR< uBind > bindLeft  = uBindPlayer::NewBind(actLeft,  playerN);
+        tJUST_CONTROLLED_PTR< uBind > bindRight = uBindPlayer::NewBind(actRight, playerN);
+        tJUST_CONTROLLED_PTR< uBind > bindBrake = uBindPlayer::NewBind(actBrake, playerN);
 
         turnLeft->SetBind(bindLeft);
         turnRight->SetBind(bindRight);
@@ -351,13 +367,61 @@ public:
     uInput* brake;
 };
 
-static uTouchInput const & su_GetTouchInput()
+// One touch-input set per player slot (playerN = 1..4, stored at index 0..3)
+static uTouchInput* su_touchInputsByPlayer[4] = { nullptr, nullptr, nullptr, nullptr };
+
+static uTouchInput& su_GetTouchInput(int playerN = 1)
 {
-    static uTouchInput filler;
-    return filler;
+    int idx = (playerN >= 1 && playerN <= 4) ? (playerN - 1) : 0;
+    if (!su_touchInputsByPlayer[idx])
+        su_touchInputsByPlayer[idx] = new uTouchInput(playerN);
+    return *su_touchInputsByPlayer[idx];
 }
-#endif
-#endif
+
+#if defined(__ANDROID__) || (defined(__APPLE__) && TARGET_OS_IOS)
+// Returns viewport index (0-based) that contains screen point (x, y),
+// where y=0 is top (SDL convention). Returns -1 if none.
+static int su_FindViewportForTouch(float x, float y)
+{
+    rViewportConfiguration* vc = rViewportConfiguration::CurrentViewportConfiguration();
+    float yFlipped = 1.0f - y; // convert SDL top-origin to OpenGL bottom-origin
+    for (int i = 0; i < vc->num_viewports; i++) {
+        rViewport* vp = vc->Port(i);
+        if (!vp) continue;
+        tCoord pos = vp->GetPosition();
+        tCoord dim = vp->GetDimensions();
+        if (x >= pos.x && x < pos.x + dim.x &&
+            yFlipped >= pos.y && yFlipped < pos.y + dim.y)
+            return i;
+    }
+    return -1;
+}
+
+// Rotate (x, y) around center (0.5, 0.5) to undo the viewport's visual rotation.
+// The UV table convention means +rotDeg gives the correct inverse here.
+static void su_RotateTouchCoord(float& x, float& y, int rotDeg)
+{
+    if (rotDeg == 0) return;
+    float cx = x - 0.5f, cy = y - 0.5f;
+    float rad = (float)rotDeg * (float)M_PI / 180.0f;
+    float c = cosf(rad), s = sinf(rad);
+    x = c * cx - s * cy + 0.5f;
+    y = s * cx + c * cy + 0.5f;
+}
+
+// Rotate delta vector (dx, dy) to undo the viewport's visual rotation.
+static void su_RotateTouchDelta(float& dx, float& dy, int rotDeg)
+{
+    if (rotDeg == 0) return;
+    float rad = (float)rotDeg * (float)M_PI / 180.0f;
+    float c = cosf(rad), s = sinf(rad);
+    float nx = c * dx - s * dy;
+    float ny = s * dx + c * dy;
+    dx = nx;
+    dy = ny;
+}
+#endif // mobile
+#endif // DEDICATED
 
 # define MOUSE_BUTTONS 7
 
@@ -401,7 +465,9 @@ static uMouseInput const & su_GetMouseInput()
 
 void su_KeyInit()
 {
+#ifndef DEDICATED
     su_GetKeyInput();
+#endif
     su_GetMouseInput();
 }
 
@@ -455,7 +521,6 @@ public:
                 readValue >> value;
 
 #ifndef DEDICATED
-#if SDL_VERSION_ATLEAST(2,0,0)
                 // map from old SDLKey to SDL_Scancode
                 switch(value)
                 {
@@ -463,7 +528,8 @@ public:
                     if(value < 127)
                     {
                         // regular keys
-                        value = SDL_GetScancodeFromKey(value);
+                        // SDL3: SDL_GetScancodeFromKey now requires modstate pointer
+                        value = SDL_GetScancodeFromKey(static_cast<SDL_Keycode>(value), NULL);
                     }
                     else if( value >= 282 && value <= 293)
                     {
@@ -488,8 +554,7 @@ public:
                 case 281: value = SDL_SCANCODE_PAGEDOWN; break;
                     // other keys have no unique mapping
                 }
-#endif
-#endif
+#endif // DEDICATED
 
                 if ( value >= 0 && value < (int)su_inputs.size() )
                 {
@@ -614,7 +679,7 @@ static void keyboard_exit()
 class uJoystick
 {
 public:
-    int id;
+    SDL_JoystickID id;
 
     // joystick name
     tString name, internalName;
@@ -630,16 +695,17 @@ public:
         Down = 3
     };
 
-    uJoystick( int id_ ):id(id_)
+    uJoystick( SDL_JoystickID id_ ):id(id_)
     {
-        tASSERT( id >= 0 && id < SDL_NumJoysticks() );
-
-        SDL_Joystick * stick = SDL_JoystickOpen( id );
-#if SDL_VERSION_ATLEAST(2,0,0)
-        name = SDL_JoystickName( stick );
-#else
-        name = SDL_JoystickName( id );
-#endif
+        // SDL3: SDL_JoystickOpen → SDL_OpenJoystick
+        SDL_Joystick * stick = SDL_OpenJoystick( id );
+        if (!stick)
+        {
+            name = "Unavailable Joystick";
+            return;
+        }
+        // SDL3: SDL_JoystickName → SDL_GetJoystickName
+        name = SDL_GetJoystickName( stick );
 
         std::ostringstream iName;
         iName << "JOYSTICK_";
@@ -657,10 +723,11 @@ public:
 
         internalName = iName.str();
 
-        numAxes = SDL_JoystickNumAxes( stick );
-        numButtons = SDL_JoystickNumButtons( stick );
-        numBalls = SDL_JoystickNumBalls( stick );
-        numHats = SDL_JoystickNumHats( stick );
+        // SDL3: SDL_JoystickNumAxes → SDL_GetNumJoystickAxes, etc.
+        numAxes = SDL_GetNumJoystickAxes( stick );
+        numButtons = SDL_GetNumJoystickButtons( stick );
+        numBalls = SDL_GetNumJoystickBalls( stick );
+        numHats = SDL_GetNumJoystickHats( stick );
 
         // populate input types
         if ( numAxes >= 1 )
@@ -801,10 +868,16 @@ public:
     uJoystickInput()
     {
         // create joysticks
-        int numJoysticks = SDL_NumJoysticks();
-        for ( int i = 0; i < numJoysticks; ++i )
+        // SDL3: SDL_NumJoysticks() → SDL_GetJoysticks()
+        int numJoysticks = 0;
+        SDL_JoystickID* joystickIDs = SDL_GetJoysticks(&numJoysticks);
+        if (joystickIDs)
         {
-            joysticks.push_back( new uJoystick( i ) );
+            for ( int i = 0; i < numJoysticks; ++i )
+            {
+                joysticks.push_back( new uJoystick( joystickIDs[i] ) );  // Pass ID, not index!
+            }
+            SDL_free(joystickIDs);
         }
     }
 
@@ -840,7 +913,8 @@ static uJoystick * su_GetJoystick( int id )
 void su_JoystickInit()
 {
     su_GetJoystickInput();
-    SDL_JoystickEventState( SDL_ENABLE );
+    // SDL3: SDL_JoystickEventState(SDL_ENABLE) → SDL_SetJoystickEventsEnabled(true)
+    SDL_SetJoystickEventsEnabled(true);
 }
 #endif
 #endif
@@ -970,14 +1044,20 @@ struct uTransformEventInfo
 int GetPlayerCameraClosestDirection(int player);
 int GetPlayerWindingNumber(int player);
 
+#ifndef DEDICATED
+// Forward declaration: implemented in cCockpit.cpp — routes touch to widget buttons (mode 3)
+bool cCockpit_ProcessTouch(float x, float y, uint32_t type, int64_t fingerId);
+#endif
+
 // transform SDL event into vector of abstract events
 #ifndef DEDICATED
 static void su_TransformEvent( SDL_Event & e, std::vector< uTransformEventInfo > & info )
 {
     switch (e.type)
     {
-    case SDL_MOUSEMOTION:
-        if (!su_enableTouch)
+    // SDL3: SDL_MOUSEMOTION → SDL_EVENT_MOUSE_MOTION
+    case SDL_EVENT_MOUSE_MOTION:
+        if (!su_enableTouch || su_gyroActive)
         {
             // ignore events generated by mouse grabbing
             if ( su_mouseGrab &&
@@ -1040,132 +1120,176 @@ static void su_TransformEvent( SDL_Event & e, std::vector< uTransformEventInfo >
             }
         }
         break;
-    case SDL_MOUSEBUTTONDOWN:
-    case SDL_MOUSEBUTTONUP:
+    // SDL3: SDL_MOUSEBUTTONDOWN → SDL_EVENT_MOUSE_BUTTON_DOWN
+    case SDL_EVENT_MOUSE_BUTTON_DOWN:
+    case SDL_EVENT_MOUSE_BUTTON_UP:
         {
             int button=e.button.button;
             if (button<=MOUSE_BUTTONS)
             {
                 info.push_back( uTransformEventInfo(
                                     su_GetMouseInput().button[ button ],
-                                    ( e.type == SDL_MOUSEBUTTONDOWN ) ? 1 : 0 ) );
+                                    ( e.type == SDL_EVENT_MOUSE_BUTTON_DOWN ) ? 1 : 0 ) );
             }
         }
         break;
-#if SDL_VERSION_ATLEAST(2,0,0)
-    case SDL_FINGERDOWN:
-    case SDL_FINGERUP:
-    case SDL_FINGERMOTION:
+    // SDL3: SDL_FINGERDOWN → SDL_EVENT_FINGER_DOWN, etc.
+    case SDL_EVENT_FINGER_DOWN:
+    case SDL_EVENT_FINGER_UP:
+    case SDL_EVENT_FINGER_MOTION:
         if (su_enableTouch==1)
         {
             static SDL_FingerID finger = 0;
+            static int finger_player = 1; // 1-based player for tracked brake finger
 
-            if (e.type == SDL_FINGERDOWN) {
-                float px = e.tfinger.x;
-                if (px<0.33)      info.push_back( uTransformEventInfo( su_GetTouchInput().turnLeft, 1 ) );
-                else if (px>0.67) info.push_back( uTransformEventInfo( su_GetTouchInput().turnRight, 1 ) );
-                else if (!finger) {
-                    finger = e.tfinger.fingerId;
-                    info.push_back( uTransformEventInfo( su_GetTouchInput().brake, 1 ) );
+            if (e.type == SDL_EVENT_FINGER_DOWN) {
+                float tx = e.tfinger.x;
+                float ty = e.tfinger.y;
+                int playerN = 1;
+#if defined(__ANDROID__) || (defined(__APPLE__) && TARGET_OS_IOS)
+                int vpIdx = su_FindViewportForTouch(tx, ty);
+                if (vpIdx >= 0) {
+                    playerN = sr_viewportBelongsToPlayer[vpIdx] + 1; // 0-based → 1-based
+                    // Get viewport-local x (0..1) for zone detection
+                    rViewport* vp = rViewportConfiguration::CurrentViewportConfiguration()->Port(vpIdx);
+                    tCoord pos = vp->GetPosition(); tCoord dim = vp->GetDimensions();
+                    float lx = (tx - pos.x) / (dim.x > 0 ? dim.x : 1.0f);
+                    float ly = (1.0f - ty - pos.y) / (dim.y > 0 ? dim.y : 1.0f);
+                    int rot = sr_GetViewportRotationDeg(rViewportConfiguration::CurrentConfNum(), vpIdx);
+                    su_RotateTouchCoord(lx, ly, rot);
+                    tx = lx; // use rotated local x for zone test below
                 }
-            } else if (e.type == SDL_FINGERUP) {
-                if (finger == e.tfinger.fingerId) {
+#endif
+                if (tx<0.33)      info.push_back( uTransformEventInfo( su_GetTouchInput(playerN).turnLeft, 1 ) );
+                else if (tx>0.67) info.push_back( uTransformEventInfo( su_GetTouchInput(playerN).turnRight, 1 ) );
+                else if (!finger) {
+                    finger = e.tfinger.fingerID;
+                    finger_player = playerN;
+                    info.push_back( uTransformEventInfo( su_GetTouchInput(playerN).brake, 1 ) );
+                }
+            } else if (e.type == SDL_EVENT_FINGER_UP) {
+                if (finger == e.tfinger.fingerID) {
                     finger = 0;
-                    info.push_back( uTransformEventInfo( su_GetTouchInput().brake, 0 ) );
+                    info.push_back( uTransformEventInfo( su_GetTouchInput(finger_player).brake, 0 ) );
                 }
             }
         }
-        else if (su_enableTouch>=2)
+        else if (su_enableTouch==2)
         {
-            static SDL_FingerID finger = 0;
-            static float dx=0, dy=0;
-            static char count = 0;
-            static int previous_dir = -1;
-            static int last_time = 0;
+            // Per-viewport state (one slot per viewport, up to MAX_VIEWPORTS)
+            struct VpState {
+                SDL_FingerID finger = 0;
+                float dx = 0, dy = 0;
+                char count = 0;
+                int previous_dir = -1;
+                Uint64 last_time = 0;
+                int playerN = 1;
+                int lockedVpIdx = -1; // viewport index locked at touch-down
+            };
+            static VpState vpStates[MAX_VIEWPORTS];
 
-            if (e.type == SDL_FINGERDOWN) {
-                // if new finger tracking, reset current state
-                if (!finger) {
-                    finger = e.tfinger.fingerId;
-                    count = 0;
-                    dx = 0; dy = 0;
-                    last_time = e.tfinger.timestamp;
-                    previous_dir = su_enableTouch==2 ? -1 : GetPlayerCameraClosestDirection(0);
-                }
-            } else if (e.type == SDL_FINGERUP) {
-                // release finger tracking if tracked finger is up
-                if (finger == e.tfinger.fingerId) finger = 0;
-            } else if (e.type == SDL_FINGERMOTION) {
-                // if this finger is tracked, process touch motion analysis
-                if (finger == e.tfinger.fingerId) {
-                    // check motion timeout reset current state
-                    if (e.tfinger.timestamp-last_time>50) {
-                        count = 0;
-                        dx = 0; dy = 0;
-                        last_time = e.tfinger.timestamp;
+            // Find which viewport slot to use
+            auto findSlot = [&](SDL_FingerID fid, int* outVp) -> VpState* {
+                for (int i = 0; i < MAX_VIEWPORTS; i++)
+                    if (vpStates[i].finger == fid) { if (outVp) *outVp = i; return &vpStates[i]; }
+                return nullptr;
+            };
+            auto freeSlot = [&]() -> VpState* {
+                for (int i = 0; i < MAX_VIEWPORTS; i++)
+                    if (!vpStates[i].finger) return &vpStates[i];
+                return nullptr; // all slots occupied
+            };
+
+            if (e.type == SDL_EVENT_FINGER_DOWN) {
+                if (!findSlot(e.tfinger.fingerID, nullptr)) {
+                    VpState* s = freeSlot();
+                    if (!s) break; // all slots occupied, ignore this finger
+                    s->finger = e.tfinger.fingerID;
+                    s->count = 0; s->dx = 0; s->dy = 0;
+                    s->last_time = e.tfinger.timestamp;
+                    s->playerN = 1;
+                    s->lockedVpIdx = -1;
+#if defined(__ANDROID__) || (defined(__APPLE__) && TARGET_OS_IOS)
+                    int vpIdx = su_FindViewportForTouch(e.tfinger.x, e.tfinger.y);
+                    if (vpIdx >= 0) {
+                        s->playerN = sr_viewportBelongsToPlayer[vpIdx] + 1;
+                        s->lockedVpIdx = vpIdx;
                     }
-                    last_time = e.tfinger.timestamp;
+#endif
+                    s->previous_dir = -1;
+                }
+            } else if (e.type == SDL_EVENT_FINGER_UP) {
+                VpState* s = findSlot(e.tfinger.fingerID, nullptr);
+                if (s) s->finger = 0;
+            } else if (e.type == SDL_EVENT_FINGER_MOTION) {
+                int vpIdx = -1; (void)vpIdx;
+                VpState* s = findSlot(e.tfinger.fingerID, &vpIdx);
+                if (s && s->finger == e.tfinger.fingerID) {
+                    if (e.tfinger.timestamp - s->last_time > 50000000) {
+                        s->count = 0; s->dx = 0; s->dy = 0;
+                        s->last_time = e.tfinger.timestamp;
+                    }
+                    s->last_time = e.tfinger.timestamp;
 
-                    // cumulate some motion to be more accurate
-                    dx+=e.tfinger.dx;
-                    dy+=e.tfinger.dy;
-                    ++count;
+                    float fdx = e.tfinger.dx, fdy = e.tfinger.dy;
+#if defined(__ANDROID__) || (defined(__APPLE__) && TARGET_OS_IOS)
+                    if (s->lockedVpIdx >= 0) {
+                        int rot = sr_GetViewportRotationDeg(rViewportConfiguration::CurrentConfNum(), s->lockedVpIdx);
+                        su_RotateTouchDelta(fdx, fdy, rot);
+                    }
+#endif
+                    s->dx += fdx;
+                    s->dy += fdy;
+                    ++s->count;
 
-                    if (count==4) {
-                        // if move is big enough, process it
-                        if (dx*dx+dy*dy>0.0001) {
-                            float a = atan2f(dx, -dy);
-                            int axes = GetPlayerWindingNumber(0);
-                            a = (a<0?fabs(a+M_PI*2.0f):a) * axes / (M_PI*2.0f);
-                            int dir = static_cast<int>(round(a)) % axes; // direction of this move
-                            int side = (a-round(a))<0?0:1;               // from which side
-                            // if direction changed, generate 1 or more turns
-                            if (previous_dir!=dir) {
-                                int diff_dir = previous_dir==-1 ? dir : dir - previous_dir;
-                                diff_dir = diff_dir>axes/2 ? diff_dir - axes : diff_dir<-axes/2 ? axes + diff_dir : diff_dir;
-                                // handling the annoying case where you're trying to do a u-turn.
-                                // we need to take care from which side we are coming from (really dangerous move as
-                                // detection might failed).
-                                if (diff_dir!=0) {
-                                    if ((diff_dir==axes/2 && side==1)||(diff_dir==-axes/2 && side==0)) diff_dir=-diff_dir;
-                                    uInput* input = diff_dir<0 ? su_GetTouchInput().turnLeft : su_GetTouchInput().turnRight;
-                                    for(int i=abs(diff_dir); i==1; --i) {
+                    if (s->count == 4) {
+                        if (s->dx*s->dx + s->dy*s->dy > 0.0001f) {
+                            float a = atan2f(s->dx, -s->dy);
+                            int player0 = s->playerN - 1; // 0-based
+                            int axes = GetPlayerWindingNumber(player0);
+                            if (axes < 2) axes = 4; // fallback
+                            a = (a<0 ? fabsf(a+(float)M_PI*2.0f) : a) * axes / ((float)M_PI*2.0f);
+                            int dir = static_cast<int>(roundf(a)) % axes;
+                            int side = (a - roundf(a)) < 0 ? 0 : 1;
+                            if (s->previous_dir != dir) {
+                                int diff_dir = s->previous_dir == -1 ? dir : dir - s->previous_dir;
+                                diff_dir = diff_dir>axes/2 ? diff_dir-axes : diff_dir<-axes/2 ? axes+diff_dir : diff_dir;
+                                if (diff_dir != 0) {
+                                    if ((diff_dir==axes/2&&side==1)||(diff_dir==-axes/2&&side==0)) diff_dir=-diff_dir;
+                                    uInput* input = diff_dir<0 ? su_GetTouchInput(s->playerN).turnLeft
+                                                               : su_GetTouchInput(s->playerN).turnRight;
+                                    for (int i = abs(diff_dir); i == 1; --i)
                                         info.push_back( uTransformEventInfo( input, 1 ) );
-                                    }
                                 }
-                                previous_dir=dir;
+                                s->previous_dir = dir;
                             }
                         }
-                        count = 0;
-                        dx = 0; dy = 0;
+                        s->count = 0; s->dx = 0; s->dy = 0;
                     }
                 }
             }
         }
-        break;
-#endif
-    case SDL_KEYDOWN:
-    case SDL_KEYUP:
+        else if (su_enableTouch==3)
         {
-#if SDL_VERSION_ATLEAST(2,0,0)
+            // Mode 3: cockpit widget buttons — forward to cCockpit
+            cCockpit_ProcessTouch(e.tfinger.x, e.tfinger.y, e.type, e.tfinger.fingerID);
+        }
+        break;
+    // SDL3: SDL_KEYDOWN → SDL_EVENT_KEY_DOWN, keysym → direct key access
+    case SDL_EVENT_KEY_DOWN:
+    case SDL_EVENT_KEY_UP:
+        {
             if (e.key.repeat) break;
-            SDL_Keysym &c = e.key.keysym;
-#else
-            SDL_keysym &c = e.key.keysym;
-#endif
 
             info.push_back( uTransformEventInfo(
-#if SDL_VERSION_ATLEAST(2,0,0)
-                                su_GetKeyInput().sdl_keys[ c.scancode ],
-#else
-                                su_GetKeyInput().sdl_keys[ c.sym ],
-#endif
-                                ( e.type == SDL_KEYDOWN ) ? 1 : 0 ) );
+                                su_GetKeyInput().sdl_keys[ e.key.scancode ],
+                                ( e.type == SDL_EVENT_KEY_DOWN ) ? 1 : 0 ) );
 
             break;
         }
 #ifndef NOJOYSTICK
-    case SDL_JOYAXISMOTION:
+    // SDL3: SDL_JOYAXISMOTION → SDL_EVENT_JOYSTICK_AXIS_MOTION
+    case SDL_EVENT_JOYSTICK_AXIS_MOTION:
         {
             uJoystick * joystick = su_GetJoystick( e.jaxis.which );
             if(!joystick) break;
@@ -1180,17 +1304,19 @@ static void su_TransformEvent( SDL_Event & e, std::vector< uTransformEventInfo >
 
             break;
         }
-    case SDL_JOYBUTTONDOWN:
-    case SDL_JOYBUTTONUP:
+    // SDL3: SDL_JOYBUTTONDOWN → SDL_EVENT_JOYSTICK_BUTTON_DOWN
+    case SDL_EVENT_JOYSTICK_BUTTON_DOWN:
+    case SDL_EVENT_JOYSTICK_BUTTON_UP:
     {
         uJoystick * joystick = su_GetJoystick( e.jbutton.which );
         if(!joystick) break;
         info.push_back( uTransformEventInfo(
                             joystick->GetButton( e.jbutton.button ),
-                            ( e.type == SDL_JOYBUTTONDOWN ) ? 1 : 0 ) );
+                            ( e.type == SDL_EVENT_JOYSTICK_BUTTON_DOWN ) ? 1 : 0 ) );
     }
     break;
-    case SDL_JOYHATMOTION:
+    // SDL3: SDL_JOYHATMOTION → SDL_EVENT_JOYSTICK_HAT_MOTION
+    case SDL_EVENT_JOYSTICK_HAT_MOTION:
         {
             info.reserve(4);
 
@@ -1280,7 +1406,8 @@ static void su_TransformEvent( SDL_Event & e, std::vector< uTransformEventInfo >
             }
         }
         break;
-    case SDL_JOYBALLMOTION:
+    // SDL3: SDL_JOYBALLMOTION → SDL_EVENT_JOYSTICK_BALL_MOTION
+    case SDL_EVENT_JOYSTICK_BALL_MOTION:
         {
             uJoystick * joystick = su_GetJoystick( e.jball.which );
             if(!joystick) break;
@@ -1364,6 +1491,8 @@ public:
 };
 }
 
+#ifndef DEDICATED
+
 static void s_InputConfigGeneric(int ePlayer, uAction *&actions,const tOutput &title){
     uMenu input_menu(title);
 
@@ -1408,6 +1537,8 @@ void su_InputConfigGlobal(){
     s_InputConfigGeneric(-1,s_globalActions,"$input_items_global");
 }
 
+#endif // !DEDICATED input configuration menus
+
 
 REAL key_sensitivity=40;
 static double lastTime=0;
@@ -1435,7 +1566,8 @@ void su_HandleDelayedEvents ()
     }
 }
 
-bool su_HandleEvent(SDL_Event &e, bool delayed ){
+// Internal implementation using SDL_Event (will be refactored in future sprint)
+static bool su_HandleEventInternal(SDL_Event &e, bool delayed ){
 #ifndef DEDICATED
     if ( su_delayed && !delayed )
     {
@@ -1486,6 +1618,30 @@ bool su_HandleEvent(SDL_Event &e, bool delayed ){
     return false;
 }
 
+// Platform-agnostic event handler (preferred API)
+bool su_HandleEvent(const uEvent &e, bool delayed)
+{
+#ifndef DEDICATED
+    // Convert uEvent back to SDL_Event for now
+    // Future sprint will refactor su_TransformEvent to use uEvent directly
+    SDL_Event sdlEvent;
+    if (uEventSDL::ToSDLEvent(e, sdlEvent))
+    {
+        return su_HandleEventInternal(sdlEvent, delayed);
+    }
+#else
+    (void)e;
+    (void)delayed;
+#endif
+    return false;
+}
+
+// SDL event handler (backward compatibility)
+bool su_HandleEvent(SDL_Event &e, bool delayed)
+{
+    return su_HandleEventInternal(e, delayed);
+}
+
 void su_InputSync(){
     double time=tSysTimeFloat();
     ts=REAL(time-lastTime);
@@ -1521,6 +1677,13 @@ void su_ClearKeys()
             input->SetPressed( 0 );
         }
     }
+
+#ifndef DEDICATED
+    // Flush any pending text input events so the key that triggered a menu
+    // (e.g. the console hotkey ~) doesn't land in the text field when the
+    // menu opens. SDL3 does not flush these automatically.
+    SDL_FlushEvent( SDL_EVENT_TEXT_INPUT );
+#endif
 }
 
 // *****************
@@ -1854,8 +2017,10 @@ void uActionTooltip::ReadVal(std::istream & s )
 }
 
 // *****************************************************
-//  Menuitem for input selection
+//  Menuitem for input selection (graphical client only)
 // *****************************************************
+
+#ifndef DEDICATED
 
 uMenuItemInput::uMenuItemInput(uMenu *M,uAction *a,int p)
     :uMenuItem(M,a->helpText),act(a),ePlayer(p),active(0)
@@ -1912,17 +2077,12 @@ void uMenuItemInput::Enter()
 
 bool uMenuItemInput::Event(SDL_Event &e)
 {
-#ifndef DEDICATED
-    if ( e.type == SDL_KEYDOWN )
+    // SDL3: SDL_KEYDOWN → SDL_EVENT_KEY_DOWN, keysym removed
+    if ( e.type == SDL_EVENT_KEY_DOWN )
     {
-#if SDL_VERSION_ATLEAST(2,0,0)
-        SDL_Keysym &c = e.key.keysym;
-#else
-        SDL_keysym &c = e.key.keysym;
-#endif
         if (!active)
         {
-            if (c.sym==SDLK_DELETE || c.sym==SDLK_BACKSPACE)
+            if (e.key.key==SDLK_DELETE || e.key.key==SDLK_BACKSPACE)
             {
                 // clear all bindings
                 for ( uInputs::const_iterator i = su_inputs.begin(); i != su_inputs.end(); ++i )
@@ -1941,7 +2101,7 @@ bool uMenuItemInput::Event(SDL_Event &e)
         }
 
         // ignore escape
-        if ( c.sym == SDLK_ESCAPE )
+        if ( e.key.key == SDLK_ESCAPE )
         {
             return false;
         }
@@ -1972,6 +2132,7 @@ bool uMenuItemInput::Event(SDL_Event &e)
             return true;
         }
     }
-#endif
     return false;
 }
+
+#endif // !DEDICATED uMenuItemInput methods

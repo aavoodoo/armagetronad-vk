@@ -1890,7 +1890,7 @@ int nSocket::Create( void )
 
     int socktype = socktype_;
 #ifndef WIN32
-#ifndef MACOSX
+#ifndef __APPLE__
     socktype |= SOCK_CLOEXEC;
 #endif
 #endif

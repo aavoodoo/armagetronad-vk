@@ -38,6 +38,7 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 //#include "tList.h"
 #include <iostream>
 #include <memory>
+#include <mutex>
 #include <stdlib.h>
 #include "eGrid.h"
 #include "tException.h"
@@ -161,26 +162,32 @@ static bool se_SoundInitPrepare()
         char * arg = "SDL_AUDIODRIVER=" STRING(DEFAULT_SDL_AUDIODRIVER);
         putenv(arg);
 
-        if ( SDL_InitSubSystem(SDL_INIT_AUDIO) >= 0 )
+        // SDL3: SDL_InitSubSystem returns true on success (opposite of SDL2)
+        if ( SDL_InitSubSystem(SDL_INIT_AUDIO) )
             return true;
 
         putenv("SDL_AUDIODRIVER=");
     }
 
     // if that fails, try what the user wanted
-    return ( SDL_InitSubSystem(SDL_INIT_AUDIO) >= 0 );
+    // SDL3: SDL_InitSubSystem returns true on success
+    return SDL_InitSubSystem(SDL_INIT_AUDIO);
 }
 #endif
 #endif
 
 #ifndef DEDICATED
 static unsigned int locks;
+// Intentionally leaked to survive static destruction order — eLegacyWavData
+// statics may be destroyed after a file-scope mutex, causing a lock on a
+// destroyed mutex. A heap-allocated mutex is never destroyed.
+static std::mutex& soundMutex = *new std::mutex;
 #endif
 
 void se_SoundLock(){
 #ifndef DEDICATED
     if (!locks)
-        SDL_LockAudio();
+        soundMutex.lock();
     locks++;
 #endif
 }
@@ -189,13 +196,15 @@ void se_SoundUnlock(){
 #ifndef DEDICATED
     locks--;
     if (!locks)
-        SDL_UnlockAudio();
+        soundMutex.unlock();
 #endif
 }
 
 void se_SoundPause(bool p){
 #ifndef DEDICATED
-    SDL_PauseAudio(p);
+    // SDL3: SDL_PauseAudio removed. Audio pausing is now handled by miniaudio.
+    // This function is kept for compatibility but does nothing in SDL3.
+    (void)p;
 #endif
 }
 
@@ -235,11 +244,12 @@ void eLegacyWavData::Load()
     try
     {
         Uint32 len;
-        SDL_AudioSpec *result=SDL_LoadWAV(path.GetReadPath(filename), &spec, &byteData, &len);
-        if (result!=&spec || !byteData){
+        // SDL3: SDL_LoadWAV returns bool
+        bool result = SDL_LoadWAV(path.GetReadPath(filename), &spec, &byteData, &len);
+        if (!result || !byteData){
             if (filename_alt.Len()>1){
-                result=SDL_LoadWAV(path.GetReadPath(filename_alt), &spec, &byteData, &len);
-                if (result!=&spec || !byteData)
+                result = SDL_LoadWAV(path.GetReadPath(filename_alt), &spec, &byteData, &len);
+                if (!result || !byteData)
                 {
                     tOutput err;
                     err.SetTemplateParameter(1, filename);
@@ -250,8 +260,8 @@ void eLegacyWavData::Load()
                     alt=true;
             }
             else{
-                result=SDL_LoadWAV(path.GetReadPath("sound/expl.ogg"), &spec, &byteData, &len);
-                if (result!=&spec || !byteData)
+                result = SDL_LoadWAV(path.GetReadPath("sound/expl.ogg"), &spec, &byteData, &len);
+                if (!result || !byteData)
                 {
                     tOutput err;
                     err.SetTemplateParameter(1, "sound/expl.ogg");
@@ -266,7 +276,8 @@ void eLegacyWavData::Load()
               "Armagetron from the right directory?"); */
         }
 
-        if (spec.format==AUDIO_S16SYS)
+        // SDL3: SDL_AUDIO_S16 renamed to SDL_AUDIO_S16
+        if (spec.format == SDL_AUDIO_S16)
         {
             SetData(byteData, len);
         }
@@ -279,31 +290,28 @@ void eLegacyWavData::Load()
                 throw tGenericException(err, errorName);
             };
 
-            // convert to 16 bit system format
-            SDL_AudioCVT cvt;
-            if ( -1 == SDL_BuildAudioCVT( &cvt, spec.format, spec.channels, spec.freq, AUDIO_S16SYS, spec.channels, spec.freq ) )
+            // SDL3: Convert audio using SDL_ConvertAudioSamples
+            SDL_AudioSpec dstSpec;
+            dstSpec.format = SDL_AUDIO_S16;
+            dstSpec.channels = spec.channels;
+            dstSpec.freq = spec.freq;
+
+            Uint8 *dstData = nullptr;
+            int dstLen = 0;
+
+            if (!SDL_ConvertAudioSamples(&spec, byteData, static_cast<int>(len), &dstSpec, &dstData, &dstLen))
             {
                 throwError();
             }
 
-            std::vector<Uint8> buf;
-            buf.resize(len * cvt.len_mult);
-            cvt.buf=&buf[0];
-            cvt.len=len;
-            memcpy(cvt.buf, byteData, len);
-
-            if ( -1 == SDL_ConvertAudio( &cvt ) )
-            {
-                throwError();
-            }
-
-            spec.format = AUDIO_S16SYS;
-            SetData(cvt.buf, cvt.len_cvt);
+            spec.format = SDL_AUDIO_S16;
+            SetData(dstData, static_cast<Uint32>(dstLen));
+            SDL_free(dstData);
         }
     }
     catch(...){
         if(byteData)
-            SDL_FreeWAV(byteData);
+            SDL_free(byteData);  // SDL3: SDL_FreeWAV renamed to SDL_free
         throw;
     }
 
@@ -311,8 +319,8 @@ void eLegacyWavData::Load()
 #ifdef LINUX
     con << "Sound file " << filename << " loaded: ";
     switch (spec.format){
-    case AUDIO_S16SYS: con << "16 bit "; break;
-    case AUDIO_U8: con << "8 bit "; break;
+    case SDL_AUDIO_S16: con << "16 bit "; break;
+    case SDL_AUDIO_U8: con << "8 bit "; break;
     default: con << "unknown "; break;
     }
     if (spec.channels==2)
@@ -367,7 +375,7 @@ eLegacyWavData::~eLegacyWavData(){
 }
 
 // from eSoundMixer.cpp
-// extern int se_mixerFrequency;
+extern int se_mixerFrequency;
 
 #ifndef DEDICATED
 
@@ -498,7 +506,7 @@ bool eLegacyWavData::Mix(Sint16 *dest,Uint32 playlen,eAudioPos &pos,
         if (spec.channels==2){
             switch(spec.format)
             {
-                case AUDIO_S16SYS:
+                case SDL_AUDIO_S16:
                 {
                     auto poller = [&](Uint32 pos)
                     {
@@ -519,7 +527,7 @@ bool eLegacyWavData::Mix(Sint16 *dest,Uint32 playlen,eAudioPos &pos,
         {
             switch(spec.format)
             {
-                case AUDIO_S16SYS:
+                case SDL_AUDIO_S16:
                 {
                     auto poller = [&](Uint32 pos)
                     {
@@ -554,7 +562,7 @@ bool eLegacyWavData::Mix(Sint16 *dest,Uint32 playlen,eAudioPos &pos,
 
 void eLegacyWavData::Loop(){
 #ifndef DEDICATED
-    if (spec.format==AUDIO_S16SYS){
+    if (spec.format==SDL_AUDIO_S16){
         std::vector<Sint16> buff2;
         using std::swap;
         swap(buff2, data);

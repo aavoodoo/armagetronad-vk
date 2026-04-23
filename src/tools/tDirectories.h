@@ -30,6 +30,9 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 #define ArmageTron_tDirectories_H
 
 #include <fstream>
+#ifdef __APPLE__
+#include <TargetConditionals.h>
+#endif
 #include "tArray.h"
 #include "tString.h"
 #include "tCommandLine.h"
@@ -114,6 +117,12 @@ public:
 
     static void SetData( const tString& dir );       // set location of data directory
     static void SetUserData( const tString& dir );   // set location of user data directory
+#ifdef __ANDROID__
+    static void InitAndroid();                        // set up Android paths via SDL_GetPrefPath
+#endif
+#if defined(__APPLE__) && TARGET_OS_IOS
+    static void InitiOS();                            // set up iOS paths via SDL_GetBasePath/PrefPath
+#endif
     static void SetConfig( const tString& dir );     // set location of config directory
     static void SetUserConfig( const tString& dir ); // set location of user config directory
     static void SetVar( const tString& dir );        // set location of var directory

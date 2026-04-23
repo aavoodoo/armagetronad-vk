@@ -20,7 +20,7 @@ GNU General Public License for more details.
 You should have received a copy of the GNU General Public License
 along with this program; if not, write to the Free Software
 Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
-  
+
 ***************************************************************************
 
 */
@@ -29,18 +29,13 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 #define ArmageTron_THREAD_H
 
 #include "defs.h"
-
-#ifdef HAVE_BOOST_THREAD
-
-#include <boost/thread/thread.hpp>
-
-#else // HAVE_BOOST_THREAD
+#include <thread>
 
 #ifdef HAVE_PTHREAD
-
 #include <pthread.h>
+#endif
 
-// replicate the little we actually use with PThreads
+// Provide boost-compatible interface for code that uses boost::thread::attributes
 namespace boost
 {
 class thread
@@ -55,26 +50,25 @@ public:
     template< class T>
     void launch( attributes const & a, T const & t )
     {
-        // we don't currently hang on to thread objects, so no need to store handles
-        pthread_t thread;
-
-        // make a copy of the object to call
-        T * o = new T(t);
-
+#ifdef HAVE_PTHREAD
+        // Use pthreads when we need to set stack size
         if(a.stack_size)
         {
+            pthread_t pthread;
+            T * o = new T(t);
+
             pthread_attr_t attr;
             pthread_attr_init(&attr);
             pthread_attr_setstacksize(&attr, a.stack_size);
 
-            pthread_create(&thread, &attr, &run<T>, (void*) o);
+            pthread_create(&pthread, &attr, &run<T>, (void*) o);
 
             pthread_attr_destroy(&attr);
+            return;
         }
-        else
-        {
-            pthread_create(&thread, nullptr, &run<T>, (void*) o);
-        }
+#endif
+        // Use std::thread when no special attributes needed
+        std::thread([t]() mutable { t(); }).detach();
     }
 
     template< class T>
@@ -90,8 +84,10 @@ public:
     }
 
     void detach(){}
+
 private:
-    // worker function
+#ifdef HAVE_PTHREAD
+    // worker function for pthread
     template< class T >
     static void * run( void * o )
     {
@@ -105,11 +101,8 @@ private:
 
         return NULL;
     }
+#endif
 };
 }
-
-#endif // HAVE_PTHREAD
-
-#endif // HAVE_BOOST_THREAD
 
 #endif

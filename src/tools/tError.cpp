@@ -29,6 +29,9 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 #include <iostream>
 #include <string.h>
 #include <cstdlib>
+#ifdef __ANDROID__
+#include <android/log.h>
+#endif
 #if HAVE_UNISTD_H
 #include <unistd.h>
 #endif
@@ -56,6 +59,9 @@ void st_Breakpoint(){
 void st_PresentError( const char* caption, const char *message )
 {
     std::cerr << caption << ": " << message << "\n";
+#ifdef __ANDROID__
+    __android_log_print(ANDROID_LOG_ERROR, "AA_ERROR", "%s: %s", caption, message);
+#endif
     st_Breakpoint();
     static bool error = true; // to disable the error if it is inconvenient right now and you think it may not be fatal
     if ( error )

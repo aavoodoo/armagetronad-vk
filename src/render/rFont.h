@@ -39,28 +39,10 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 #include <map>
 #include <vector>
 
-#if defined(HAVE_FTGL_FTGL_H) || defined(HAVE_FTGL_H)
-// also, the installed version of ftgl then has utf8 support. presumably. use it.
-#define FTGL_HAS_UTF8
-#else
-// alternative includes go here
-#endif
-
-// defines for interface with FTGL
-#ifdef FTGL_HAS_UTF8
-// typedefs for chars and strings
+// Font character/string types (UTF-8 based)
 #define FTGL_CHAR char
 #define FTGL_STRING std::string
-// macro expecting a tString as 'in' and producing at least a 'const FTGL_STRING &' as out, living at least as long as in does.
 #define STRING_TO_FTGL( in, out ) FTGL_STRING const & out = in
-#else
-// description: see other branch
-#define FTGL_CHAR wchar_t
-#define FTGL_STRING std::wstring
-// function to convert utf8 to wchar strings. Only needed if utf8 is not supported natively.
-void sr_utf8216(tString const &in, std::wstring &out);
-#define STRING_TO_FTGL( in, out ) FTGL_STRING out;  sr_utf8216(in, out)
-#endif // FTGL_HAS_UTF8
 
 //! Different types of fonts, they might get different font files assigned
 enum sr_fontClass {
@@ -77,20 +59,18 @@ enum sr_fontClass {
     sr_fontServerDetails = 02000  //!< for the details displayed in the server browser (server description, player names etc)
 };
 
-//! Different ways to render fonts
+//! Different ways to render fonts (legacy enum, kept for config compatibility)
 enum sr_fontTypes {
     sr_fontOld       = 0, //!< The old font, deprecated
-    sr_fontPixmap    = 1, //!< FTGLPixmapFont
-    sr_fontBitmap    = 2, //!< FTGLBitmapFont
-    sr_fontTexture   = 3, //!< FTGLTextureFont
-    sr_fontPolygon   = 4, //!< FTGLPolygonFont
-    sr_fontOutline   = 5, //!< FTGLOutlineFont
-    sr_fontExtruded  = 6  //!< FTGLExtrdFont (experimental)
+    sr_fontPixmap    = 1, //!< Pixmap font (legacy)
+    sr_fontBitmap    = 2, //!< Bitmap font (legacy)
+    sr_fontTexture   = 3, //!< Texture font (default)
+    sr_fontPolygon   = 4, //!< Polygon font (legacy)
+    sr_fontOutline   = 5, //!< Outline font (legacy)
+    sr_fontExtruded  = 6  //!< Extruded font (legacy)
 };
 
 extern int sr_fontType;
-
-class FTFont;
 
 // maybe make this a child of std::ostream...
 class rTextField{
@@ -222,41 +202,6 @@ private:
     inline void WriteChar(FTGL_CHAR c); //!< writes a single character as it is, no automatic newline breaking
 };
 
-//! Text box class with wrapping: unlike rTextField this is designed to stay in memory all the time and only re- wrap/interpret colors if the contents change
-class rTextBox {
-public:
-    rTextBox(float size, tCoord const &pos, float width); //!< default constructor
-    void SetText(tString const &); //!< changes the text contained in the text box and re- computes contents
-    void Render(void) const; //!< renders the text
-private:
-    //! class for single font items (one line, one color)
-    class item {
-        tCoord m_pos; //!< the top- left position of the text
-        float m_size; //!< the color to be used
-        FTGL_STRING m_text; //!< the text to be rendered
-        rColor m_color; //!< the color to be used
-    public:
-        inline item(tCoord const &pos, float size, FTGL_STRING const &text, tColor const &color); //!< default constructor
-        void Render(void) const; //!< renders the text
-    };
-    float m_size; //!< the size of the font to be used
-    tCoord m_pos; //!< the top-left corner of the font
-    float m_width; //!< the width to be wrapped at
-
-    std::vector<item> m_items; //!< the split- up font items
-};
-
-//! @param pos the top- left position of the text
-//! @param size the height of the text
-//! @param text the text to be rendered
-//! @param color the color to be used
-inline rTextBox::item::item(tCoord const &pos, float size, FTGL_STRING const &text, tColor const &color) :
-        m_pos(pos),
-        m_size(size),
-        m_text(text),
-        m_color(color)
-{}
-
 rTextField & operator<<(rTextField &c,const FTGL_STRING &x);
 template<class T> rTextField & operator<<(rTextField &c,const T &x){
     tColoredString out;
@@ -324,6 +269,9 @@ rTextField & rTextField::SetColor( tColor const & color )
 }
 //! Reloads the font (in case the resolution or font type changes)
 void sr_ReloadFont(void);
+
+//! Debug: render font atlas texture as overlay (controlled by SHOW_FONT_ATLAS console var)
+void sr_RenderFontAtlas(void);
 
 #endif
 

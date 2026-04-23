@@ -28,7 +28,6 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 #ifndef ArmageTron_INPUT_H
 #define ArmageTron_INPUT_H
 
-#include "rSDL.h"
 #include "tString.h"
 #include "defs.h"
 #include "tLinkedList.h"
@@ -255,7 +254,7 @@ public:
     std::string const Name(){ return name_; }
 private:
     int ID_;               //!< local ID for this program run
-    tString persistentID_; //!< global ID that does not change over program runs; scancode for SDL2
+    tString persistentID_; //!< global ID that does not change over program runs (platform scancode)
     tString name_;         //!< human readable name
 
     tJUST_CONTROLLED_PTR< uBind > bound_; //!< the binding
@@ -330,8 +329,18 @@ public:
 void su_InputConfig(int player);
 void su_InputConfigCamera(int player);
 void su_InputConfigGlobal();
-bool su_HandleEvent(SDL_Event &e, bool delayed );	// handle event during gameplay
-void su_HandleDelayedEvents( );				// set menu state
+
+// Event handling - platform-agnostic version (preferred)
+struct uEvent;
+bool su_HandleEvent(const uEvent &e, bool delayed);   // handle event during gameplay (platform-agnostic)
+
+#ifndef DEDICATED
+// Event handling - SDL version (for backward compatibility with existing code)
+union SDL_Event;
+bool su_HandleEvent(SDL_Event &e, bool delayed );     // handle event during gameplay (SDL)
+#endif // !DEDICATED
+
+void su_HandleDelayedEvents( );                       // set menu state
 
 void su_InputSync(); // tells the input system that a new frame has been drawn;
 // autorepeat functions may be called.
@@ -343,9 +352,17 @@ void su_KeyInit();
 // initialize joysticks
 void su_JoystickInit();
 
+// on mobile: default ENABLE_TOUCH to 3 if still 0 after config load
+void su_EnableTouchDefault();
+
+// returns current value of ENABLE_TOUCH setting
+int su_GetEnableTouch();
+
 // *****************************************************
-//  Menuitem for input selection
+//  Menuitem for input selection (graphical client only)
 // *****************************************************
+
+#ifndef DEDICATED
 
 class uMenuItemInput: uMenuItem
 {
@@ -366,6 +383,7 @@ public:
         return ret;
     }
 };
+#endif // !DEDICATED
 
 #endif
 

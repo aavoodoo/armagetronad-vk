@@ -57,6 +57,10 @@ fb("FLOOR_BLUE",floor_blue);
 #include "rRender.h"
 #include "uMenu.h"
 #include "tSysTime.h"
+#include "rVertex.h"
+#include "rRenderQueue.h"
+#include "rRenderBucket.h"
+#include <vector>
 
 #include "nConfig.h"
 /*
@@ -92,12 +96,24 @@ static rFileTexture mp_floor_b(rTextureGroups::TEX_FLOOR,"moviepack/floor_b.png"
 rFileTexture ArmageTron_floor(rTextureGroups::TEX_FLOOR,"textures/floor.png",1,1);
 rFileTexture ArmageTron_mp_floor(rTextureGroups::TEX_FLOOR,"moviepack/floor.png",1,1);
 
+// Reset moviepack floor textures (for moviepack switching)
+void gFloor_ResetTextures()
+{
+    mp_floor_a.Unload();
+    mp_floor_b.Unload();
+    ArmageTron_mp_floor.Unload();
+    // Also unload regular floor textures so they reload properly when switching to "None"
+    floor_a.Unload();
+    floor_b.Unload();
+    ArmageTron_floor.Unload();
+}
+
 class gFloor: public eFloor{
 public:
     gFloor(){};
     virtual ~gFloor(){};
 
-    virtual void glFloorColor(REAL alpha, REAL intens){
+    virtual void SetFloorColor(REAL alpha, REAL intens){
         if (!sr_glOut)
             return;
 
@@ -122,21 +138,21 @@ public:
     }
 
 
-    virtual void glFloorTexture(){
+    virtual void SelectFloorTexture(){
         if (sg_MoviePack())
             ArmageTron_mp_floor.Select();
         else
             ArmageTron_floor.Select();
     }
 
-    virtual void glFloorTexture_a(){
+    virtual void SelectFloorTextureA(){
         if (sg_MoviePack())
             mp_floor_a.Select();
         else
             floor_a.Select();
     }
 
-    virtual void glFloorTexture_b(){
+    virtual void SelectFloorTextureB(){
         if (sg_MoviePack())
             mp_floor_b.Select();
         else
@@ -160,65 +176,116 @@ static gFloor GFLOOR;
 
 static void MenuBackground(){
     if (rTextureGroups::TextureMode[rTextureGroups::TEX_FLOOR]>=0){
-        se_glFloorTexture();
-        se_glFloorColor(1,1);
+        se_SelectFloorTexture();
+        se_SetFloorColor(1,1);
 
+        // Get currently bound texture ID
+        unsigned int textureId = RenderGetBoundTexture2D();
+
+        // Force texture to repeat mode for tiling
+        RenderTexParameter(rGLConst::Texture2D, rGLConst::TextureWrapS, rGLConst::Repeat);
+        RenderTexParameter(rGLConst::Texture2D, rGLConst::TextureWrapT, rGLConst::Repeat);
+
+        // Get floor color for tinting (dark greenish-blue)
+        REAL floorR, floorG, floorB;
+        se_FloorColor(floorR, floorG, floorB);
+        uint8_t colorR = static_cast<uint8_t>(floorR * 255.0f);
+        uint8_t colorG = static_cast<uint8_t>(floorG * 255.0f);
+        uint8_t colorB = static_cast<uint8_t>(floorB * 255.0f);
+
+        // Calculate animated texture offset (same as original)
         double x1=tSysTimeFloat()/3.0;
         double y1=tSysTimeFloat()/5.0;
         REAL width=16;
         REAL height=12;
 
-        GLfloat tm[4][4]={{.8,.2,0,0},
-                          {-.2,.8,0,0},
-                          {0,0,1,0},
-                          {0,0,0,1}};
+        // Build rotation/scale matrix (same as original)
+        float tm[4][4]={{.8f,.2f,0,0},
+                        {-.2f,.8f,0,0},
+                        {0,0,1,0},
+                        {0,0,0,1}};
 
+        REAL aspectScale = (sr_screenWidth*3.0)/(sr_screenHeight*4.0);
+        tm[0][0] *= aspectScale;
+        tm[0][1] *= aspectScale;
 
-
-        REAL scale = (sr_screenWidth*3.0)/(sr_screenHeight*4.0);
-        tm[0][0] *= scale;
-        tm[0][1] *= scale;
-
-        // make texture coordinates not too big, wrap them around.
-        // unfortunately, we need to transform them with tm, then clamp them,
-        // then transform them back.
+        // Calculate wrapped animated offset (same as original)
+        // Transform offset by rotation matrix, wrap to 0-1, then inverse transform
         double x2 = x1*tm[0][0] + y1*tm[1][0];
         double y2 = x1*tm[0][1] + y1*tm[1][1];
-        x2-=floor(x2);
-        y2-=floor(y2);
-        REAL x = x2*tm[1][1] - y2*tm[1][0];
-        REAL y = -x2*tm[0][1] + y2*tm[0][0];
-        const REAL det=1/(tm[0][0]*tm[1][1]-tm[0][1]*tm[1][0]);
-        x*=det;
-        y*=det;
-        //x=x1;
-        //y=y1;
+        x2 -= floor(x2);
+        y2 -= floor(y2);
+        REAL offsetX = x2*tm[1][1] - y2*tm[1][0];
+        REAL offsetY = -x2*tm[0][1] + y2*tm[0][0];
+        const REAL det = 1.0f/(tm[0][0]*tm[1][1] - tm[0][1]*tm[1][0]);
+        offsetX *= det;
+        offsetY *= det;
 
-        TexMatrix();
-        glLoadMatrixf(&tm[0][0]);
+        // Build combined matrix: M = tm * translate(offset) * scale(width, -height)
+        // C++ row-major storage interpreted as OpenGL column-major:
+        // - Row 0 becomes column 0
+        // - Row 3 becomes column 3 (translation)
+        // OpenGL matrix layout:
+        //   [tm[0][0]*width   tm[1][0]*(-h)  0  tx]   where tx = tm[0][0]*x + tm[1][0]*y
+        //   [tm[0][1]*width   tm[1][1]*(-h)  0  ty]   where ty = tm[0][1]*x + tm[1][1]*y
+        //   [0                0              1  0 ]
+        //   [0                0              0  1 ]
+        float finalTm[4][4];
 
-        // glScalef(1., 1., 1.);
-        // glScalef((REAL)sr_screenWidth/sr_screenHeight/4. * 3., 1., 1.);
+        // Row 0 -> OpenGL column 0
+        finalTm[0][0] = tm[0][0] * width;
+        finalTm[0][1] = tm[0][1] * width;
+        finalTm[0][2] = 0;
+        finalTm[0][3] = 0;
 
+        // Row 1 -> OpenGL column 1
+        finalTm[1][0] = tm[1][0] * (-height);
+        finalTm[1][1] = tm[1][1] * (-height);
+        finalTm[1][2] = 0;
+        finalTm[1][3] = 0;
 
-        BeginQuads();
+        // Row 2 -> OpenGL column 2
+        finalTm[2][0] = 0;
+        finalTm[2][1] = 0;
+        finalTm[2][2] = 1;
+        finalTm[2][3] = 0;
 
-        glTexCoord2d(x,y);
-        glVertex2f(-1,-1);
+        // Row 3 -> OpenGL column 3 (translation, transformed by rotation)
+        finalTm[3][0] = tm[0][0] * offsetX + tm[1][0] * offsetY;
+        finalTm[3][1] = tm[0][1] * offsetX + tm[1][1] * offsetY;
+        finalTm[3][2] = 0;
+        finalTm[3][3] = 1;
 
-        glTexCoord2d(x+width,y);
-        glVertex2f(1,-1);
+        // Generate fullscreen quad with 0-1 UVs and floor color tint
+        std::vector<rVertex20> vertices;
+        vertices.reserve(6);
 
-        glTexCoord2d(x+width,y-height);
-        glVertex2f(1,1);
+        // Triangle 1 (bottom-left, bottom-right, top-right)
+        vertices.push_back(rVertex20(-1.0f, -1.0f, 0.0f, colorR, colorG, colorB, 255, 0.0f, 0.0f));
+        vertices.push_back(rVertex20(1.0f, -1.0f, 0.0f, colorR, colorG, colorB, 255, 1.0f, 0.0f));
+        vertices.push_back(rVertex20(1.0f, 1.0f, 0.0f, colorR, colorG, colorB, 255, 1.0f, 1.0f));
 
-        glTexCoord2d(x,y-height);
-        glVertex2f(-1,1);
+        // Triangle 2 (bottom-left, top-right, top-left)
+        vertices.push_back(rVertex20(-1.0f, -1.0f, 0.0f, colorR, colorG, colorB, 255, 0.0f, 0.0f));
+        vertices.push_back(rVertex20(1.0f, 1.0f, 0.0f, colorR, colorG, colorB, 255, 1.0f, 1.0f));
+        vertices.push_back(rVertex20(-1.0f, 1.0f, 0.0f, colorR, colorG, colorB, 255, 0.0f, 1.0f));
 
-        RenderEnd();
+        // Create render state with texture AND texture matrix stored in the state key
+        // This is critical because RenderTriangles uses the state key's matrix, not the renderer's stack
+        rRenderStateKey state = rRenderStateKey::HUDWithTexMatrix(textureId, rBlendMode::Alpha, &finalTm[0][0]);
 
-        TexMatrix();
-        glLoadIdentity();
+        // Set up 2D orthographic projection for fullscreen quad
+        ModelMatrix();
+        IdentityMatrix();
+
+        ProjMatrix();
+        IdentityMatrix();
+
+        // Submit to render queue for deferred rendering
+        rRenderQueue::Instance().Submit(rRenderPhase::HUD, state, vertices.data(), vertices.size());
+
+        // Must execute immediately - there's no other place that executes HUD phase
+        rRenderQueue::Instance().ExecutePhase(rRenderPhase::HUD);
     }
 
     gLogo::Display();

@@ -442,8 +442,9 @@ public:
 
     virtual bool Event(SDL_Event &e){
 #ifndef DEDICATED
-        if (e.type==SDL_KEYDOWN &&
-                (e.key.keysym.sym==SDLK_KP_ENTER || e.key.keysym.sym==SDLK_RETURN)){
+        // SDL3: SDL_KEYDOWN → SDL_EVENT_KEY_DOWN, keysym.sym → key.key
+        if (e.type==SDL_EVENT_KEY_DOWN &&
+                (e.key.key==SDLK_KP_ENTER || e.key.key==SDLK_RETURN)){
 
             // move on to password menu item
             MyMenu()->SetSelected(0);
@@ -481,8 +482,9 @@ public:
 
     virtual bool Event(SDL_Event &e){
 #ifndef DEDICATED
-        if (e.type==SDL_KEYDOWN &&
-                (e.key.keysym.sym==SDLK_KP_ENTER || e.key.keysym.sym==SDLK_RETURN)){
+        // SDL3: SDL_KEYDOWN → SDL_EVENT_KEY_DOWN, keysym.sym → key.key
+        if (e.type==SDL_EVENT_KEY_DOWN &&
+                (e.key.key==SDLK_KP_ENTER || e.key.key==SDLK_RETURN)){
 
             entered = true;
             MyMenu()->Exit();
@@ -4541,10 +4543,8 @@ public:
 class eMenuItemChat : protected uMenuItemStringWithHistory{
     ePlayer *me; //!< The player the chat prompt is for
 
-#if SDL_VERSION_ATLEAST(2,0,0)
     SDL_Event lastKeyDown_; // the last key down event
     bool lastKeyDownWasHandled_; // did the last keydown event (or following textinput event) cause an effect?
-#endif
 
 public:
     //! Constructor
@@ -4559,8 +4559,9 @@ public:
 
     virtual bool Event(SDL_Event &e){
 #ifndef DEDICATED
-        if (e.type==SDL_KEYDOWN &&
-                (e.key.keysym.sym==SDLK_KP_ENTER || e.key.keysym.sym==SDLK_RETURN)){
+        // SDL3: SDL_KEYDOWN → SDL_EVENT_KEY_DOWN, keysym.sym → key.key
+        if (e.type==SDL_EVENT_KEY_DOWN &&
+                (e.key.key==SDLK_KP_ENTER || e.key.key==SDLK_RETURN)){
 
             for(int i=se_PlayerNetIDs.Len()-1;i>=0;i--)
                 if (se_PlayerNetIDs(i)->pID==me->ID())
@@ -4569,13 +4570,13 @@ public:
             MyMenu()->Exit();
             return true;
         }
-        else if (e.type==SDL_KEYDOWN &&
-                 uActionGlobal::IsBreakingGlobalBind(e.key.keysym.sym))
+        else if (e.type==SDL_EVENT_KEY_DOWN &&
+                 uActionGlobal::IsBreakingGlobalBind(e.key.key))
         {
             return su_HandleEvent(e, true);
         }
-        else if (e.type==SDL_KEYDOWN &&
-                 e.key.keysym.sym == SDLK_ESCAPE)
+        else if (e.type==SDL_EVENT_KEY_DOWN &&
+                 e.key.key == SDLK_ESCAPE)
         {
             // escape needs to be handled by the surrounding menu, otherwise it
             // probably brings up the ingame menu via global bind.
@@ -4583,8 +4584,8 @@ public:
         }
         else
         {
-#if SDL_VERSION_ATLEAST(2,0,0)
-            if(e.type == SDL_KEYDOWN)
+            // SDL3: SDL_KEYDOWN → SDL_EVENT_KEY_DOWN, SDL_KEYUP → SDL_EVENT_KEY_UP, SDL_TEXTINPUT → SDL_EVENT_TEXT_INPUT
+            if(e.type == SDL_EVENT_KEY_DOWN)
             {
                 bool ret = uMenuItemStringWithHistory::Event(e);
                 if(ret)
@@ -4602,7 +4603,7 @@ public:
                     return true;
                 }
             }
-            else if(e.type == SDL_KEYUP)
+            else if(e.type == SDL_EVENT_KEY_UP)
             {
                 // on key up, if it has not been handled, pass previous key down event to global system. It may be an instachat.
                 if(!lastKeyDownWasHandled_)
@@ -4613,30 +4614,20 @@ public:
                     return ret;
                 }
             }
-            else if(e.type == SDL_TEXTINPUT)
+            else if(e.type == SDL_EVENT_TEXT_INPUT)
             {
                 bool ret = uMenuItemStringWithHistory::Event(e);
                 if(ret)
                     lastKeyDownWasHandled_ = true;
                 return ret;
             }
-#endif
 
             if ( uMenuItemStringWithHistory::Event(e) )
             {
                 return true;
             }
 
-#if SDL_VERSION_ATLEAST(2,0,0)
             return false;
-#else
-            // exclude control modifiers
-            if ( e.key.keysym.sym < SDLK_NUMLOCK || e.key.keysym.sym > SDLK_COMPOSE )
-            {
-                // maybe it's an instant chat button?
-                return su_HandleEvent(e, false);
-            }
-#endif // SDL2
         }
 #endif // DEDICATED
 
@@ -4693,7 +4684,9 @@ static void do_chat(){
         se_chatItem = &s;
         chat_menu.SetCenter(-.75);
         chat_menu.SetBot(-2);
-        chat_menu.SetTop(-.7);
+        // Move input higher when on-screen keyboard is visible so it's not hidden
+        REAL kbFrac = sr_ScreenKeyboardHeightFraction();
+        chat_menu.SetTop(kbFrac > 0.1f ? 0.0f : -.7f);
         chat_menu.Enter();
 
         se_ChatState( ePlayerNetID::ChatFlags_Chat, false );

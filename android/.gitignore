@@ -1,0 +1,10 @@
+# Build outputs
+/app/build/
+/app/.cxx/
+/build/
+
+# Local machine configuration (contains sdk.dir path)
+local.properties
+
+# Gradle wrapper caches
+.gradle/

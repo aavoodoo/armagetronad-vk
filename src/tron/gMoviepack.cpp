@@ -1,0 +1,946 @@
+/*
+
+*************************************************************************
+
+ArmageTron -- Just another Tron Lightcycle Game in 3D.
+Copyright (C) 2000  Manuel Moos (manuel@moosnet.de)
+
+**************************************************************************
+
+This program is free software; you can redistribute it and/or
+modify it under the terms of the GNU General Public License
+as published by the Free Software Foundation; either version 2
+of the License, or (at your option) any later version.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License
+along with this program; if not, write to the Free Software
+Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
+
+***************************************************************************
+
+*/
+
+#include "gMoviepack.h"
+#include "gStuff.h"
+#include "gGame.h"
+#include "tDirectories.h"
+#include "tConfiguration.h"
+#include "tConsole.h"
+#include "tLocale.h"
+#ifndef DEDICATED
+#include "rVertex.h"
+#include "rRenderBucket.h"
+#include "rRenderQueue.h"
+#endif
+
+#include <fstream>
+#include <sstream>
+#include <cstring>
+#include <sys/stat.h>
+#include <vector>
+#ifndef WIN32
+#include <dirent.h>
+#endif
+#ifdef __APPLE__
+#include <TargetConditionals.h>
+#if TARGET_OS_IOS
+extern "C" void sr_iOSRemoveDirectoryRecursive(const char* path);
+#endif
+#endif
+
+#ifdef WIN32
+#include <direct.h>
+#define MKDIR_COMPAT(path) _mkdir(path)
+#else
+#include <unistd.h>
+#define MKDIR_COMPAT(path) mkdir(path, 0755)
+#endif
+
+// Include miniz for ZIP handling - use relative path from src/tron
+#define MINIZ_NO_ZLIB_COMPATIBLE_NAMES
+#include "../thirdparty/miniz/miniz.c"
+
+#ifndef DEDICATED
+#include "rScreen.h"
+#include "rRender.h"
+#include "rTexture.h"
+#include "rRawPixelTexture.h"
+#include "rModel.h"
+#include "rFont.h"
+#include "rSysdep.h"
+#include "rFrameLifecycle.h"
+#include "rViewport.h"
+#include "eSound.h"
+#include "gLogo.h"
+#include "uInput.h"
+#include "uInputQueue.h"
+#include "tSysTime.h"
+
+// stb_image is already included elsewhere, just declare the function we need
+extern "C" {
+    unsigned char* stbi_load_from_memory(unsigned char const* buffer, int len,
+                                          int* x, int* y, int* comp, int req_comp);
+    void stbi_image_free(void* retval_from_stbi_load);
+}
+
+// Use rRawPixelTexture from render library for preview textures
+using rPreviewTexture = rRawPixelTexture;
+#endif
+
+// Configuration for persisting moviepack selection
+static tString sg_moviepackName;
+static tConfItem<tString> sg_moviepackNameConf("MOVIEPACK_NAME", sg_moviepackName);
+
+// Forward declaration for cleanup
+static void RemoveDirectoryRecursive(const tString& path);
+
+// Singleton instance
+static gMoviepackManager* sg_instance = nullptr;
+
+gMoviepackManager& gMoviepackManager::Get()
+{
+    if (!sg_instance)
+    {
+        sg_instance = new gMoviepackManager();
+    }
+    return *sg_instance;
+}
+
+gMoviepackManager::gMoviepackManager()
+    : activeIndex_(0), zipExtracted_(false)
+{
+    // Add "None" as first option
+    gMoviepack* none = new gMoviepack();
+    none->name = "$moviepack_none";
+    none->path = "";
+    none->isZip = false;
+    moviepacks_.push_back(none);
+}
+
+gMoviepackManager::~gMoviepackManager()
+{
+    CleanupTempDirectory();
+
+    // Clean up moviepack entries
+    for (int i = 0; i < moviepacks_.Len(); ++i)
+    {
+        delete moviepacks_(i);
+    }
+    moviepacks_.SetLen(0);
+
+#ifndef DEDICATED
+    // Clean up cached textures
+    for (int i = 0; i < previewTextures_.Len(); ++i)
+        delete previewTextures_(i);
+    previewTextures_.SetLen(0);
+    for (int i = 0; i < titleTextures_.Len(); ++i)
+        delete titleTextures_(i);
+    titleTextures_.SetLen(0);
+#endif
+}
+
+void gMoviepackManager::ScanMoviepacks()
+{
+    // Restore settings saved before a previous moviepack activation (survives app restart).
+    // This prevents stale POST_PROCESS_* values from lingering after an app kill.
+    {
+        tString savePath = tDirectories::GetUserData() + "/moviepack_saved_settings.cfg";
+        std::ifstream loadFile(static_cast<const char*>(savePath));
+        if (loadFile.good())
+        {
+            tCurrentAccessLevel elevate(tAccessLevel_Owner, true);
+            tConfItemBase::LoadAll(loadFile, false);
+            loadFile.close();
+            unlink(static_cast<const char*>(savePath));
+        }
+    }
+
+    // Clean up any previously extracted ZIP moviepack first
+    // This prevents the extracted files from being detected as a "Classic Moviepack"
+    tString extractPath = GetTempExtractPath();
+    if (extractPath.Len() > 0)
+    {
+        RemoveDirectoryRecursive(extractPath);
+    }
+    zipExtracted_ = false;
+    extractPath_ = "";
+
+    // Clear existing moviepacks (except "None")
+    for (int i = 1; i < moviepacks_.Len(); ++i)
+    {
+        delete moviepacks_(i);
+    }
+    if (moviepacks_.Len() > 1)
+    {
+        moviepacks_.SetLen(1);
+    }
+
+#ifndef DEDICATED
+    // Clear cached textures
+    for (int i = 0; i < previewTextures_.Len(); ++i)
+        delete previewTextures_(i);
+    previewTextures_.SetLen(0);
+    for (int i = 0; i < titleTextures_.Len(); ++i)
+        delete titleTextures_(i);
+    titleTextures_.SetLen(0);
+#endif
+
+    // Get all data paths
+    tArray<tString> paths;
+    tDirectories::Data().GetPaths(paths);
+
+    // Check for legacy moviepack folder using tDirectories
+    {
+        std::ifstream t;
+        if (tDirectories::Data().Open(t, "moviepack/settings.cfg"))
+        {
+            t.close();
+            // Find the actual path to the moviepack folder
+            tString folderPath = tDirectories::Data().GetReadPath("moviepack/settings.cfg");
+            // Remove /settings.cfg from the path
+            int lastSlash = folderPath.StrPos("/settings.cfg");
+            if (lastSlash > 0)
+            {
+                folderPath = folderPath.SubStr(0, lastSlash);
+            }
+
+            gMoviepack* classic = new gMoviepack();
+            classic->name = "$moviepack_classic";
+            classic->path = folderPath;
+            classic->isZip = false;
+            moviepacks_.push_back(classic);
+        }
+        else
+        {
+        }
+    }
+
+    // Scan for .aamvp.zip files in moviepacks/ subdirectory
+    for (int p = 0; p < paths.Len(); ++p)
+    {
+        tString moviepacksDir = paths(p);
+        moviepacksDir += "/moviepacks";
+
+        tArray<tString> files;
+        tDirectories::GetFiles(moviepacksDir, tString("*.aamvp.zip"), files,
+                               tDirectories::eGetFilesFilesOnly);
+
+        for (int f = 0; f < files.Len(); ++f)
+        {
+            tString filename = files(f);
+            tString fullPath = moviepacksDir;
+            fullPath += "/";
+            fullPath += filename;
+
+            // Extract display name from filename (remove .aamvp.zip)
+            tString displayName = filename;
+            int extPos = displayName.StrPos(".aamvp.zip");
+            if (extPos > 0)
+            {
+                displayName = displayName.SubStr(0, extPos);
+            }
+
+            // Replace underscores with spaces for display
+            for (size_t i = 0; i < displayName.Size(); ++i)
+            {
+                if (displayName[i] == '_')
+                {
+                    displayName[i] = ' ';
+                }
+            }
+
+            // Check if we already have this moviepack (from a higher priority path)
+            bool exists = false;
+            for (int m = 0; m < moviepacks_.Len(); ++m)
+            {
+                if (moviepacks_(m)->name == displayName)
+                {
+                    exists = true;
+                    break;
+                }
+            }
+
+            if (!exists)
+            {
+                gMoviepack* pack = new gMoviepack();
+                pack->name = displayName;
+                pack->path = fullPath;
+                pack->isZip = true;
+                moviepacks_.push_back(pack);
+            }
+        }
+    }
+
+    // Sort moviepacks alphabetically by name (skip index 0 = "None")
+    for (int i = 1; i < moviepacks_.Len() - 1; ++i)
+    {
+        for (int j = i + 1; j < moviepacks_.Len(); ++j)
+        {
+            if (strcmp(static_cast<const char*>(moviepacks_(j)->name),
+                       static_cast<const char*>(moviepacks_(i)->name)) < 0)
+            {
+                gMoviepack* tmp = moviepacks_(i);
+                moviepacks_(i) = moviepacks_(j);
+                moviepacks_(j) = tmp;
+            }
+        }
+    }
+
+    // Restore selection from saved name
+    if (sg_moviepackName.Len() > 0)
+    {
+        RestoreFromName(sg_moviepackName);
+    }
+    else if (sg_moviepackInstalled && sg_moviepackUse)
+    {
+        // Legacy compatibility: if old MOVIEPACK was enabled, select classic pack
+        for (int i = 0; i < moviepacks_.Len(); ++i)
+        {
+            if (!moviepacks_(i)->isZip && moviepacks_(i)->path.Len() > 0)
+            {
+                activeIndex_ = i;
+                break;
+            }
+        }
+    }
+
+#ifndef DEDICATED
+    // Initialize texture cache arrays
+    previewTextures_.SetLen(moviepacks_.Len());
+    titleTextures_.SetLen(moviepacks_.Len());
+    for (int i = 0; i < moviepacks_.Len(); ++i)
+    {
+        previewTextures_(i) = nullptr;
+        titleTextures_(i) = nullptr;
+    }
+#endif
+
+    // Activate the restored moviepack (extracts ZIP if needed)
+    if (activeIndex_ > 0)
+    {
+        ActivateMoviepack();
+    }
+}
+
+const gMoviepack* gMoviepackManager::GetMoviepack(int index) const
+{
+    if (index >= 0 && index < moviepacks_.Len())
+    {
+        return moviepacks_(index);
+    }
+    return nullptr;
+}
+
+void gMoviepackManager::SetActiveIndex(int index)
+{
+    if (index >= 0 && index < moviepacks_.Len() && index != activeIndex_)
+    {
+        // Prevent moviepack changes during gameplay to avoid crashes
+        if (sg_GameRunning())
+        {
+            con << "[Moviepack] Blocked — game is running\n";
+            return;
+        }
+
+        // Deactivate old moviepack
+        DeactivateMoviepack();
+
+        // When switching to None, restore user's original settings
+        if (index == 0)
+        {
+            tString savePath = tDirectories::GetUserData() + "/moviepack_saved_settings.cfg";
+            std::ifstream loadFile(static_cast<const char*>(savePath));
+            if (loadFile.good())
+            {
+                tCurrentAccessLevel elevate(tAccessLevel_Owner, true);
+                tConfItemBase::LoadAll(loadFile, false);
+                loadFile.close();
+            }
+            unlink(static_cast<const char*>(savePath));
+        }
+
+        activeIndex_ = index;
+
+        // Save name for persistence
+        if (index > 0)
+        {
+            sg_moviepackName = moviepacks_(index)->name;
+        }
+        else
+        {
+            sg_moviepackName = "";
+        }
+
+        // Activate new moviepack
+        ActivateMoviepack();
+    }
+}
+
+const tString& gMoviepackManager::GetActiveMoviepackName() const
+{
+    static tString empty;
+    if (activeIndex_ > 0 && activeIndex_ < moviepacks_.Len())
+    {
+        return moviepacks_(activeIndex_)->name;
+    }
+    return empty;
+}
+
+void gMoviepackManager::RestoreFromName(const tString& name)
+{
+    for (int i = 0; i < moviepacks_.Len(); ++i)
+    {
+        if (moviepacks_(i)->name == name)
+        {
+            activeIndex_ = i;
+            return;
+        }
+    }
+    // Name not found, default to None
+    activeIndex_ = 0;
+}
+
+// Helper to recursively remove a directory (forward declaration for use in ActivateMoviepack)
+static void RemoveDirectoryRecursive(const tString& path)
+{
+#if defined(WIN32)
+    tString cmd;
+    cmd = "rmdir /s /q \"";
+    cmd += path;
+    cmd += "\"";
+    (void)system(static_cast<const char*>(cmd));
+#elif defined(__APPLE__) && TARGET_OS_IOS
+    // Use NSFileManager on iOS — POSIX recursive delete can hang on sandbox paths.
+    sr_iOSRemoveDirectoryRecursive(static_cast<const char*>(path));
+#else
+    // Android and other POSIX: system() may be unavailable or restricted.
+    // Use opendir/readdir/unlink/rmdir recursively instead.
+    const char* p = static_cast<const char*>(path);
+    DIR* d = opendir(p);
+    if (!d)
+    {
+        // Directory doesn't exist — nothing to remove.
+        return;
+    }
+    struct dirent* entry;
+    while ((entry = readdir(d)) != nullptr)
+    {
+        if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0)
+            continue;
+        tString child = path;
+        child += "/";
+        child += entry->d_name;
+        const char* cp = static_cast<const char*>(child);
+        struct stat st;
+        if (stat(cp, &st) == 0 && S_ISDIR(st.st_mode))
+        {
+            RemoveDirectoryRecursive(child);
+        }
+        else
+        {
+            unlink(cp);
+        }
+    }
+    closedir(d);
+    rmdir(p);
+#endif
+}
+
+bool gMoviepackManager::ActivateMoviepack()
+{
+    if (activeIndex_ <= 0 || activeIndex_ >= moviepacks_.Len())
+    {
+        return true; // "None" selected, nothing to do
+    }
+
+    const gMoviepack* pack = moviepacks_(activeIndex_);
+    if (!pack)
+    {
+        return false;
+    }
+
+
+    if (pack->isZip)
+    {
+        // Get extraction path and clean up any existing files first
+        extractPath_ = GetTempExtractPath();
+        RemoveDirectoryRecursive(extractPath_);
+
+        // Verify the directory is actually gone — stale files from a previous pack
+        // would be silently mixed with the new pack's content otherwise.
+        struct stat st;
+        if (stat(static_cast<const char*>(extractPath_), &st) == 0)
+        {
+            // Directory still exists after removal attempt (permission issue?).
+            // Log a warning but continue — extraction will overwrite what it can,
+            // but files not present in the new ZIP will linger.
+            con << "^1Warning: could not fully clean moviepack directory before extraction: "
+                << extractPath_ << "\n";
+        }
+
+        // Extract ZIP to the moviepack directory
+        if (!ExtractZipToDirectory(pack->path, extractPath_))
+        {
+            con << tOutput("$moviepack_extract_failed", pack->name) << "\n";
+            return false;
+        }
+        // Verify extracted moviepack is valid (must have settings.cfg)
+        tString settingsPath = extractPath_;
+        settingsPath += "/settings.cfg";
+
+        std::ifstream settingsFile(static_cast<const char*>(settingsPath));
+        if (!settingsFile.good())
+        {
+            con << tOutput("$moviepack_invalid", pack->name) << "\n";
+            RemoveDirectoryRecursive(extractPath_);
+            return false;
+        }
+        settingsFile.close();
+
+        zipExtracted_ = true;
+
+        // Save current user settings on FIRST moviepack activation only
+        // (so switching to None restores the user's original values).
+        {
+            tString savePath = tDirectories::GetUserData() + "/moviepack_saved_settings.cfg";
+            struct stat st;
+            if (stat(static_cast<const char*>(savePath), &st) != 0)
+            {
+                // File doesn't exist yet — save current settings
+                static const char* moviepackKeys[] = {
+                    "POST_PROCESS_ENABLED", "POST_PROCESS_EFFECT",
+                    "MOVIEPACK_FLOOR_RED", "MOVIEPACK_FLOOR_GREEN", "MOVIEPACK_FLOOR_BLUE",
+                    "MOVIEPACK_RIM_WALL_STRETCH_X", "MOVIEPACK_RIM_WALL_STRETCH_Y",
+                    "MOVIEPACK_WALL_STRETCH", "GRID_SIZE_MOVIEPACK", "FLOOR_DETAIL",
+                    nullptr
+                };
+                std::ofstream saveFile(static_cast<const char*>(savePath));
+                for (int k = 0; moviepackKeys[k]; ++k)
+                {
+                    tConfItemBase* item = tConfItemBase::FindConfigItem(tString(moviepackKeys[k]));
+                    if (item)
+                    {
+                        std::ostringstream val;
+                        item->WriteVal(val);
+                        if (saveFile.good())
+                            saveFile << moviepackKeys[k] << " " << val.str() << "\n";
+                    }
+                }
+            }
+        }
+
+        // Reset moviepack-affected settings to defaults before applying the pack's
+        // settings.cfg. This ensures a clean baseline regardless of what the previous
+        // pack or user changes left behind. Values match the C++ default initializers.
+        {
+            tCurrentAccessLevel elevate(tAccessLevel_Owner, true);
+            static const char* resetLines =
+                "POST_PROCESS_ENABLED 0\n"
+                "POST_PROCESS_EFFECT \n"
+                "MOVIEPACK_FLOOR_RED 0.5\n"
+                "MOVIEPACK_FLOOR_GREEN 0.5\n"
+                "MOVIEPACK_FLOOR_BLUE 0.5\n"
+                "MOVIEPACK_RIM_WALL_STRETCH_X 100\n"
+                "MOVIEPACK_RIM_WALL_STRETCH_Y 100\n"
+                "MOVIEPACK_WALL_STRETCH 4\n"
+                "GRID_SIZE_MOVIEPACK 2\n"
+                "FLOOR_DETAIL 2\n";
+            std::istringstream resetStream(resetLines);
+            tConfItemBase::LoadAll(resetStream, false);
+        }
+
+        // Apply the moviepack's settings.cfg with owner elevation.
+        {
+            std::ifstream applyFile(static_cast<const char*>(settingsPath));
+            if (applyFile.good())
+            {
+                tCurrentAccessLevel elevate(tAccessLevel_Owner, true);
+                tConfItemBase::LoadAll(applyFile, false);
+            }
+        }
+    }
+
+#ifndef DEDICATED
+    // Reload all resources so moviepack assets take effect
+    // This applies to both ZIP and classic folder moviepacks
+    // Only reload if OpenGL context is available (sr_glOut)
+    if (sr_glOut)
+    {
+        gLogo::ResetTexture();
+        rSurfaceCache::ClearCache();
+        rITexture::UnloadAll();
+        rModel::ClearCache();
+        eLegacyWavData::UnloadAll();
+        sr_ReloadFont();
+        // Reload Vulkan SPV shaders if using the Vulkan renderer
+        extern void sr_vkRendererReloadShaders();
+        sr_vkRendererReloadShaders();
+
+        // Notify the post-process system so it can reload effects from
+        // the new moviepack directory and register MVP_* tSettingItems
+        // for any shader parameters declared by .meta files in the pack.
+        // Derive a simple name from the active moviepack for config path.
+        extern void sr_vkPostProcessOnMoviepackActivated(const char* name);
+        const gMoviepack* activePack = moviepacks_(activeIndex_);
+        sr_vkPostProcessOnMoviepackActivated(
+            activePack ? static_cast<const char*>(activePack->name) : nullptr);
+    }
+#endif
+
+    // Update legacy flags for compatibility
+    sg_moviepackInstalled = true;
+    sg_moviepackUse = true;
+
+    return true;
+}
+
+void gMoviepackManager::DeactivateMoviepack()
+{
+    // Note: activeIndex_ still holds the OLD value at this point
+    bool hadMoviepackActive = (activeIndex_ > 0);
+
+#ifndef DEDICATED
+    // Notify the post-process system BEFORE resources are freed — this
+    // saves any tuned MVP values to the outgoing moviepack's cfg file
+    // and destroys dynamic tSettingItems so they don't reference stale
+    // effect data after the reload.
+    if (hadMoviepackActive && sr_glOut)
+    {
+        extern void sr_vkPostProcessOnMoviepackDeactivated();
+        sr_vkPostProcessOnMoviepackDeactivated();
+    }
+#endif
+
+    CleanupTempDirectory();
+    zipExtracted_ = false;
+
+    // Note: settings restoration happens in two places:
+    // - When switching to None: RestoreUserSettings() is called below
+    // - When switching between packs: ActivateMoviepack() reloads defaults first
+    // The saved settings file is only consumed when switching to None.
+
+    // Always set moviepack to inactive when deactivating
+    // ActivateMoviepack() will set it back to true if activating a new one
+    sg_moviepackUse = false;
+
+#ifndef DEDICATED
+    // If any moviepack was active and GL is available, reload resources to restore defaults
+    if (hadMoviepackActive && sr_glOut)
+    {
+        // Reset logo texture and hide it — switching to "None" shouldn't flash a title
+        gLogo::ResetTexture();
+        gLogo::SetDisplayed(false, true);
+
+        // Unload all textures so they reload from correct paths
+        rSurfaceCache::ClearCache();
+        rITexture::UnloadAll();
+
+        // Clear model cache so they reload
+        rModel::ClearCache();
+
+        // Unload sounds
+        eLegacyWavData::UnloadAll();
+
+        // Reload font
+        sr_ReloadFont();
+
+        // Reload Vulkan SPV shaders if using the Vulkan renderer
+        extern void sr_vkRendererReloadShaders();
+        sr_vkRendererReloadShaders();
+    }
+#endif
+}
+
+tString gMoviepackManager::GetTempExtractPath() const
+{
+    // Extract to user data directory's moviepack folder
+    // This path is already searched by tDirectories::Data()
+    tString userDataDir = tDirectories::GetUserData();
+    if (userDataDir.Len() > 0)
+    {
+        return userDataDir + "/moviepack";
+    }
+    // Fallback to var directory if user data dir is not set
+    return tDirectories::Var().GetWritePath("moviepack");
+}
+
+void gMoviepackManager::CleanupTempDirectory()
+{
+    if (!zipExtracted_ || extractPath_.Len() == 0)
+    {
+        return;
+    }
+
+    // Remove the extracted directory
+    RemoveDirectoryRecursive(extractPath_);
+
+    zipExtracted_ = false;
+    extractPath_ = "";
+}
+
+bool gMoviepackManager::ExtractFileFromZip(const tString& zipPath,
+                                            const char* fileName,
+                                            void** outData, size_t* outSize)
+{
+    mz_zip_archive zip;
+    memset(&zip, 0, sizeof(zip));
+
+    // Use implicit conversion from tString to const char*
+    if (!mz_zip_reader_init_file(&zip, static_cast<char const*>(zipPath), 0))
+    {
+        return false;
+    }
+
+    int fileIndex = mz_zip_reader_locate_file(&zip, fileName, nullptr, 0);
+    if (fileIndex < 0)
+    {
+        mz_zip_reader_end(&zip);
+        return false;
+    }
+
+    mz_zip_archive_file_stat fileStat;
+    if (!mz_zip_reader_file_stat(&zip, fileIndex, &fileStat))
+    {
+        mz_zip_reader_end(&zip);
+        return false;
+    }
+
+    *outSize = static_cast<size_t>(fileStat.m_uncomp_size);
+    *outData = malloc(*outSize);
+    if (!*outData)
+    {
+        mz_zip_reader_end(&zip);
+        return false;
+    }
+
+    if (!mz_zip_reader_extract_to_mem(&zip, fileIndex, *outData, *outSize, 0))
+    {
+        free(*outData);
+        *outData = nullptr;
+        *outSize = 0;
+        mz_zip_reader_end(&zip);
+        return false;
+    }
+
+    mz_zip_reader_end(&zip);
+    return true;
+}
+
+bool gMoviepackManager::ExtractZipToDirectory(const tString& zipPath,
+                                               const tString& destDir)
+{
+    mz_zip_archive zip;
+    memset(&zip, 0, sizeof(zip));
+
+    if (!mz_zip_reader_init_file(&zip, static_cast<char const*>(zipPath), 0))
+    {
+        return false;
+    }
+
+    // Create destination directory
+    MKDIR_COMPAT(static_cast<char const*>(destDir));
+
+    int numFiles = static_cast<int>(mz_zip_reader_get_num_files(&zip));
+
+    for (int i = 0; i < numFiles; ++i)
+    {
+        mz_zip_archive_file_stat fileStat;
+        if (!mz_zip_reader_file_stat(&zip, i, &fileStat))
+        {
+            continue;
+        }
+
+        tString destPath = destDir;
+        destPath += "/";
+        destPath += fileStat.m_filename;
+
+
+        if (mz_zip_reader_is_file_a_directory(&zip, i))
+        {
+            // Create directory
+            MKDIR_COMPAT(static_cast<char const*>(destPath));
+        }
+        else
+        {
+            // Extract file
+            if (!mz_zip_reader_extract_to_file(&zip, i, static_cast<char const*>(destPath), 0))
+            {
+                // Log error but continue
+                con << "Failed to extract: " << fileStat.m_filename << "\n";
+            }
+        }
+    }
+
+    mz_zip_reader_end(&zip);
+    return true;
+}
+
+#ifndef DEDICATED
+// Shared helper: load a texture from a moviepack ZIP file and cache it.
+rITexture* gMoviepackManager::LoadTextureFromZip(
+    const tString& zipPath, const char* filename,
+    tArray<rITexture*>& cache, int index)
+{
+    void* data = nullptr;
+    size_t dataSize = 0;
+
+    if (!ExtractFileFromZip(zipPath, filename, &data, &dataSize))
+        return nullptr;
+
+    int width, height, channels;
+    unsigned char* pixels = stbi_load_from_memory(
+        static_cast<const unsigned char*>(data),
+        static_cast<int>(dataSize),
+        &width, &height, &channels, 4);
+    free(data);
+
+    if (!pixels) return nullptr;
+
+    rPreviewTexture* tex = new rPreviewTexture();
+    if (tex->LoadFromPixels(pixels, width, height))
+    {
+        while (cache.Len() <= index)
+            cache.push_back(nullptr);
+        cache(index) = tex;
+        stbi_image_free(pixels);
+        return tex;
+    }
+    delete tex;
+    stbi_image_free(pixels);
+    return nullptr;
+}
+
+rITexture* gMoviepackManager::GetPreviewTexture(int index)
+{
+    if (index < 0 || index >= moviepacks_.Len()) return nullptr;
+    if (index < previewTextures_.Len() && previewTextures_(index)) return previewTextures_(index);
+    const gMoviepack* pack = moviepacks_(index);
+    if (!pack || index == 0) return nullptr;
+    if (pack->isZip)
+        return LoadTextureFromZip(pack->path, "preview.png", previewTextures_, index);
+    return nullptr;
+}
+
+rITexture* gMoviepackManager::GetTitleTexture(int index)
+{
+    if (index < 0 || index >= moviepacks_.Len()) return nullptr;
+    if (index < titleTextures_.Len() && titleTextures_(index)) return titleTextures_(index);
+    const gMoviepack* pack = moviepacks_(index);
+    if (!pack || index == 0) return nullptr;
+    if (pack->isZip)
+        return LoadTextureFromZip(pack->path, "title.jpg", titleTextures_, index);
+    return nullptr;
+}
+
+// Menu item implementation
+gMoviepackMenuItem::gMoviepackMenuItem(uMenu* menu)
+    : uMenuItemSelection<int>(menu,
+                              tOutput("$misc_moviepack_text"),
+                              tOutput("$misc_moviepack_help"),
+                              selectionIndex_),
+      selectionIndex_(0)
+{
+    // Populate choices from manager
+    gMoviepackManager& mgr = gMoviepackManager::Get();
+    for (int i = 0; i < mgr.GetCount(); ++i)
+    {
+        const gMoviepack* pack = mgr.GetMoviepack(i);
+        if (pack)
+        {
+            NewChoice(tOutput(static_cast<const char*>(pack->name)), tOutput(""), i);
+        }
+    }
+
+    // Set initial selection
+    selectionIndex_ = mgr.GetActiveIndex();
+    menu->RequestSpaceBelow(0.2);
+}
+
+gMoviepackMenuItem::~gMoviepackMenuItem()
+{
+}
+
+// Helper: submit a textured quad to the HUD render queue
+static void sg_RenderQuad(rITexture* tex, float left, float top, float right, float bottom)
+{
+    tex->Select();
+    unsigned int texId = RenderGetBoundTexture2D();
+    std::vector<rVertex20> v;
+    v.reserve(6);
+    v.push_back(rVertex20(left,  top,    0, 255,255,255,255, 0,0));
+    v.push_back(rVertex20(left,  bottom, 0, 255,255,255,255, 0,1));
+    v.push_back(rVertex20(right, bottom, 0, 255,255,255,255, 1,1));
+    v.push_back(rVertex20(left,  top,    0, 255,255,255,255, 0,0));
+    v.push_back(rVertex20(right, bottom, 0, 255,255,255,255, 1,1));
+    v.push_back(rVertex20(right, top,    0, 255,255,255,255, 1,0));
+    rRenderStateKey state = rRenderStateKey::Textured(texId, rBlendMode::Alpha);
+    rRenderQueue::Instance().Submit(rRenderPhase::HUD, state, v.data(), v.size());
+}
+
+void gMoviepackMenuItem::RenderBackground()
+{
+    uMenuItem::RenderBackground();
+    if (!sr_glOut) return;
+
+    gMoviepackManager& mgr = gMoviepackManager::Get();
+    rITexture* title   = mgr.GetTitleTexture(selectionIndex_);
+    rITexture* preview = mgr.GetPreviewTexture(selectionIndex_);
+
+    if (!title && !preview) return;
+
+    // Layout: right side of screen, stacking from the bottom up.
+    // Both images use the screen's aspect ratio so they look like
+    // miniature screenshots. NDC is [-1,1]; screen aspect = W/H.
+    float aspect = (sr_screenWidth > 0 && sr_screenHeight > 0)
+        ? (float)sr_screenWidth / (float)sr_screenHeight : 1.77f;
+
+    const float L = 0.55f, R = 0.95f;
+    const float ndcW = R - L;
+    const float imgH = ndcW / aspect * 2.0f;  // height matching screen aspect (NDC Y range is 2)
+    const float gap = 0.02f;
+    float y = -0.95f;                          // bottom edge of lowest image
+
+    if (title && preview)
+    {
+        sg_RenderQuad(preview, L, y + imgH, R, y);
+        y += imgH + gap;
+        sg_RenderQuad(title, L, y + imgH, R, y);
+    }
+    else if (title)
+    {
+        sg_RenderQuad(title, L, y + imgH, R, y);
+    }
+    else
+    {
+        sg_RenderQuad(preview, L, y + imgH, R, y);
+    }
+}
+
+void gMoviepackMenuItem::LeftRight(int lr)
+{
+    uMenuItemSelection<int>::LeftRight(lr);
+    // Activation is deferred to LeftRightRelease (key-up) so the user can scroll
+    // freely through the list without triggering a full reload on every step.
+}
+
+void gMoviepackMenuItem::LeftRightRelease()
+{
+    gMoviepackManager::Get().SetActiveIndex(selectionIndex_);
+}
+
+void gMoviepackMenuItem::Enter()
+{
+    // Activate the selected pack (no title screen — just apply it)
+    gMoviepackManager::Get().SetActiveIndex(selectionIndex_);
+}
+
+void gMoviepackMenuItem::UpdateFromManager()
+{
+    selectionIndex_ = gMoviepackManager::Get().GetActiveIndex();
+}
+#endif // DEDICATED

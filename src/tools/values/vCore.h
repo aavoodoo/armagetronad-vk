@@ -35,8 +35,8 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 #include <deque>
 #include <iomanip>
 #include <iostream>
-#include <boost/shared_ptr.hpp>
-#include <boost/variant.hpp>
+#include <memory>
+#include <variant>
 
 namespace vValue {
 namespace Expr {
@@ -47,7 +47,7 @@ class Base;
 namespace Type {
 typedef std::shared_ptr<Expr::Core::Base> BasePtr; //!< convinience definition for the use in derived classes
 
-typedef boost::variant<int, float, std::string> Variant;
+typedef std::variant<int, float, std::string> Variant;
 typedef std::deque<BasePtr> arglist;
 }
 using namespace Type;

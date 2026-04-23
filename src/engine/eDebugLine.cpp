@@ -28,6 +28,10 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 #include "eDebugLine.h"
 #include "tArray.h"
 #include "rRender.h"
+#include "rVertex.h"
+#ifndef DEDICATED
+#include "rRenderQueue.h"
+#endif
 
 #ifdef DEBUG
 #define DEBUGLINE
@@ -96,17 +100,22 @@ void eDebugLine::Render()
 {
 #ifndef DEDICATED
 #ifdef DEBUGLINE
-    glDisable(GL_TEXTURE_2D);
-    glDisable(GL_LIGHTING);
-    BeginLines();
+    std::vector<rVertex20> lines;
+    lines.reserve(se_lines.Len() * 2);
     for (int i = se_lines.Len()-1; i>=0; i--)
     {
         eLineEntry& entry = se_lines(i);
-        Color(entry.r, entry.g, entry.b);
-        Vertex(entry.start.x, entry.start.y, entry.startH);
-        Vertex(entry.stop.x,  entry.stop.y,  entry.stopH);
+        uint8_t cr = static_cast<uint8_t>(entry.r * 255.0f);
+        uint8_t cg = static_cast<uint8_t>(entry.g * 255.0f);
+        uint8_t cb = static_cast<uint8_t>(entry.b * 255.0f);
+        lines.push_back(rVertex20(entry.start.x, entry.start.y, entry.startH, cr, cg, cb, 255, 0, 0));
+        lines.push_back(rVertex20(entry.stop.x,  entry.stop.y,  entry.stopH,  cr, cg, cb, 255, 0, 0));
     }
-    RenderEnd();
+    if (!lines.empty()) {
+        rRenderStateKey state = rRenderStateKey::Colored(rBlendMode::Opaque);
+        rRenderQueue::Instance().SubmitLines(rRenderPhase::OpaqueDynamic, state, lines.data(), lines.size());
+        rRenderQueue::Instance().ExecutePhase(rRenderPhase::OpaqueDynamic);
+    }
 #endif
 #endif
 }

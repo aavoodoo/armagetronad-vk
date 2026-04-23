@@ -30,7 +30,6 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 // #define CAMERA_LOGGING
 
 #include "rSDL.h"
-#include "rGL.h"
 
 #ifdef CAMERA_LOGGING
 #include <iostream>
@@ -50,6 +49,7 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 #include "tConsole.h"
 #include "ePlayer.h"
 #include "eAdvWall.h"
+#include "eRectangle.h"
 #include "nConfig.h"
 #include "eFloor.h"
 #include "eGrid.h"
@@ -137,10 +137,6 @@ static nSettingItem<bool> a_fe
 static nSettingItem<bool> a_ffe
 ("CAMERA_FORBID_MER",
  forbid_camera[CAMERA_MER]);
-
-#ifndef DEDICATED
-#include "rGL.h"
-#endif
 
 static REAL lastTime=0;
 static const REAL rimDistance = 0.01f;
@@ -1587,16 +1583,6 @@ static REAL se_cameraSmart =;
 static tSettingItem< REAL > se_confCameraSmart( "CAMERA_SMART", se_cameraSmart );
 */
 
-static float se_cameraEyeDistance = 0; // .1 to .5 appear to be good values
-static tSettingItem<float> secced("CAMERA_EYE_DISTANCE", se_cameraEyeDistance);
-
-static int se_cameraEye1Color = 1; // 001b (bgR)
-static tSettingItem<int> sece1ca("CAMERA_EYE_1_COLOR", se_cameraEye1Color);
-static tSettingItem<int> sece1cb("CAMERA_EYE_1_COLOUR", se_cameraEye1Color);
-
-static int se_cameraEye2Color = 6; // 110b (BGr)
-static tSettingItem<int> sece2ca("CAMERA_EYE_2_COLOR", se_cameraEye2Color);
-static tSettingItem<int> sece2cb("CAMERA_EYE_2_COLOUR", se_cameraEye2Color);
 
 #ifdef DUNNOWHATTHISISSUPPOSEDTODO
 static float se_cameraInMaxFocusDistance = .5; //factor of the current speed
@@ -1690,18 +1676,52 @@ void eCamera::Render(){
     //  eEdge::UpdateVisAll(id);
 #endif
 
-    glMatrixMode(GL_PROJECTION);
-    glLoadIdentity();
-    glMatrixMode(GL_MODELVIEW);
-    glLoadIdentity();
+    ProjMatrix();
+    IdentityMatrix();
+    ModelMatrix();
+    IdentityMatrix();
 
     if(CenterCockpitFixedBefore()){
-	    glMatrixMode(GL_PROJECTION);
-		if (mirrorView_) glScalef(-1,1,1);
-        vp->Perspective(fov,zNear,1E+20,se_cameraEyeDistance/2.);
+	    ProjMatrix();
+		if (mirrorView_) ScaleMatrix(-1,1,1);
 
-        glMatrixMode(GL_MODELVIEW);
-        gluLookAt(0,
+        // Phase 1A (depth precision fix): compute zFar from the arena bounding
+        // box + camera altitude instead of the old hardcoded 1E+20. With
+        // D32_SFLOAT and zFar=1e20, the entire gameplay volume collapsed into
+        // a razor-thin slice next to zNear — causing the "my cycle hides
+        // behind another cycle's wall" z-fighting symptom. 4*diag + 2*altitude
+        // gives comfortable headroom for off-arena cameras and top-down
+        // replays; the [200, 20000] clamp protects against uninitialised
+        // bounds at startup and pathological mod maps.
+        //
+        // Note: zNear is intentionally the PREVIOUS frame's post-shrink value
+        // (from `zNear *= .3f` below), not a fresh value. That value went
+        // through grid->Render's multi-stage shrink pipeline (camera height
+        // clamp + eZNearSensor 8-ray scan + 0.3x safety factor), producing
+        // a conservative near plane that safely clears the player's cycle
+        // model. Hoisting a fresh Bound() here would bypass all three stages
+        // and cause near-plane clipping of the player's own cycle body.
+        REAL zFar;
+        {
+            eRectangle const & arena = eWallRim::GetBounds();
+            eCoord extent = arena.GetHigh() - arena.GetLow();
+            REAL diag = extent.Norm();
+            // eRectangle is initialised with low_=1e30, high_=-1e30 (inverted sentinel).
+            // Before the first UpdateBounds() call, high_-low_ is large and negative,
+            // producing a huge diag (~2.83e30). The isfinite/diag>1e6 guards catch both
+            // that uninitialized state and any corrupted arena geometry.
+            if (!std::isfinite(diag) || diag <= 0 || diag > 1.0e6f)
+                diag = 1000.0f; // fallback — bounds not yet initialised or degenerate
+            REAL altitude = z > 0 ? z : 0;
+            zFar = 4.0f * diag + 2.0f * altitude;
+            if (zFar < 200.0f)   zFar = 200.0f;
+            if (zFar > 20000.0f) zFar = 20000.0f;
+        }
+
+        vp->Perspective(fov,zNear,zFar,0.);
+
+        ModelMatrix();
+        LookAt(0,
                   0,
                   0,
 
@@ -1712,7 +1732,7 @@ void eCamera::Render(){
                   top.x,top.y,
                   1);
 
-        glTranslatef(-pos.x,-pos.y,-z);
+        TranslateMatrix(-pos.x,-pos.y,-z);
 
         bool draw_center=((CenterPos()-pos).NormSquared()>1 ||
                           fabs(CenterZ() - z)>1);
@@ -1725,84 +1745,19 @@ void eCamera::Render(){
         if (zNear < -.1 )
             zNear = .1;
 
-        if(se_cameraEyeDistance) {
-            glColorMask(se_cameraEye1Color & 1, se_cameraEye1Color & 2, se_cameraEye1Color & 4, GL_TRUE);
-        }
         grid->Render( this, id, zNear );
 
+        // Shrink zNear for the NEXT frame. The current frame used the
+        // previous frame's (smaller) zNear, which safely clears the
+        // player's cycle model. This matches the original GL code.
         zNear *= .3f;
         if ( zNear < 0.0001f )
         {
             zNear = 0.0001f;
         }
 
-        if(se_cameraEyeDistance) {
-            glClear(GL_DEPTH_BUFFER_BIT);
-            glColorMask(se_cameraEye2Color & 1, se_cameraEye2Color & 2, se_cameraEye2Color & 4, GL_TRUE);
-            glMatrixMode(GL_PROJECTION);
-            glLoadIdentity();
-            glMatrixMode(GL_MODELVIEW);
-            glLoadIdentity();
-
-			glMatrixMode(GL_PROJECTION);
-			if (mirrorView_) glScalef(-1,1,1);
-            vp->Perspective(fov,zNear,1E+20,-se_cameraEyeDistance/2.);
-
-#ifdef DUNNOWHATTHISISSUPPOSEDTODO
-            float offset = 0;
-            if(mode == CAMERA_IN) {
-                eSensor test(Center(), Center()->Position(), Center()->Direction());
-                test.detect(se_cameraInMaxFocusDistance*Center()->Speed());
-                offset = test.hit;
-            }
-#endif
-
-            glMatrixMode(GL_MODELVIEW);
-            gluLookAt(0,
-                      0,
-                      0,
-
-                      dir.x,
-                      dir.y,
-                      rise,
-
-                      top.x,top.y,
-                      1);
-
-            glTranslatef(-pos.x,-pos.y,-z);
-
-            draw_center=((CenterPos()-pos).NormSquared()>1 ||
-                         fabs(CenterZ() - z)>1);
-
-            tJUST_CONTROLLED_PTR< eGameObject > c=Center();
-            if (!draw_center && c) c->RemoveFromList();
-
-            eCoord poscopy = pos;
-            zNear = - eWallRim::Bound( poscopy, 0.0f );
-            if (zNear < -.1 )
-                zNear = .1;
-
-            grid->Render( this, id, zNear );
-
-            zNear *= .3f;
-            if ( zNear < 0.0001f )
-            {
-                zNear = 0.0001f;
-            }
-            glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
-        }
-
         if (c) c->RenderCockpitVirtual();
         if (!draw_center && c) c->AddToList();
-
-        /*
-          glDisable(GL_TEXTURE);
-          glColor3f(1,1,1);
-          glBegin(GL_LINES);
-          glVertex3f(centerPosSmooth.x,centerPosSmooth.y,0);
-          glVertex3f(centerPosSmooth.x,centerPosSmooth.y,10);
-          glEnd();
-        */
 
         CenterCockpitFixedAfter();
     }
@@ -1858,6 +1813,12 @@ void eCamera::SwitchCenter(int d){
         lastSwitch=lastTime;
     }
 }
+
+// Gyroscope angular rates (radians/second) injected by the touch overlay.
+// Applied in eCamera::Timestep() when non-zero.
+static float s_gyroYaw   = 0.0f;
+static float s_gyroPitch = 0.0f;
+static bool  s_cameraFrozen = false;
 
 void eCamera::Timestep(REAL ts){
     // adjust total sound volume; try yo do so smoothly
@@ -1976,6 +1937,17 @@ void eCamera::Timestep(REAL ts){
     {
         turning+=.5;
         centerDirLast = Center()->Direction();
+    }
+
+    // Apply gyro camera input (mobile tilt control).
+    // Directly rotate the camera direction for yaw and adjust rise for pitch.
+    // This gives immediate look-around feel (like analog stick), not the indirect
+    // height/distance effect that 'turning' provides.
+    if (s_gyroYaw != 0.0f || s_gyroPitch != 0.0f)
+    {
+        REAL gyroYawAngle = s_gyroYaw * ts * 2.0f;
+        dir = dir.Turn(cosf(gyroYawAngle), sinf(gyroYawAngle));
+        rise += s_gyroPitch * ts;
     }
 
     for(int i = hitCacheSize-1; i>=0; --i)
@@ -2754,5 +2726,45 @@ int GetPlayerWindingNumber(int player) {
     ePlayer* p = ePlayer::PlayerConfig(player);
     if (!p || !p->cam) return -1;
     return p->cam->WindingNumber();
+}
+
+// ============================================================
+// iOS/Android touch overlay C bridge
+// ============================================================
+
+// s_gyroYaw/s_gyroPitch/s_cameraFrozen forward-declared before eCamera::Timestep
+
+extern "C" void aa_SetGyroCameraInput(float yaw, float pitch)
+{
+    s_gyroYaw   = yaw;
+    s_gyroPitch = pitch;
+}
+
+extern "C" void aa_SetCameraFrozen(bool frozen)
+{
+    s_cameraFrozen = frozen;
+}
+
+void eCamera::TriggerGlanceForward(bool active)
+{
+    // Dispatch to player 0's camera via the normal Act() path.
+    ePlayer* p = ePlayer::PlayerConfig(0);
+    if (p) p->Act(&se_glance[GLANCE_FORWARD], active ? 1.0f : 0.0f);
+}
+
+void eCamera::TriggerSwitchView()
+{
+    ePlayer* p = ePlayer::PlayerConfig(0);
+    if (p) p->Act(&se_switchView, 1.0f);
+}
+
+extern "C" void aa_SetGlanceForward(bool active)
+{
+    eCamera::TriggerGlanceForward(active);
+}
+
+extern "C" void aa_SwitchCameraView()
+{
+    eCamera::TriggerSwitchView();
 }
 

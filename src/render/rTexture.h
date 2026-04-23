@@ -32,11 +32,10 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 #include "tResourceManager.h"
 #include "tDirectories.h"
 #include "tList.h"
-#include "rGL.h"
-#include "rGLuintObject.h"
+#include "rSDL.h"
 #include <list>
 
-struct SDL_Surface;
+// SDL_Surface is forward declared or typedef'd in rSDL.h
 
 //! class organizing textures into groups (very crudely...)
 class rTextureGroups
@@ -76,7 +75,7 @@ protected:
 private:
     // attributes
     SDL_Surface * surface_;                  //!< the surface itself
-    GLenum format_;                          //!< OpenGL texture format to use
+    int format_;                          //!< OpenGL texture format to use
 
     void CopyFrom( rSurface const & other ); //!< copy function
 
@@ -84,11 +83,11 @@ private:
 public:
     inline SDL_Surface * GetSurface( void ) const;	                     //!< Gets the surface itself
     inline rSurface const & GetSurface( SDL_Surface * & surface ) const; //!< Gets the surface itself
-    inline GLenum const & GetFormat( void ) const;	                     //!< Gets openGL texture format to use
-    inline rSurface const & GetFormat( GLenum & format ) const;	         //!< Gets openGL texture format to use
+    inline int const & GetFormat( void ) const;	                     //!< Gets openGL texture format to use
+    inline rSurface const & GetFormat( int & format ) const;	         //!< Gets openGL texture format to use
 protected:
     inline rSurface & SetSurface( SDL_Surface * surface );	             //!< Sets the surface itself
-    inline rSurface & SetFormat( GLenum const & format );	             //!< Sets openGL texture format to use
+    inline rSurface & SetFormat( int const & format );	             //!< Sets openGL texture format to use
 private:
 };
 
@@ -172,7 +171,7 @@ private:
 
     int textureModeLast_;   //!< the last texture storage mode this texture was used with
 
-    rGLuintObjectTexture tint_;   //!< the OpenGL id of this texture
+    unsigned int tint_ = 0;       //!< renderer-side texture id (0 = not yet allocated)
     bool repx_,repy_;             //!< flags indicating whether the texture repeats in x and y direction
     bool storeAlpha_;             //!< flag indicating whether the alpha value should be stored
 };
@@ -328,7 +327,7 @@ rSurface & rSurface::SetSurface( SDL_Surface * surface )
 //!
 // ******************************************************************************************
 
-GLenum const & rSurface::GetFormat( void ) const
+int const & rSurface::GetFormat( void ) const
 {
     return this->format_;
 }
@@ -344,7 +343,7 @@ GLenum const & rSurface::GetFormat( void ) const
 //!
 // ******************************************************************************************
 
-rSurface const & rSurface::GetFormat( GLenum & format ) const
+rSurface const & rSurface::GetFormat( int & format ) const
 {
     format = this->format_;
     return *this;
@@ -361,7 +360,7 @@ rSurface const & rSurface::GetFormat( GLenum & format ) const
 //!
 // ******************************************************************************************
 
-rSurface & rSurface::SetFormat( GLenum const & format )
+rSurface & rSurface::SetFormat( int const & format )
 {
     this->format_ = format;
     return *this;

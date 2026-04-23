@@ -32,7 +32,10 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 #include "tCallback.h"
 #include "tCallbackString.h"
 #include "tRuby.h"
+
+#ifndef DEDICATED
 #include "rSDL.h"
+#endif
 
 typedef enum {
     ArmageTron_Desktop=0,ArmageTron_320_200,ArmageTron_Min=ArmageTron_320_200, ArmageTron_320_240,ArmageTron_400_300,
@@ -83,8 +86,9 @@ public:
     bool				checkErrors;
     int                 displayIndex;   // display to use
     int                 refreshRate;    // screen refresh rate
-    rVSync              vSync;          // whether to wait for vsync
+    rVSync              vSync;          // whether to wait for vsync (GL only)
     REAL				aspect;			// aspect ratio of pixels ( width/height )
+    int                 presentMode;    // Vulkan present mode (0=Auto, 1=VSync, 2=Immediate, 3=Mailbox)
 
     rScreenSettings(rResolution r,
                     bool fs=true,
@@ -97,14 +101,15 @@ bool sr_DesktopScreensizeSupported();
 extern rScreenSettings currentScreensetting;
 extern rScreenSettings lastSuccess;
 
-#if SDL_VERSION_ATLEAST(2,0,0)
+#ifndef DEDICATED
+// Platform-specific screen handle (SDL3)
 struct SDL_Window;
 struct SDL_Renderer;
 extern SDL_Window   *sr_screen;
 #else
-struct SDL_Surface;
-extern SDL_Surface  *sr_screen;
-#endif
+// Stub for dedicated server - always nullptr (no screen)
+static void* const sr_screen = nullptr;
+#endif // DEDICATED
 
 // screen/window dimensions in pixels
 extern int sr_screenWidth,sr_screenHeight;
@@ -113,23 +118,29 @@ extern bool sr_alphaBlend;
 extern bool sr_screenshotIsPlanned;
 extern bool sr_smoothShading;
 
+//! Returns the fraction of the screen height occupied by the on-screen keyboard
+//! (0.0 when hidden). Used to shift the rendering viewport upward.
+REAL sr_ScreenKeyboardHeightFraction();
+
+//! Returns a UI scale multiplier for touch-friendly menu sizing on mobile.
+//! On small screens (phones), returns > 1.0 to enlarge menu items.
+//! On tablets and desktops, returns 1.0 (no scaling).
+REAL sr_TouchUIScale();
+
 extern bool sr_glOut;           // do we have gl-output at all?
 extern bool sr_textOut;          // display game text graphically?
 extern bool sr_FPSOut;           // display frame counter?
 
-//! how should caching display lists be used?
+//! Display list usage is disabled in GL3 renderer (legacy enum kept for compatibility)
 enum rDisplayListUsage
 {
-    rDisplayList_Off=0, // not at all
-    rDisplayList_CAC,   // yes, with GL_COMPILE, then glCallList.
-    rDisplayList_CAE,   // yes, with GL_COMPILE_AND_EXECUTE
+    rDisplayList_Off=0, // not at all (only mode in GL3)
+    rDisplayList_CAC,   // deprecated
+    rDisplayList_CAE,   // deprecated
     rDisplayList_Count
 };
 
-extern rDisplayListUsage sr_useDisplayLists;   // use GL display lists
-extern bool sr_blacklistDisplayLists;   // use GL display lists (override for buggy implementations)
-// not delete the screen, just pait the background with depth test
-// disabled. Gives 20% speedup.
+extern rDisplayListUsage sr_useDisplayLists;   // Always rDisplayList_Off in GL3
 
 
 #define rMIRROR_OFF     0
@@ -214,6 +225,13 @@ void sr_SetWindowTitle(tOutput o);
 void sr_SetWindowTitle(tString s);
 void sr_SetWindowTitle();
 
+#ifndef DEDICATED
 void sr_LockSDL();
 void sr_UnlockSDL();
+#else
+// Stub implementations for dedicated server
+inline void sr_LockSDL() {}
+inline void sr_UnlockSDL() {}
+#endif // DEDICATED
+
 #endif

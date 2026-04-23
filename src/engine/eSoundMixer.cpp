@@ -44,8 +44,15 @@ eSoundMixer by Dave Fancella
 #include "eCoord.h"
 
 #include "eSoundMixer.h"
+#ifdef HAVE_LIBSDL_MIXER
 #include "sdl_mixer/eMusicTrackSDLMixer.h"
 #include "sdl_mixer/eChannelSDLMixer.h"
+#elif defined(HAVE_MINIAUDIO)
+#include "eChannelMiniaudio.h"
+#include "eAudioInterface.h"
+// Global audio device for miniaudio
+static std::unique_ptr<eAudioDevice> s_audioDevice;
+#endif
 
 // Possibly temporary?
 #include <math.h>
@@ -175,20 +182,20 @@ void eSoundMixer::SetGrid(eGrid* grid) {
 }
 
 void eSoundMixer::__channelFinished(int channel) {
-#ifdef HAVE_LIBSDL_MIXER
+#if defined(HAVE_LIBSDL_MIXER) || defined(HAVE_MINIAUDIO)
     m_Channels[channel].UnplaySound();
-#endif // DEDICATED
+#endif
 }
 
 void eSoundMixer::ChannelFinished(int channel) {
-#ifdef HAVE_LIBSDL_MIXER
+#if defined(HAVE_LIBSDL_MIXER) || defined(HAVE_MINIAUDIO)
     _instance->__channelFinished(channel);
-#endif // DEDICATED
+#endif
 }
 
 int eSoundMixer::FirstAvailableChannel() {
-#ifdef HAVE_LIBSDL_MIXER
-    Uint32 oldesttime=0;
+#if defined(HAVE_LIBSDL_MIXER) || defined(HAVE_MINIAUDIO)
+    unsigned int oldesttime=0;
     int oldestchannel=-1;
 
     for( int i=0; i < m_numChannels; i++) {
@@ -205,13 +212,14 @@ int eSoundMixer::FirstAvailableChannel() {
     return oldestchannel;
     // TODO: error handling
     tASSERT( 0 );
-#endif // DEDICATED
+#endif
     return -1;
 }
 
 // wraps call to SDL_InitSubSystem, setting the audio driver to a predefined value
 #ifdef HAVE_LIBSDL_MIXER
-static int se_Wrap_SDL_InitSubSystem()
+// SDL3: SDL_InitSubSystem returns bool, not int
+static bool se_Wrap_SDL_InitSubSystem()
 {
 #ifndef DEDICATED
 #ifdef DEFAULT_SDL_AUDIODRIVER
@@ -225,9 +233,9 @@ static int se_Wrap_SDL_InitSubSystem()
         char * arg = "SDL_AUDIODRIVER=" STRING(DEFAULT_SDL_AUDIODRIVER);
         putenv(arg);
 
-        int ret = SDL_InitSubSystem(SDL_INIT_AUDIO);
-        if ( ret >= 0 )
-            return ret;
+        // SDL3: returns true on success
+        if ( SDL_InitSubSystem(SDL_INIT_AUDIO) )
+            return true;
 
         putenv("SDL_AUDIODRIVER=");
     }
@@ -235,6 +243,7 @@ static int se_Wrap_SDL_InitSubSystem()
 #endif
 
     // if that fails, try what the user wanted
+    // SDL3: returns true on success
     return SDL_InitSubSystem(SDL_INIT_AUDIO);
 }
 #endif
@@ -247,9 +256,8 @@ int se_mixerFrequency = 1;
 void eSoundMixer::Init() {
 #ifdef HAVE_LIBSDL_MIXER
     if(!SDL_WasInit( SDL_INIT_AUDIO )) {
-        int rc;
-        rc = se_Wrap_SDL_InitSubSystem();
-        if ( rc < 0 ) {
+        // SDL3: se_Wrap_SDL_InitSubSystem now returns bool (true on success)
+        if ( !se_Wrap_SDL_InitSubSystem() ) {
             //std::cerr << "Couldn't initialize audio, disabling.  I'm very sorry about that.\n";
             return;
             // todo: disable audio if we can't initialize it
@@ -288,7 +296,7 @@ void eSoundMixer::Init() {
         rc = Mix_OpenAudio( 22050, AUDIO_S16LSB,
                             2, samples );
     }
-        
+
     if(rc==0) {
         // success!
         int c;
@@ -365,6 +373,86 @@ void eSoundMixer::Init() {
 
     // only now, everything is all right
     m_active = true;
+#elif defined(HAVE_MINIAUDIO)
+    // Miniaudio initialization
+    m_active = false;
+
+    if (sound_quality == SOUND_OFF)
+    {
+        return;
+    }
+
+    // Create audio device
+    s_audioDevice = CreateAudioDevice();
+    if (!s_audioDevice)
+    {
+        return;
+    }
+
+    // Set the global audio device for eChannelMiniaudio to use
+    SetGlobalAudioDevice(s_audioDevice.get());
+
+    eAudioQuality quality;
+    switch (sound_quality)
+    {
+    case SOUND_LOW:
+        quality = AUDIO_QUALITY_LOW;
+        break;
+    case SOUND_HIGH:
+        quality = AUDIO_QUALITY_HIGH;
+        break;
+    default:
+        quality = AUDIO_QUALITY_MEDIUM;
+    }
+
+    if (!s_audioDevice->Init(quality, buffersize))
+    {
+        s_audioDevice.reset();
+        return;
+    }
+
+    se_mixerFrequency = s_audioDevice->GetSampleRate();
+
+    const tPath& vpath = tDirectories::Data();
+
+    // We haven't started playing any music yet
+    m_musicIsPlaying = false;
+
+    tString musFile;
+
+    musFile = vpath.GetReadPath(titleTrack);
+    m_TitleTrack.reset(new eMusicTrack(musFile, true));
+    musFile = vpath.GetReadPath(guiTrack);
+    m_GuiTrack.reset(new eMusicTrack(musFile, true));
+    m_GameTrack.reset(new eMusicTrack());
+
+    LoadPlaylist();
+
+    // Load sound effects
+    m_SoundEffects.resize(15);
+    m_SoundEffects[CYCLE_TURN].LoadWavFile(vpath.GetReadPath("sound/cycle_turn.ogg"));
+    m_SoundEffects[CYCLE_TURN].SetVolume(60);
+    m_SoundEffects[CYCLE_EXPLOSION].LoadWavFile(vpath.GetReadPath("sound/expl.ogg"));
+    m_SoundEffects[ANNOUNCER_1].LoadWavFile(vpath.GetReadPath("sound/1voicemale.ogg"));
+    m_SoundEffects[ANNOUNCER_2].LoadWavFile(vpath.GetReadPath("sound/2voicemale.ogg"));
+    m_SoundEffects[ANNOUNCER_3].LoadWavFile(vpath.GetReadPath("sound/3voicemale.ogg"));
+    m_SoundEffects[ANNOUNCER_GO].LoadWavFile(vpath.GetReadPath("sound/announcerGO.ogg"));
+    m_SoundEffects[ZONE_SPAWN].LoadWavFile(vpath.GetReadPath("sound/zone_spawn.ogg"));
+    m_SoundEffects[CYCLE_MOTOR].LoadWavFile(vpath.GetReadPath("sound/cyclrun.ogg"));
+    m_SoundEffects[CYCLE_GRIND_WALL].LoadWavFile(vpath.GetReadPath("sound/grind.ogg"));
+
+    // Allocate channels
+    m_numChannels = 40;
+    m_Channels.resize(m_numChannels);
+    for (int i = 0; i < m_numChannels; i++)
+    {
+        m_Channels[i].SetId(i);
+    }
+
+    // Initialize channel data for audio mixing
+    eChannel_InitializeChannels(m_Channels);
+
+    m_active = true;
 #endif
 }
 
@@ -373,7 +461,7 @@ eSoundMixer::~eSoundMixer() {
 }
 
 void eSoundMixer::LoadPlaylist() {
-#ifdef HAVE_LIBSDL_MIXER
+#if defined(HAVE_LIBSDL_MIXER) || defined(HAVE_MINIAUDIO)
     if(!m_GameTrack) return;
 
     if(usePlaylist == 1) {
@@ -390,14 +478,14 @@ void eSoundMixer::LoadPlaylist() {
 // SetMode shouldn't call any SDL_mixer functions, it will be called from SDL_mixer's
 //   callbacks!
 void eSoundMixer::SetMode(MusicMode newMode) {
-#ifdef HAVE_LIBSDL_MIXER
+#if defined(HAVE_LIBSDL_MIXER) || defined(HAVE_MINIAUDIO)
     m_Mode = newMode;
     m_isDirty = true;
-#endif // DEDICATED
+#endif
 }
 
 void eSoundMixer::SongFinished() {
-#ifdef HAVE_LIBSDL_MIXER
+#if defined(HAVE_LIBSDL_MIXER) || defined(HAVE_MINIAUDIO)
     // Music stopped
     m_musicIsPlaying = false;
 
@@ -415,29 +503,29 @@ void eSoundMixer::SongFinished() {
     default:
         break;
     }
-#endif // DEDICATED
+#endif
 
 }
 
 void eSoundMixer::SDLMusicFinished() {
-#ifdef HAVE_LIBSDL_MIXER
+#if defined(HAVE_LIBSDL_MIXER) || defined(HAVE_MINIAUDIO)
     // We're guaranteed to have this, so we'll just use it
     m_TitleTrack->currentMusic->MusicFinished();
 #endif
 }
 
 void eSoundMixer::PushButton( int soundEffect ) {
-#ifdef HAVE_LIBSDL_MIXER
+#if defined(HAVE_LIBSDL_MIXER) || defined(HAVE_MINIAUDIO)
     if (!m_active) return;
 
     int theChannel = FirstAvailableChannel();
     if( theChannel < 0) return;
     m_Channels[ theChannel ].PlaySound(m_SoundEffects[soundEffect]);
-#endif // DEDICATED
+#endif
 }
 
 void eSoundMixer::PushButton( int soundEffect, eGameObject const &noiseMaker, REAL volume ) {
-#ifdef HAVE_LIBSDL_MIXER
+#if defined(HAVE_LIBSDL_MIXER) || defined(HAVE_MINIAUDIO)
     if (!m_active) return;
 
     // If we don't have an owner yet, just call regular PushButton
@@ -457,20 +545,28 @@ void eSoundMixer::PushButton( int soundEffect, eGameObject const &noiseMaker, RE
         m_Channels[theChannel].PlaySound(m_SoundEffects[soundEffect]);
     }
 
-#endif // DEDICATED
+#endif
 }
 
 void eSoundMixer::PlayContinuous(int soundEffect, eGameObject* owner) {
-#ifdef HAVE_LIBSDL_MIXER
+#if defined(HAVE_LIBSDL_MIXER) || defined(HAVE_MINIAUDIO)
 #ifdef DEBUG
     std::cout << "Playcontinuous: " << SoundEffectString[soundEffect] << "\n";
 #endif
     if (!m_active) return;
-    return;
 
-    /*
+    // Check if this owner already has a continuous sound playing
+    for (int i = 0; i < m_numChannels; i++)
+    {
+        if (m_Channels[i].GetOwner() == owner && m_Channels[i].IsContinuous())
+        {
+            return; // Already playing
+        }
+    }
+
     int theChannel = FirstAvailableChannel();
-    if( theChannel < 0 || m_Channels[theChannel].isBusy()) {
+    if (theChannel < 0)
+    {
 #ifdef DEBUG
         std::cout << "Can't loop, sorry.\n";
 #endif
@@ -478,16 +574,12 @@ void eSoundMixer::PlayContinuous(int soundEffect, eGameObject* owner) {
     }
 
     m_Channels[theChannel].SetOwner(owner);
-    // If we don't have an owner yet, we need to delay starting
-    if(!m_Owner) m_Channels[theChannel].DelayStarting();
-    m_Channels[theChannel].SetHome(m_Owner);
     m_Channels[theChannel].LoopSound(m_SoundEffects[soundEffect]);
-    */
 #endif
 }
 
 void eSoundMixer::RemoveContinuous(int soundEffect, eGameObject* owner) {
-#ifdef HAVE_LIBSDL_MIXER
+#if defined(HAVE_LIBSDL_MIXER) || defined(HAVE_MINIAUDIO)
     for(std::deque<eChannel>::iterator i = m_Channels.begin(); i != m_Channels.end(); ++i) {
         if ((*i).GetOwner() == owner) {
             (*i).StopSound();
@@ -500,7 +592,7 @@ void eSoundMixer::RemoveContinuous(int soundEffect, eGameObject* owner) {
 }
 
 void eSoundMixer::Update() {
-#ifdef HAVE_LIBSDL_MIXER
+#if defined(HAVE_LIBSDL_MIXER) || defined(HAVE_MINIAUDIO)
     if (!m_active) return;
     // Stubbed my french fry
 
@@ -552,10 +644,11 @@ void eSoundMixer::Update() {
     // Go ahead and update the music track now.
     if ( m_GuiTrack && m_GuiTrack->currentMusic )
         m_GuiTrack->currentMusic->Update();
-#endif // DEDICATED
+#endif
 }
 
 tString eSoundMixer::GetCurrentSong() {
+#if defined(HAVE_LIBSDL_MIXER) || defined(HAVE_MINIAUDIO)
     if(m_GameTrack != NULL)
         if(m_GameTrack->currentMusic != NULL) {
             tString const &str = m_GameTrack->currentMusic->GetFileName();
@@ -568,6 +661,7 @@ tString eSoundMixer::GetCurrentSong() {
             if(pos == str.size()) return tString();
             return str.SubStr(pos + 1);
         }
+#endif
     return tString(" ");
 }
 
@@ -587,7 +681,20 @@ void eSoundMixer::ShutDown() {
     }
 
     _instance.reset();
-#endif // DEDICATED
+#elif defined(HAVE_MINIAUDIO)
+    m_TitleTrack.reset();
+    m_GuiTrack.reset();
+    m_GameTrack.reset();
+
+    if (s_audioDevice)
+    {
+        SetGlobalAudioDevice(nullptr);
+        s_audioDevice->Shutdown();
+        s_audioDevice.reset();
+    }
+
+    _instance.reset();
+#endif
 }
 
 eSoundMixer& eSoundMixer::GetMixer() {
@@ -600,7 +707,7 @@ eSoundMixer& eSoundMixer::GetMixer() {
     return *_instance;
 }
 
-#ifdef HAVE_LIBSDL_MIXER
+#if defined(HAVE_LIBSDL_MIXER) || defined(HAVE_MINIAUDIO)
 // Play this every frame
 static void updateMixer() {
     eSoundMixer& mixer = eSoundMixer::GetMixer();
@@ -814,6 +921,6 @@ void se_SoundMenu(){
 }
 
 
-#endif // DEDICATED
+#endif // HAVE_LIBSDL_MIXER || HAVE_MINIAUDIO
 
 

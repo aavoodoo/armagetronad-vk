@@ -28,15 +28,12 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 #ifndef ArmageTron_CYCLE_H
 #define ArmageTron_CYCLE_H
 
-//#define USE_HEADLIGHT
-
 #include "gStuff.h"
 //#include "rTexture.h"
 //#include "rModel.h"
 #include "eNetGameObject.h"
 #include "tList.h"
 #include "nObserver.h"
-#include "rDisplayList.h"
 
 #include "gCycleMovement.h"
 
@@ -53,15 +50,14 @@ struct gPredictPositionData;
 // minimum time between two cycle turns
 extern REAL sg_delayCycle;
 
-// Render the headlight effect?
-extern bool headlights;
-
 // steering help
 extern REAL sg_rubberCycle;
 
 extern REAL sg_cycleInvulnerableTime;
 
 namespace Game { class CycleSync; }
+
+class gCycleWallRenderer;  // forward declaration for wallRenderer_ back-pointer
 
 // this class set is responsible for remembering which walls are too
 // close together to pass through safely. The AI uses this information,
@@ -120,40 +116,56 @@ private:
 class gCycleChatBot;
 
 #ifndef DEDICATED
-class gCycleWallsDisplayListManager
+class rStaticMesh;
+class rWallGeometryCollector;
+
+class gCycleWallsRenderCache
 {
     friend class gNetPlayerWall;
 
 public:
-    gCycleWallsDisplayListManager();
-    ~gCycleWallsDisplayListManager();
+    gCycleWallsRenderCache();
+    ~gCycleWallsRenderCache();
 
-    //! checks whether a wall at a certain distance can have a display list
-    static bool CannotHaveList( REAL distance, gCycle const * cycle );
+    //! checks whether a wall at a certain distance can be cached
+    static bool CannotCache( REAL distance, gCycle const * cycle );
 
-    //! renders all walls scheduled for display list usage
-    void RenderAllWithDisplayList( eCamera const * camera, gCycle * cycle );
+    //! renders all walls scheduled for VBO caching (legacy path)
+    void RenderCachedWalls( eCamera const * camera, gCycle * cycle );
 
-    //! render all walls in a list
+    //! render all walls in a list (legacy path)
     static void RenderAll( eCamera const * camera, gCycle * cycle, gNetPlayerWall * list );
 
-    //! render all walls
+    //! render all walls (entry point - routes to new or legacy renderer)
     void RenderAll( eCamera const * camera, gCycle * cycle );
+
+    //! new optimized rendering path using geometry collector
+    void RenderAllNew( eCamera const * camera, gCycle * cycle );
+
     bool Walls() const
     {
-        return wallList_ || wallsWithDisplayList_;
+        return wallList_ || cachedWalls_;
     }
 
-    void Clear( int inhibit = 0 )
-    {
-        displayList_.Clear( inhibit );
-    }
+    void Clear( int inhibit = 0 );
+
+    //! invalidate only the streaming portion (begin segments changed)
+    void InvalidateStreaming();
+
+    //! invalidate the static cache (wall expired, wall added)
+    void InvalidateStatic();
+
 private:
-    gNetPlayerWall *                wallList_;                      //!< linked list of all walls
-    gNetPlayerWall *                wallsWithDisplayList_;          //!< linked list of all walls with display list    
-    rDisplayList                    displayList_;                   //!< combined display list
-    REAL                            wallsWithDisplayListMinDistance_; //!< minimal distance of the walls with display list
-    int                             wallsInDisplayList_;            //!< number of walls in the current display list
+    gNetPlayerWall *                wallList_;                      //!< linked list of non-cached walls
+    gNetPlayerWall *                cachedWalls_;                   //!< linked list of walls in VBO cache
+    std::unique_ptr<rStaticMesh>    staticMesh_;                    //!< VBO-based cache (legacy)
+    REAL                            cachedWallsMinDistance_;        //!< minimal distance of cached walls
+    int                             cachedWallCount_;               //!< number of walls in cache
+
+    // New optimized wall rendering
+    std::unique_ptr<rWallGeometryCollector> geometryCollector_;     //!< separated static/streaming buffers
+    REAL                            lastStableThreshold_;           //!< last calculated stable threshold
+    bool                            useNewRenderer_;                //!< whether to use new renderer
 };
 #endif
 
@@ -213,7 +225,8 @@ private:
     void TransferPositionCorrectionToDistanceCorrection();
 
 #ifndef DEDICATED
-    gCycleWallsDisplayListManager displayList_;                     //!< display list manager
+    gCycleWallsRenderCache wallsCache_;                              //!< wall rendering cache manager
+    gCycleWallRenderer* wallRenderer_ = nullptr;                    //!< back-pointer to wall renderer (raw, nulled on destruction)
 #endif
 
     tCHECKED_PTR(gNetPlayerWall)	currentWall;                    //!< the wall that currenly is attached to the cycle
@@ -363,6 +376,11 @@ private:
 protected:
     bool DoIsDestinationUsed(const gDestination *dest) const override; //!< returns whether the given destination is in active use
 };
+
+//! Speed at which cycle sound plays at normal pitch
+extern REAL sg_speedCycleSound;
+//! Mach factor for cycle sound Doppler effect
+extern REAL sg_speedCycleSoundMach;
 
 #endif
 

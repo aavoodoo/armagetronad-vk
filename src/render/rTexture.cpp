@@ -29,8 +29,16 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 
 #include "aa_config.h"
 
+// stb_image for image loading (replaces SDL_image)
+#ifndef DEDICATED
+#define STB_IMAGE_IMPLEMENTATION
+#include "stb_image.h"
+#include "stb_image_write.h"
+#include <string>
+#include <fstream>
+#endif
+
 #include "rTexture.h"
-#include "rDisplayList.h"
 #include "tString.h"
 #include "rScreen.h"
 #include "tDirectories.h"
@@ -41,53 +49,90 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 
 #include <sstream>
 #include <set>
+#include <iostream>
+#ifdef __ANDROID__
+#include <vector>
+#endif
 
 #ifndef DEDICATED
 #include "rRender.h"
-#include "rGL.h"
 
-// Load the right SDL_IMAGE header
+// Helper function to load image using stb_image and create SDL_Surface
+static SDL_Surface* sr_LoadImageSTB(const char* filename)
+{
+    // Check for empty filename
+    if (!filename || !filename[0])
+    {
+        return nullptr;
+    }
 
-#ifdef _MSC_VER
-#include <SDL_image.h>
+    // Load image with stb_image, force RGBA output for consistency
+    int width, height, originalChannels;
+    unsigned char* pixels = nullptr;
+
+#ifdef __ANDROID__
+    // On Android, stbi_load uses fopen which cannot read APK assets.
+    // Use SDL_IOFromFile (routed through AAssetManager) then stbi_load_from_memory.
+    {
+        const char* assetPath = filename;
+        if (assetPath[0] == '.' && assetPath[1] == '/')
+            assetPath += 2;
+        SDL_IOStream* io = SDL_IOFromFile(assetPath, "rb");
+        if (io)
+        {
+            Sint64 size = SDL_GetIOSize(io);
+            if (size > 0)
+            {
+                std::vector<unsigned char> buf((size_t)size);
+                SDL_ReadIO(io, buf.data(), (size_t)size);
+                SDL_CloseIO(io);
+                pixels = stbi_load_from_memory(buf.data(), (int)size,
+                                               &width, &height, &originalChannels, 4);
+            }
+            else
+            {
+                SDL_CloseIO(io);
+            }
+        }
+    }
 #else
-#ifdef __MINGW32__
-#include <SDL_image.h>
-#else
-#ifdef HAVE_SDL_IMG_H
-#include <SDL_image.h>
-#else
-#ifdef HAVE_SDL_SDL_IMAGE_H
-#include <SDL/SDL_image.h>
-#else
-#ifdef HAVE_IMG_H
-#include <IMG.h>
-#else
-#ifdef HAVE_SDL_IMG_H
-#include <SDL/IMG.h>
-#else
-#ifdef HAVE_LIBSDL
-#include <SDL_image.h>
-#else
-#ifdef HAVE_LIBIMG
-#include <IMG.h>
-#else
-// if the following include ( or one of the earlier ones ) fails, you don't have SDL_image properly installed.
-#include <SDL_image.h>
-#endif
-#endif
-#endif
-#endif
-#endif
-#endif
-#endif
-#endif
+    pixels = stbi_load(filename, &width, &height, &originalChannels, 4);
 #endif
 
-// MS OpenGL headers don't include this define
-#ifndef GL_CLAMP_TO_EDGE
-#define GL_CLAMP_TO_EDGE GL_CLAMP
+    if (!pixels)
+    {
+        return nullptr;
+    }
+
+    // stb_image returns R,G,B,A byte order - create surface with RGBA format
+#if SDL_BYTEORDER == SDL_BIG_ENDIAN
+    SDL_PixelFormat srcFormat = SDL_PIXELFORMAT_RGBA8888;
+    SDL_PixelFormat dstFormat = SDL_PIXELFORMAT_BGRA8888;
+#else
+    SDL_PixelFormat srcFormat = SDL_PIXELFORMAT_ABGR8888;
+    SDL_PixelFormat dstFormat = SDL_PIXELFORMAT_ARGB8888;
 #endif
+
+    // Create a temporary surface with the raw pixel data
+    SDL_Surface* tempSurface = SDL_CreateSurfaceFrom(
+        width, height, srcFormat, pixels, width * 4);
+
+    if (!tempSurface)
+    {
+        stbi_image_free(pixels);
+        return nullptr;
+    }
+
+    // Convert to target format
+    SDL_Surface* convertedSurface = SDL_ConvertSurface(tempSurface, dstFormat);
+
+    SDL_DestroySurface(tempSurface);
+    stbi_image_free(pixels);
+
+    return convertedSurface;
+}
+#endif
+
 
 // ******************************************************************************************
 // *
@@ -200,7 +245,7 @@ void rSurface::Clear( void )
 #ifndef DEDICATED
     // delete surface
     if ( surface_ )
-        SDL_FreeSurface( surface_ );
+        SDL_DestroySurface( surface_ );
 
 #endif
     surface_ = 0;
@@ -221,23 +266,15 @@ void rSurface::Create( char const * fileName, tPath const *path )
 #ifndef DEDICATED
     sr_LockSDL();
 
-#if !SDL_VERSION_ATLEAST(2,0,0)
-    // this function was already a no-op for backward compatibility in SDL_image 1.2, as stated in corresponding header
-    IMG_InvertAlpha(true);
-#endif
-
-    // find path of image and load it
+    // find path of image and load it using stb_image
     SDL_Surface *surface;
     if(path) {
         tString s = path->GetReadPath( fileName );
-        surface = IMG_Load(s);
+        surface = sr_LoadImageSTB(s.c_str());
     } else {
-        surface = IMG_Load(fileName);
+        surface = sr_LoadImageSTB(fileName);
     }
     Create(surface);
-
-    //if ( surface_ )
-    //    std::cerr << "loaded surface " << fileName << "\n";
 
     sr_UnlockSDL();
 #endif
@@ -265,62 +302,44 @@ void rSurface::Create( SDL_Surface * surface )
     // determine texture format
     if ( surface_ )
     {
-        switch (surface_->format->BytesPerPixel){
+        switch (AA_GetSurfaceBytesPerPixel(surface_)){
         case 1:
-            format_ = GL_LUMINANCE;
+            format_ = rGLConst::Luminance;
             break;
 
         case 2:
-            format_ = GL_LUMINANCE8_ALPHA8;
+            format_ = rGLConst::Luminance8Alpha8;
             break;
 
         case 3:
-#ifdef GL_BRG
-            if (surface_->format->Rmask == 0x000000ff)
-                format_ = GL_RGB;
+            if (AA_GetSurfaceRmask(surface_) == 0x000000ff)
+                format_ = rGLConst::RGB;
             else
-                format_ = GL_BGR;
-#else
-            format_ = GL_RGB;
-#endif
+                format_ = rGLConst::BGR;
             break;
 
         case 4:
-#ifdef GL_BGRA
-            if (surface_->format->Rmask == 0x000000ff)
-                format_ = GL_RGBA;
+            if (AA_GetSurfaceRmask(surface_) == 0x000000ff)
+                format_ = rGLConst::RGBA;
             else
-                format_ = GL_BGRA;
-#else
-            format_ = GL_RGBA;
-#endif
+                format_ = rGLConst::BGRA;
             break;
 
         default:
             {
                 // fallback: convert the texture into a known format.
-                SDL_Surface *dummy =
-                    SDL_CreateRGBSurface(SDL_SWSURFACE, 1, 1,
-                                         32,
 #if SDL_BYTEORDER == SDL_BIG_ENDIAN
-                                         0xFF0000, 0x00FF00, 0x0000FF
+                SDL_PixelFormat targetFormat = SDL_PIXELFORMAT_BGRA8888;
+                format_ = rGLConst::BGRA;
 #else
-                                         0x0000FF, 0x00FF00, 0xFF0000
+                SDL_PixelFormat targetFormat = SDL_PIXELFORMAT_RGBA8888;
+                format_ = rGLConst::RGBA;
 #endif
-                                         ,0xFF000000);
 
-                SDL_Surface *convtex =
-                    SDL_ConvertSurface(surface_, dummy->format, SDL_SWSURFACE);
+                SDL_Surface *convtex = SDL_ConvertSurface(surface_, targetFormat);
 
-                SDL_FreeSurface(surface_);
+                SDL_DestroySurface(surface_);
                 surface_ = convtex;
-                SDL_FreeSurface(dummy);
-
-#if SDL_BYTEORDER == SDL_BIG_ENDIAN
-                format_ = GL_BGRA;
-#else
-                format_ = GL_RGBA;
-#endif
             }
             break;
         }
@@ -353,17 +372,12 @@ void rSurface::CreateQuarter( rSurface const & big )
     int w = (sourceW+1)/2;
     int h = (sourceH+1)/2;
 
-    // create new surface of new sizes
-    surface_ = SDL_CreateRGBSurface(SDL_SWSURFACE, w, h,
-                                    big.surface_->format->BitsPerPixel,
-                                    big.surface_->format->Rmask,
-                                    big.surface_->format->Gmask,
-                                    big.surface_->format->Bmask,
-                                    big.surface_->format->Amask);
+    // create new surface of new sizes with same format
+    surface_ = SDL_CreateSurface(w, h, AA_GetSurfaceFormat(big.surface_));
 
     tASSERT( surface_ );
 
-    int bytesPerPixel = surface_->format->BytesPerPixel;
+    int bytesPerPixel = AA_GetSurfaceBytesPerPixel(surface_);
     int sourcePitch = big.surface_->pitch;
     int pitch = surface_->pitch;
     unsigned char const * source = (unsigned char const *)big.surface_->pixels;
@@ -405,8 +419,8 @@ void rSurface::CopyFrom( rSurface const & other )
     tASSERT( 0 == surface_ );
     if( other.surface_ )
     {
-        // copy surface
-        surface_ = SDL_ConvertSurface(other.surface_, other.surface_->format, SDL_SWSURFACE);
+        // copy surface with same format
+        surface_ = SDL_ConvertSurface(other.surface_, AA_GetSurfaceFormat(other.surface_));
 
         // copy flags
         format_ = other.format_;
@@ -631,10 +645,9 @@ rISurfaceTexture::rISurfaceTexture( int group, bool repx, bool repy, bool storeA
 
 rISurfaceTexture::~rISurfaceTexture( void )
 {
-    if (tint_.IsValid() )
-    {
-        rDisplayList::ClearAll();
-    }
+#ifndef DEDICATED
+    if (tint_) { RenderDeleteTexture(tint_); tint_ = 0; }
+#endif
 }
 
 // ******************************************************************************************
@@ -660,8 +673,8 @@ static bool sr_IsPowerOfTwo( int i )
 static int sr_GetMaxTextureSizeCore()
 {
     // guaranteed supported size
-    GLint maxSize = 64;
-    glGetIntegerv(GL_MAX_TEXTURE_SIZE, &maxSize);
+    int maxSize = RenderGetMaxTextureSize();
+    if (maxSize < 64) maxSize = 64;
     return maxSize;
 }
 
@@ -686,34 +699,34 @@ void rISurfaceTexture::Upload( rSurface const & surface )
 {
 #ifndef DEDICATED
     sr_LockSDL();
-    GLenum texformat = surface.GetFormat();
+    int texformat = surface.GetFormat();
     SDL_Surface * tex = surface.GetSurface();
     tASSERT( tex );
 
-    bool texalpha=tex->format->Amask;
+    bool texalpha = AA_GetSurfaceAmask(tex) != 0;
 
     ProcessImage(tex);
 
     if(repx_)
-        glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_WRAP_S,GL_REPEAT);
+        RenderTexParameter(rGLConst::Texture2D,rGLConst::TextureWrapS,rGLConst::Repeat);
     else
-        glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_WRAP_S,GL_CLAMP_TO_EDGE);
+        RenderTexParameter(rGLConst::Texture2D,rGLConst::TextureWrapS,rGLConst::ClampToEdge);
     if(repy_)
-        glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_WRAP_T,GL_REPEAT);
+        RenderTexParameter(rGLConst::Texture2D,rGLConst::TextureWrapT,rGLConst::Repeat);
     else
-        glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_WRAP_T,GL_CLAMP_TO_EDGE);
+        RenderTexParameter(rGLConst::Texture2D,rGLConst::TextureWrapT,rGLConst::ClampToEdge);
 
     int format;
     if (sr_texturesTruecolor)
         if (storageHack_ || ( storeAlpha_ && texalpha ) )
-            format=GL_RGBA8;
+            format=rGLConst::RGBA8;
         else
-            format=GL_RGB8;
+            format=rGLConst::RGB8;
     else
         if (storageHack_ || ( storeAlpha_ && texalpha ) )
-            format=GL_RGBA4;
+            format=rGLConst::RGBA4;
         else
-            format=GL_RGB5;
+            format=rGLConst::RGB5;
 
     if( !sr_IsPowerOfTwo( tex->w ) || !sr_IsPowerOfTwo( tex->h ) )
     {
@@ -732,9 +745,10 @@ void rISurfaceTexture::Upload( rSurface const & surface )
             }
         }
 
-        // no power of two, delegate to legacy function without checks
-        gluBuild2DMipmaps(GL_TEXTURE_2D,format,tex->w,tex->h,
-                          texformat,GL_UNSIGNED_BYTE,tex->pixels);
+        // no power of two, use modern mipmap generation
+        RenderTexImage2D(rGLConst::Texture2D, 0, format, tex->w, tex->h, 0,
+                         texformat, rGLConst::UnsignedByte, tex->pixels);
+        RenderGenerateMipmap(rGLConst::Texture2D);
     }
     else
     {
@@ -756,18 +770,17 @@ void rISurfaceTexture::Upload( rSurface const & surface )
             if( !sizeOK && tex->w <= sr_GetMaxTextureSize() && tex->h <= sr_GetMaxTextureSize() )
             {
                 // so far, so good; check via proxy
-                glTexImage2D(GL_PROXY_TEXTURE_2D,level,format,tex->w,tex->h,0,
-                             texformat,GL_UNSIGNED_BYTE,tex->pixels);
-                GLint width;
-                glGetTexLevelParameteriv(GL_PROXY_TEXTURE_2D, 0, GL_TEXTURE_WIDTH, &width);
+                RenderTexImage2D(rGLConst::ProxyTexture2D,level,format,tex->w,tex->h,0,
+                                 texformat,rGLConst::UnsignedByte,tex->pixels);
+                int width = RenderGetTexLevelParameteriv(rGLConst::ProxyTexture2D, 0, rGLConst::TextureWidth);
                 sizeOK = ( width != 0 );
             }
 
             if( sizeOK )
             {
                 // upload and increase level
-                glTexImage2D(GL_TEXTURE_2D,level,format,tex->w,tex->h,0,
-                             texformat,GL_UNSIGNED_BYTE,tex->pixels);
+                RenderTexImage2D(rGLConst::Texture2D,level,format,tex->w,tex->h,0,
+                                 texformat,rGLConst::UnsignedByte,tex->pixels);
                 level++;
             }
 
@@ -805,10 +818,8 @@ void rISurfaceTexture::OnSelect( bool enforce )
 #ifndef DEDICATED
     if(sr_glOut)
     {
-        RenderEnd(true);
-
         int texmod=rTextureGroups::TextureMode[group_];
-        if (enforce && texmod<0) texmod=GL_NEAREST_MIPMAP_NEAREST;
+        if (enforce && texmod<0) texmod=rGLConst::NearestMipmapNearest;
 
         if(textureModeLast_!=texmod)
         {
@@ -817,10 +828,8 @@ void rISurfaceTexture::OnSelect( bool enforce )
             // std::cerr << "loading texture " << fileName << ':' << tint << "\n";
 
             if (texmod>0){
-                // don't generate textures inside display lists
-                rDisplayList::Cancel();
-
-                glBindTexture(GL_TEXTURE_2D,tint_);
+                if (!tint_) tint_ = RenderGenTexture();
+                RenderBindTexture(rGLConst::Texture2D,tint_);
 
                 if (textureModeLast_<0)
                 {
@@ -828,41 +837,41 @@ void rISurfaceTexture::OnSelect( bool enforce )
                     OnSelectCore();
                 }
 
-                //glEnable(GL_TEXTURE);
-                glEnable(GL_TEXTURE_2D);
+                RenderEnableState(rGLConst::Texture2D);
 
-                glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MIN_FILTER,
-                                texmod);
+                RenderTexParameter(rGLConst::Texture2D,rGLConst::TextureMinFilter,
+                                   texmod);
 
                 switch(texmod)
                 {
-                case GL_NEAREST:
-                case GL_NEAREST_MIPMAP_NEAREST:
-                    glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MAG_FILTER,
-                                    GL_NEAREST);
+                case rGLConst::Nearest:
+                case rGLConst::NearestMipmapNearest:
+                    RenderTexParameter(rGLConst::Texture2D,rGLConst::TextureMagFilter,
+                                       rGLConst::Nearest);
                     break;
                 default:
-                    glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MAG_FILTER,
-                                    GL_LINEAR);
+                    RenderTexParameter(rGLConst::Texture2D,rGLConst::TextureMagFilter,
+                                       rGLConst::Linear);
                     break;
                 }
 
             }
             else
             {
-                glDisable(GL_TEXTURE_2D);
+                RenderDisableState(rGLConst::Texture2D);
             }
         }
         else
         {
-            glBindTexture(GL_TEXTURE_2D,tint_);
+            if (!tint_) tint_ = RenderGenTexture();
+            RenderBindTexture(rGLConst::Texture2D,tint_);
             if (texmod>0)
             {
-                glEnable(GL_TEXTURE_2D);
+                RenderEnableState(rGLConst::Texture2D);
             }
             else
             {
-                glDisable(GL_TEXTURE_2D);
+                RenderDisableState(rGLConst::Texture2D);
             }
         }
         textureModeLast_=texmod;
@@ -883,12 +892,7 @@ void rISurfaceTexture::OnSelect( bool enforce )
 void rISurfaceTexture::OnUnload( void )
 {
 #ifndef DEDICATED
-    if ( tint_.IsValid() )
-    {
-        rDisplayList::ClearAll();
-    }
-
-    tint_.Delete();
+    if (tint_) { RenderDeleteTexture(tint_); tint_ = 0; }
     textureModeLast_=-100;
     rITexture::OnUnload();
 #endif
@@ -1027,7 +1031,7 @@ tList<rITexture> rITexture::s_textures_;
 
 int rTextureGroups::TextureMode[rTextureGroups::TEX_GROUPS]
 #ifndef DEDICATED
-={GL_LINEAR_MIPMAP_LINEAR, GL_LINEAR_MIPMAP_LINEAR, GL_LINEAR_MIPMAP_LINEAR, GL_LINEAR }
+={rGLConst::LinearMipmapLinear, rGLConst::LinearMipmapLinear, rGLConst::LinearMipmapLinear, rGLConst::Linear }
 #endif
 ;
 
@@ -1137,15 +1141,15 @@ void rResourceTexture::Select() {
 #ifndef DEDICATED
     if(tex_) {
         tex_->Select();
-        // Override the actual tecture's settings
+        // Override the actual texture's settings
         if(repx_)
-            glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_WRAP_S,GL_REPEAT);
+            RenderTexParameter(rGLConst::Texture2D,rGLConst::TextureWrapS,rGLConst::Repeat);
         else
-            glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_WRAP_S,GL_CLAMP_TO_EDGE);
+            RenderTexParameter(rGLConst::Texture2D,rGLConst::TextureWrapS,rGLConst::ClampToEdge);
         if(repy_)
-            glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_WRAP_T,GL_REPEAT);
+            RenderTexParameter(rGLConst::Texture2D,rGLConst::TextureWrapT,rGLConst::Repeat);
         else
-            glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_WRAP_T,GL_CLAMP_TO_EDGE);
+            RenderTexParameter(rGLConst::Texture2D,rGLConst::TextureWrapT,rGLConst::ClampToEdge);
     } else {
         tERR_WARN("Trying to select a resource texture that's not loaded");
     }

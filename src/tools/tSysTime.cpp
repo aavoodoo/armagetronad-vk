@@ -33,6 +33,7 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 #include "tConsole.h"
 #include "tConfiguration.h"
 #include "tLocale.h"
+#include "tPlatform.h"
 
 #if HAVE_UNISTD_H
 #include <unistd.h>
@@ -541,4 +542,27 @@ double tRealSysTimeFloat ()
     // get real time from real OS
     tAdvanceFrameSys( timeRealStart, timeRealRelative );
     return ( timeRealRelative.seconds + timeRealRelative.microseconds*1E-6 ) * st_timeFactor;
+}
+
+//! Verify platform layer is working correctly
+//! Returns true if platform timing matches legacy timing within tolerance
+bool tVerifyPlatformTiming()
+{
+    // Get time from legacy implementation
+    tTime legacyTime;
+    GetTime(legacyTime);
+
+    // Get time from platform abstraction
+    tPlatformTime platformTime;
+    tGetPlatform().GetTime(platformTime);
+
+    // Compare (allow 100ms tolerance for startup differences)
+    double legacySec = legacyTime.seconds + legacyTime.microseconds * 1E-6;
+    double platformSec = platformTime.ToDouble();
+
+    // Both should be close to each other (within 100ms)
+    double diff = legacySec - platformSec;
+    if (diff < 0) diff = -diff;
+
+    return diff < 0.1;
 }

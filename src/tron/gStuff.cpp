@@ -27,6 +27,7 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 
 #include "gStuff.h"
 #include "eCoord.h"
+#include <cassert>
 #include "tConfiguration.h"
 #include "tResourceManager.h"
 #include "uInput.h"
@@ -61,7 +62,23 @@ static tConfItem<bool> ump("MOVIEPACK",sg_moviepackUse);
 static nSettingItemWatched<REAL> su_doubleBindTimeoutConf( "DOUBLEBIND_TIME", su_doubleBindTimeout, nConfItemVersionWatcher::Group_Cheating, 7  );
 
 bool sg_MoviePack(){
+    // Check legacy flags - these are now managed by gMoviepackManager
     return sg_moviepackInstalled && sg_moviepackUse;
+}
+
+// Wrap a string in single quotes for shell use, escaping any embedded single quotes.
+static std::string sg_ShellQuote( char const * s )
+{
+    std::string out = "'";
+    for ( const char * p = s; *p; ++p )
+    {
+        if ( *p == '\'' )
+            out += "'\\''";
+        else
+            out += *p;
+    }
+    out += "'";
+    return out;
 }
 
 static bool sg_OpenStuff( char const * uri, bool tryBrowser )
@@ -71,11 +88,7 @@ static bool sg_OpenStuff( char const * uri, bool tryBrowser )
     {
         // iconify; otherwise, the screen freezes while the browser is started,
         // and on Linux, the game gets window-ified without being noticed about it.
-#if SDL_VERSION_ATLEAST(2,0,0)
         SDL_MinimizeWindow(sr_screen);
-#else
-        SDL_WM_IconifyWindow();
-#endif
     }
 #endif
 
@@ -85,19 +98,27 @@ static bool sg_OpenStuff( char const * uri, bool tryBrowser )
 #else
     // general unix
     std::ostringstream s; // composing a command
-#ifdef MACOSX
-    assert( !tryBrowser );
-    s << "open '" << uri << "' || "
-      << "safari '" << uri << "' &";
+    std::string quotedURI = sg_ShellQuote( uri );
+#if defined(__APPLE__) && TARGET_OS_IOS
+    // iOS: system() is not available. Use SDL3's URL opener instead.
+    (void)tryBrowser;
+    return SDL_OpenURL( uri );
+#elif defined(MACOSX)
+    if ( tryBrowser )
+        return false;
+    s << "open " << quotedURI << " || "
+      << "safari " << quotedURI << " &";
+    // execute command
+    return  0 == system( s.str().c_str() );
 #else
     if( tryBrowser )
     {
-        s << "x-www-browser '" << uri << "' || ";
+        s << "x-www-browser " << quotedURI << " || ";
     }
-    s << "xdg-open '" << uri << "' || " << "firefox '" << uri << "' &";
-#endif
+    s << "xdg-open " << quotedURI << " || " << "firefox " << quotedURI << " &";
     // execute command
     return  0 == system( s.str().c_str() );
+#endif
 #endif
     return true;
 }

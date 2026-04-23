@@ -242,5 +242,8 @@ extern gGameSettings* sg_currentSettings;
 
 void rotate();
 
+//! Returns true if a game is currently in progress
+bool sg_GameRunning();
+
 #endif
 

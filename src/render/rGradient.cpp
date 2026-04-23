@@ -26,6 +26,7 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 */
 
 #include "rGradient.h"
+#include "rRender.h"
 #include "tError.h"
 
 #include <deque>
@@ -108,45 +109,18 @@ rColor rGradient::GetColor(float where) {
 #endif
 }
 
-void rGradient::SetValues(tCoord const &where, float *position, float *color, float *texcoords) {
-    position[0] = where.x;
-    position[1] = where.y;
-    rColor c = GetColor(GetGradientPt(where));
-    color[0] = c.r_;
-    color[1] = c.g_;
-    color[2] = c.b_;
-    texcoords[0] = (where.x-m_origin.x)/m_dimensions.x/m_texScale.x,
-    texcoords[1] = (where.y-m_origin.y)/m_dimensions.y/m_texScale.y;
-}
-
-void rGradient::DrawAt(tCoord const &where) {
+//! Generate vertices for a rectangle with gradient colors (batch rendering)
+//! @param edge1 First corner
+//! @param edge2 Opposite corner
+//! @return Vector of vertices ready for batch submission (6 vertices = 2 triangles)
+std::vector<rVertex20> rGradient::GenerateRectVertices(tCoord const &edge1, tCoord const &edge2) {
+    std::vector<rVertex20> vertices;
 #ifndef DEDICATED
-    GetColor(GetGradientPt(where)).Apply();
-    if(m_tex.Valid()) {
-        glTexCoord2f((where.x-m_origin.x)/m_dimensions.x/m_texScale.x, (m_origin.y-where.y)/m_dimensions.y/m_texScale.y);
-    }
-#endif
-}
+    vertices.reserve(24);  // Reserve for worst case: multiple sub-rectangles
 
-//! @param edge1 one edge of the rectangle
-//! @param edge2 the opposite edge
-void rGradient::DrawAtomicRect(tCoord const &edge1, tCoord const &edge2) {
-#ifndef DEDICATED
-    DrawPoint(edge1);
-    DrawPoint(tCoord(edge1.x, edge2.y));
-    DrawPoint(edge2);
-    DrawPoint(tCoord(edge2.x, edge1.y));
-#endif
-}
-
-//! @param edge1 one edge of the rectangle
-//! @param edge2 the opposite edge
-void rGradient::DrawRect(tCoord const &edge1, tCoord const &edge2) {
-#ifndef DEDICATED
     float tCoord::*x; //those are correct for horizontal gradients,
     float tCoord::*y; //vertical ones just get turned around
-    BeginDraw();
-    BeginQuads();
+
     switch(m_dir) {
     case horizontal:
         x = &tCoord::x;
@@ -157,16 +131,40 @@ void rGradient::DrawRect(tCoord const &edge1, tCoord const &edge2) {
         y = &tCoord::x;
         break;
     default:
-        DrawAtomicRect(edge1, edge2);
-        RenderEnd();
-        return;
+        // For value mode, generate simple quad (2 triangles = 6 vertices)
+        {
+            tCoord v1 = edge1;
+            tCoord v2(edge1.x, edge2.y);
+            tCoord v3 = edge2;
+            tCoord v4(edge2.x, edge1.y);
+
+            // Generate vertices for the quad corners
+            rVertex20 rv1 = GeneratePointVertex(v1);
+            rVertex20 rv2 = GeneratePointVertex(v2);
+            rVertex20 rv3 = GeneratePointVertex(v3);
+            rVertex20 rv4 = GeneratePointVertex(v4);
+
+            // First triangle: v1, v2, v3
+            vertices.push_back(rv1);
+            vertices.push_back(rv2);
+            vertices.push_back(rv3);
+
+            // Second triangle: v1, v3, v4
+            vertices.push_back(rv1);
+            vertices.push_back(rv3);
+            vertices.push_back(rv4);
+        }
+        return vertices;
     }
+
     tCoord const &left = (edge1.*x < edge2.*x) ? edge1 : edge2;
     tCoord const &right = (edge1.*x < edge2.*x) ? edge2 : edge1;
     float min = GetGradientPt(left);
     float max = GetGradientPt(right);
     iterator i = upper_bound(min);
     float last = left.*x;
+
+    // Generate sub-rectangles at gradient transition points
     for(; i != end() && i->first < max; ++i) {
         float newpt=i->first - min;
         float newx=newpt*m_dimensions.*x+m_origin.*x;
@@ -176,31 +174,103 @@ void rGradient::DrawRect(tCoord const &edge1, tCoord const &edge2) {
         todraw2.*x = newx;
         todraw1.*y = left.*y;
         todraw2.*y = right.*y;
-        DrawAtomicRect(todraw1, todraw2);
+
+        // Generate atomic rect (2 triangles)
+        rVertex20 rv1 = GeneratePointVertex(todraw1);
+        rVertex20 rv2 = GeneratePointVertex(tCoord(todraw1.x, todraw2.y));
+        rVertex20 rv3 = GeneratePointVertex(todraw2);
+        rVertex20 rv4 = GeneratePointVertex(tCoord(todraw2.x, todraw1.y));
+
+        vertices.push_back(rv1);
+        vertices.push_back(rv2);
+        vertices.push_back(rv3);
+        vertices.push_back(rv1);
+        vertices.push_back(rv3);
+        vertices.push_back(rv4);
+
         last = newx;
     }
+
+    // Final sub-rectangle
     tCoord todraw;
     todraw.*x = last;
     todraw.*y = left.*y;
-    DrawAtomicRect(todraw, right);
-    RenderEnd();
+
+    rVertex20 rv1 = GeneratePointVertex(todraw);
+    rVertex20 rv2 = GeneratePointVertex(tCoord(todraw.x, right.*y));
+    rVertex20 rv3 = GeneratePointVertex(right);
+    rVertex20 rv4 = GeneratePointVertex(tCoord(right.*x, todraw.*y));
+
+    vertices.push_back(rv1);
+    vertices.push_back(rv2);
+    vertices.push_back(rv3);
+    vertices.push_back(rv1);
+    vertices.push_back(rv3);
+    vertices.push_back(rv4);
 #endif
+    return vertices;
 }
 
-void rGradient::BeginDraw() {
+//! Generate a single vertex with gradient color (batch rendering)
+//! @param where Position for the vertex
+//! @return Single vertex with color and texture coordinates
+rVertex20 rGradient::GeneratePointVertex(tCoord const &where) {
+    rVertex20 vertex;
 #ifndef DEDICATED
+    // Get color at this point
+    rColor c = GetColor(GetGradientPt(where));
+
+    // Set vertex position (Z = 0 for 2D)
+    vertex.SetPosition(where.x, where.y, 0.0f);
+
+    // Set vertex color (convert from float 0-1 to byte 0-255)
+    vertex.SetColorF(c.r_, c.g_, c.b_, c.a_);
+
+    // Set texture coordinates if texture is valid
+    // Store normalized UVs (0-1 range, fits int16). texScale is handled by the
+    // texture matrix in GetRenderStateKey to avoid int16 overflow for tiled textures.
     if(m_tex.Valid()) {
-        m_tex.Select();
+        float u = (where.x - m_origin.x) / m_dimensions.x;
+        float v = (m_origin.y - where.y) / m_dimensions.y;
+        vertex.SetTexCoord(u, v);
     } else {
-        glDisable(GL_TEXTURE_2D);
+        vertex.SetTexCoord(0.0f, 0.0f);
     }
 #endif
+    return vertex;
 }
 
-//! @param where the point the color should be taken from and drawn
-void rGradient::DrawPoint(tCoord const &where) {
+//! Create render state key for this gradient (batch rendering)
+//! @param blendMode Blend mode to use (defaults to Alpha)
+//! @return Render state key for rRenderQueue submission
+rRenderStateKey rGradient::GetRenderStateKey(rBlendMode blendMode) {
+    rRenderStateKey key;
 #ifndef DEDICATED
-    DrawAt(where);
-    Vertex(where.x, where.y);
+    if(m_tex.Valid()) {
+        // Select texture to bind it
+        m_tex.Select();
+
+        // Query the bound texture ID
+        unsigned int textureId = RenderGetBoundTexture2D();
+
+        // Create textured state
+        key = rRenderStateKey::Textured(textureId, blendMode);
+
+        // Apply texture scale via texture matrix (avoids int16 UV overflow)
+        if (m_texScale.x != 1.0f || m_texScale.y != 1.0f) {
+            float texMatrix[16] = {0};
+            texMatrix[0]  = 1.0f / m_texScale.x;
+            texMatrix[5]  = 1.0f / m_texScale.y;
+            texMatrix[10] = 1.0f;
+            texMatrix[15] = 1.0f;
+            key.SetTexMatrix(texMatrix);
+        }
+    } else {
+        // Untextured gradient (vertex color only)
+        key.textureId = 0;
+        key.blendMode = blendMode;
+        key.flags = rRenderStateKey::UseVertexColor;
+    }
 #endif
+    return key;
 }

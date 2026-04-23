@@ -32,6 +32,7 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 
 #ifndef DEDICATED
 #include "rSDL.h"
+#include "uEventSDL.h"
 #endif
 
 #include  "tRecorder.h"
@@ -104,13 +105,10 @@ bool su_StoreSDLEvent(const SDL_Event &tEvent){
 
 #ifndef DEDICATED
 // read and write operators for keysyms
-#if SDL_VERSION_ATLEAST(2,0,0)
+// SDL3: SDL_Keycode is now the main key type
 tRECORDING_ENUM( SDL_Scancode );
 tRECORDING_ENUM( SDL_Keymod );
-#else
-tRECORDING_ENUM( SDLKey );
-tRECORDING_ENUM( SDLMod );
-#endif
+tRECORDING_ENUM( SDL_Keycode );
 #endif
 
 static char const * recordingSection = "INPUT";
@@ -120,15 +118,20 @@ template< class Archiver > class EventArchiver
 {
 public:
 #ifndef DEDICATED
+    // SDL3: Keyboard event structure changed - key.state → key.down, key.keysym.* → key.*
     static void ArchiveKey( Archiver & archive, SDL_KeyboardEvent & key )
     {
-        archive.Archive(key.state).Archive(key.keysym.scancode).Archive(key.keysym.sym).Archive(key.keysym.mod)
-#if SDL_VERSION_ATLEAST(2,0,0)
-        ;
-#else
-        .Archive(key.keysym.unicode);
-#endif
+        // SDL3: Archive as uint8_t for backwards compatibility
+        Uint8 down = key.down ? 1 : 0;
+        archive.Archive(down).Archive(key.scancode).Archive(key.key).Archive(key.mod);
+        key.down = (down != 0);
     }
+
+    // SDL3: Text input archiving helper.
+    // In SDL3, event.text.text is a const char* managed by SDL, not a fixed buffer.
+    // During playback, this pointer is NULL, so we need to archive a length prefix
+    // to know how many characters to read.
+    static void ArchiveTextInput( Archiver & archive, SDL_TextInputEvent & textEvent );
 #endif
 
     static bool Archive( SDL_Event & event, REAL & time, bool & ret )
@@ -146,58 +149,94 @@ public:
             archive.Archive(time).Archive(event.type);
             switch ( event.type )
             {
-#if SDL_VERSION_ATLEAST(2,0,0)
-            case SDL_WINDOWEVENT:
+            // SDL3: Window events are now separate event types, archive window ID and data
+            case SDL_EVENT_WINDOW_SHOWN:
+            case SDL_EVENT_WINDOW_HIDDEN:
+            case SDL_EVENT_WINDOW_EXPOSED:
+            case SDL_EVENT_WINDOW_MOVED:
+            case SDL_EVENT_WINDOW_RESIZED:
+            case SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED:
+            case SDL_EVENT_WINDOW_MINIMIZED:
+            case SDL_EVENT_WINDOW_MAXIMIZED:
+            case SDL_EVENT_WINDOW_RESTORED:
+            case SDL_EVENT_WINDOW_MOUSE_ENTER:
+            case SDL_EVENT_WINDOW_MOUSE_LEAVE:
+            case SDL_EVENT_WINDOW_FOCUS_GAINED:
+            case SDL_EVENT_WINDOW_FOCUS_LOST:
+            case SDL_EVENT_WINDOW_CLOSE_REQUESTED:
             {
                 SDL_WindowEvent & window = event.window;
-
-                archive.Archive(window.event).Archive(window.data1).Archive(window.data2);
+                archive.Archive(window.windowID).Archive(window.data1).Archive(window.data2);
             }
-#else
-            case SDL_ACTIVEEVENT:
-            {
-                SDL_ActiveEvent & active = event.active;
-
-                archive.Archive(active.gain).Archive(active.state);
-            }
-#endif
             break;
-            case SDL_KEYDOWN:
-            case SDL_KEYUP:
+            // SDL3: SDL_KEYDOWN → SDL_EVENT_KEY_DOWN
+            case SDL_EVENT_KEY_DOWN:
+            case SDL_EVENT_KEY_UP:
             {
                 SDL_KeyboardEvent & key = event.key;
                 ArchiveKey( archive, key );
             }
             break;
-            case SDL_MOUSEMOTION:
+            // SDL3: SDL_MOUSEMOTION → SDL_EVENT_MOUSE_MOTION
+            case SDL_EVENT_MOUSE_MOTION:
             {
                 SDL_MouseMotionEvent & motion = event.motion;
-
+                // SDL3: motion.state now contains button state
                 archive.Archive(motion.state).Archive(motion.x).Archive(motion.y).Archive(motion.xrel).Archive(motion.yrel);
             }
             break;
-            case SDL_MOUSEBUTTONUP:
-            case SDL_MOUSEBUTTONDOWN:
+            // SDL3: SDL_MOUSEBUTTONDOWN → SDL_EVENT_MOUSE_BUTTON_DOWN
+            case SDL_EVENT_MOUSE_BUTTON_UP:
+            case SDL_EVENT_MOUSE_BUTTON_DOWN:
             {
                 SDL_MouseButtonEvent & button = event.button;
-
-                archive.Archive(button.button).Archive(button.state).Archive(button.x).Archive(button.y);
+                // SDL3: button.state → button.down (bool)
+                Uint8 down = button.down ? 1 : 0;
+                archive.Archive(button.button).Archive(down).Archive(button.x).Archive(button.y);
+                button.down = (down != 0);
             }
             break;
-#if SDL_VERSION_ATLEAST(2,0,0)
-            case SDL_TEXTINPUT:
+            // SDL3: SDL_TEXTINPUT → SDL_EVENT_TEXT_INPUT
+            // SDL3: event.text.text is now const char* instead of fixed array
+            case SDL_EVENT_TEXT_INPUT:
             {
-                auto &text = event.text.text;
-
-                for(size_t i = 0; i < sizeof(text); ++i)
-                {
-                    archive.Archive(text[i]);
-                    if(!text[i])
-                        break;
-                }
+                // Text input archiving needs to handle recording vs playback differently
+                // because event.text.text is const char* managed by SDL and is NULL during playback.
+                // We archive a length byte first, then that many characters.
+                ArchiveTextInput(archive, event.text);
             }
             break;
-#endif
+            // SDL3: Joystick events
+            case SDL_EVENT_JOYSTICK_AXIS_MOTION:
+            {
+                SDL_JoyAxisEvent & jaxis = event.jaxis;
+                archive.Archive(jaxis.which).Archive(jaxis.axis).Archive(jaxis.value);
+            }
+            break;
+            case SDL_EVENT_JOYSTICK_BUTTON_DOWN:
+            case SDL_EVENT_JOYSTICK_BUTTON_UP:
+            {
+                SDL_JoyButtonEvent & jbutton = event.jbutton;
+                Uint8 down = jbutton.down ? 1 : 0;
+                archive.Archive(jbutton.which).Archive(jbutton.button).Archive(down);
+                jbutton.down = (down != 0);
+            }
+            break;
+            case SDL_EVENT_JOYSTICK_HAT_MOTION:
+            {
+                SDL_JoyHatEvent & jhat = event.jhat;
+                archive.Archive(jhat.which).Archive(jhat.hat).Archive(jhat.value);
+            }
+            break;
+            case SDL_EVENT_JOYSTICK_BALL_MOTION:
+            {
+                SDL_JoyBallEvent & jball = event.jball;
+                archive.Archive(jball.which).Archive(jball.ball).Archive(jball.xrel).Archive(jball.yrel);
+            }
+            break;
+            // SDL3: Quit event (no additional data to archive)
+            case SDL_EVENT_QUIT:
+            break;
             default:
                 // do nothing
                 break;
@@ -220,7 +259,8 @@ void EventArchiver< tRecordingBlock >::ArchiveKey( tRecordingBlock & archive, SD
     SDL_KeyboardEvent key = orig;
     if ( uInputScrambler::Scrambled() )
     {
-        switch( key.keysym.sym )
+        // SDL3: key.keysym.sym → key.key
+        switch( key.key )
         {
         case SDLK_ESCAPE:
         case SDLK_SPACE:
@@ -234,23 +274,54 @@ void EventArchiver< tRecordingBlock >::ArchiveKey( tRecordingBlock & archive, SD
         case SDLK_DELETE:
             break;
         default:
-            key.keysym.mod = KMOD_NONE;
-            key.keysym.sym = SDLK_x;
-#if SDL_VERSION_ATLEAST(2,0,0)
-            key.keysym.scancode = SDL_SCANCODE_UNKNOWN;
-#else
-            key.keysym.scancode = 0;
-            key.keysym.unicode = '*';
-#endif
+            // SDL3: KMOD_NONE → SDL_KMOD_NONE, SDLK_x → SDLK_X
+            key.mod = SDL_KMOD_NONE;
+            key.key = SDLK_X;
+            key.scancode = SDL_SCANCODE_UNKNOWN;
         }
     }
 
-    archive.Archive(key.state).Archive(key.keysym.scancode).Archive(key.keysym.sym).Archive(key.keysym.mod)
-#if SDL_VERSION_ATLEAST(2,0,0)
-        ;
-#else
-        .Archive(key.keysym.unicode);
-#endif
+    // SDL3: Archive as uint8_t for backwards compatibility
+    Uint8 down = key.down ? 1 : 0;
+    archive.Archive(down).Archive(key.scancode).Archive(key.key).Archive(key.mod);
+}
+
+// SDL3: Text input archiving - recording specialization
+// Writes length prefix followed by text characters
+template<>
+void EventArchiver< tRecordingBlock >::ArchiveTextInput( tRecordingBlock & archive, SDL_TextInputEvent & textEvent )
+{
+    const char * text = textEvent.text;
+    Uint8 len = 0;
+    if (text)
+    {
+        size_t textLen = strlen(text);
+        len = (textLen > 32) ? 32 : static_cast<Uint8>(textLen);
+    }
+    archive.Archive(len);
+    for (Uint8 i = 0; i < len; ++i)
+    {
+        char c = text[i];
+        archive.Archive(c);
+    }
+}
+
+// SDL3: Text input archiving - playback specialization
+// Reads length prefix, then reads that many characters (discards them since
+// SDL3's text.text is a const pointer we can't populate)
+template<>
+void EventArchiver< tPlaybackBlock >::ArchiveTextInput( tPlaybackBlock & archive, SDL_TextInputEvent & textEvent )
+{
+    (void)textEvent;  // SDL3: We can't populate textEvent.text (it's const char* managed by SDL)
+
+    Uint8 len = 0;
+    archive.Archive(len);
+    for (Uint8 i = 0; i < len; ++i)
+    {
+        char c;
+        archive.Archive(c);
+        // Character is read and discarded - we can't store it in SDL3's const char* text field
+    }
 }
 #endif
 
@@ -339,41 +410,7 @@ bool su_GetSDLInput(SDL_Event &tEvent,REAL &time){
     if ( ret )
         EventArchiver< tRecordingBlock >::Archive( tEvent, time, ret );
 
-#ifndef DEDICATED
-#if !SDL_VERSION_ATLEAST(2,0,0)
-    // filter bogus events. Some keys cause key events with wrong keysyms.
-    static unsigned short blockedScancode = 0xffff;
-    static SDLKey blockedKeysym = SDLK_LAST;
-
-    if( tEvent.type == SDL_KEYDOWN )
-    {
-        // you can spot them by zero unicode; control keys are allowed to have that,
-        // but not letter and number and sign keys
-        if( tEvent.key.keysym.unicode == 0 )
-        {
-            if ( tEvent.key.keysym.sym >= SDLK_ESCAPE && 
-                 tEvent.key.keysym.sym <= SDLK_z )
-            {
-                ret = false;
-
-                blockedScancode = tEvent.key.keysym.scancode;
-                blockedKeysym = tEvent.key.keysym.sym;
-            }
-        }
-    }
-    else if ( tEvent.type == SDL_KEYUP )
-    {
-        if( blockedScancode == tEvent.key.keysym.scancode && 
-            blockedKeysym == tEvent.key.keysym.sym )
-        {
-            ret = false;
-
-            blockedScancode = 0xffff;
-            blockedKeysym = SDLK_LAST;
-        }
-    }
-#endif
-#endif
+    // SDL3: Removed SDL1-specific bogus event filtering (no longer needed)
 
     return ret;
 }
@@ -395,5 +432,23 @@ int su_InputThread(void *){
     return 0;
 }
 */
+
+bool su_GetInput(uEvent &event, REAL &time)
+{
+#ifndef DEDICATED
+    SDL_Event sdlEvent;
+    if (su_GetSDLInput(sdlEvent, time))
+    {
+        // Convert SDL_Event to uEvent
+        // Recording/playback happens in su_GetSDLInput, so we maintain compatibility
+        uEventSDL::ToUEvent(sdlEvent, event);
+        return true;
+    }
+#else
+    (void)time; // Suppress unused warning
+#endif
+    event = uEvent(); // Reset to None type
+    return false;
+}
 
 

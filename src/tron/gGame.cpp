@@ -27,6 +27,7 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 
 #include "eEventNotification.h"
 #include "gStuff.h"
+#include "gMoviepack.h"
 #include "eSoundMixer.h"
 #include "eGrid.h"
 #include "eTeam.h"
@@ -41,6 +42,9 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 #include "gAIBase.h"
 #include "gTutorial.h"
 #include "rSysdep.h"
+#ifndef DEDICATED
+#include "rFrameLifecycle.h"
+#endif
 #include "rFont.h"
 #include "uMenu.h"
 #include "nConfig.h"
@@ -114,7 +118,7 @@ static gTutorialBase * sg_tutorial = NULL;
 
 #ifndef DEDICATED
 #include "rSDL.h"
-#include <SDL_thread.h>
+// SDL_thread.h is included via SDL.h in rSDL.h
 
 #ifdef DEBUG
 #ifndef WIN32
@@ -133,6 +137,11 @@ tCONFIG_ENUM( gGameType );
 tCONFIG_ENUM( gFinishType );
 
 static tCONTROLLED_PTR(gGame) sg_currentGame;
+
+bool sg_GameRunning()
+{
+    return bool(sg_currentGame);
+}
 
 // extra round pause time
 static REAL sg_extraRoundTime = 0.0f;
@@ -832,6 +841,10 @@ static gCycle *Cycle(int id){
 #endif
 
 #include "rRender.h"
+#include "rRenderQueue.h"
+#ifndef DEDICATED
+#include "rFrameLifecycle.h"
+#endif
 
 
 
@@ -907,12 +920,6 @@ void init_game_grid(eGrid *grid, gParser *aParser){
 #ifndef DEDICATED
     if (sr_glOut){
         sr_ResetRenderState();
-
-        // rSysDep::ClearGL();
-
-        // glViewport (0, 0, static_cast<GLsizei>(sr_screenWidth), static_cast<GLsizei>(sr_screenHeight));
-
-        // rSysDep::SwapGL();
     }
     stc_fastestSpeedRound = .0;
 #endif
@@ -1380,23 +1387,57 @@ void RenderAllViewports(eGrid *grid){
     if (sr_glOut){
         sr_ResetRenderState();
 
-        // enable distance based fog
-        /*
-        glFogi( GL_FOG_MODE, GL_EXP );
-        glFogf( GL_FOG_DENSITY, .01/gArena::SizeMultiplier() );
-        GLfloat black[3]={0,0,0};
-        glFogfv( GL_FOG_COLOR, black );
-        glEnable( GL_FOG );
-        */
-
         const tList<eCamera>& cameras = grid->Cameras();
+        int numViewports = conf->num_viewports;
+
+        // Collect viewport rects and rotations for composite pass
+        int viewportRects[4][4] = {};
+        int viewportRotations[4] = {};
+        int vpCount = 0;
+        int confNum = rViewportConfiguration::CurrentConfNum();
+
         for (int i=cameras.Len()-1;i>=0;i--){
 	    	if (!cameras(i)->RenderInCockpit()) {
 				int p=sr_viewportBelongsToPlayer[i];
 				conf->Select(i);
 				rViewport *act=conf->Port(i);
 				if (act && ePlayer::PlayerConfig(p))
+				{
+					// For multi-viewport: render into per-viewport FBO
+					if (numViewports > 1)
+					{
+						tCoord pos = act->GetPosition();
+						tCoord dim = act->GetDimensions();
+						int vx = static_cast<int>(sr_screenWidth * pos.x);
+						int vy = static_cast<int>(sr_screenHeight * pos.y);
+						int vw = static_cast<int>(sr_screenWidth * dim.x);
+						int vh = static_cast<int>(sr_screenHeight * dim.y);
+
+						int rotDeg = sr_GetViewportRotationDeg(confNum, i);
+
+						// For 90°/270° rotation, swap FBO dimensions so
+						// 3D content renders at the correct aspect ratio.
+						// Clamp to minimum 1 to avoid zero-dimension Vulkan FBOs.
+						int fboW = std::max((rotDeg == 90 || rotDeg == 270) ? vh : vw, 1);
+						int fboH = std::max((rotDeg == 90 || rotDeg == 270) ? vw : vh, 1);
+						sr_BeginViewportFBO(i, numViewports, vx, vy, fboW, fboH);
+
+						// Store rect and rotation for composite
+						if (i < 4) {
+							viewportRects[i][0] = vx;
+							viewportRects[i][1] = vy;
+							viewportRects[i][2] = vw;
+							viewportRects[i][3] = vh;
+							viewportRotations[i] = rotDeg;
+							if (i >= vpCount) vpCount = i + 1;
+						}
+					}
+
 					ePlayer::PlayerConfig(p)->Render();
+
+					if (numViewports > 1)
+						sr_EndViewportFBO();
+				}
 				else con << "hey! viewport " << i << " does not exist!\n";
 			} else {
 				cameras(i)->SetRenderInCockpit(false);
@@ -1404,7 +1445,11 @@ void RenderAllViewports(eGrid *grid){
 
         }
 
-        // glDisable( GL_FOG );
+        // Composite viewport FBOs onto swapchain
+        if (numViewports > 1 && vpCount > 0)
+        {
+            sr_CompositeViewportFBOs(vpCount, viewportRects, viewportRotations);
+        }
     }
 
     // render the console and scores so it appears behind the global HUD
@@ -1432,25 +1477,20 @@ void Render(eGrid *grid, REAL time, bool swap=true){
 
 #ifndef DEDICATED
     if (sr_glOut){
+        // Render with full frame lifecycle management
+        auto renderContent = [&]() {
+            RenderAllViewports(grid);
+            sr_ResetRenderState(true);
+            gLogo::Display();
+        };
+
         if(swap)
         {
-            rSysDep::ClearGL();
+            rRenderFrame(renderContent);
         }
-
-        static bool lastMoviePack=sg_MoviePack();
-        if(lastMoviePack!=sg_MoviePack())
+        else
         {
-            lastMoviePack=sg_MoviePack();
-            rDisplayList::ClearAll();
-        }
-
-        RenderAllViewports(grid);
-
-        sr_ResetRenderState(true);
-        gLogo::Display();
-
-        if (swap){
-            rSysDep::SwapGL();
+            rRenderFrameNoSwap(renderContent);
         }
     }
     else
@@ -1710,10 +1750,9 @@ bool ConnectToServerCore(nServerInfoBase *server)
     // ePlayerNetID::Update();
 
 #ifndef DEDICATED
-    rSysDep::SwapGL();
-    rSysDep::ClearGL();
-    rSysDep::SwapGL();
-    rSysDep::ClearGL();
+    // Clear both front and back buffers for clean screen initialization
+    rRenderFrame([](){});
+    rRenderFrame([](){});
 #endif
 
     sr_con.autoDisplayAtNewline=true;
@@ -1769,11 +1808,7 @@ bool ConnectToServerCore(nServerInfoBase *server)
             sn_SendPlanned();
             st_DoToDo();
 
-#ifndef DEDICATED
-            rSysDep::SwapGL();
-            rSysDep::ClearGL();
-#endif
-
+            // Wait loop - no rendering needed, just network processing
             sn_Delay();
         }
         if (sg_currentGame){
@@ -1797,11 +1832,7 @@ bool ConnectToServerCore(nServerInfoBase *server)
                 sn_SendPlanned();
                 st_DoToDo();
 
-#ifndef DEDICATED
-                rSysDep::SwapGL();
-                rSysDep::ClearGL();
-#endif
-
+                // Wait loop - no rendering needed, just network processing
                 sn_Delay();
             }
             
@@ -2207,17 +2238,16 @@ static void PlayerLogIn()
 
 void sg_DisplayVersionInfo() {
     tOutput versionInfo;
-    versionInfo << "$version_info_version" << "\n";
-    st_PrintPathInfo(versionInfo);
-    versionInfo << "$version_info_misc_stuff";
 
-    versionInfo << "$version_info_gl_intro";
     versionInfo << "$version_info_gl_vendor";
     versionInfo << gl_vendor;
     versionInfo << "$version_info_gl_renderer";
     versionInfo << gl_renderer;
     versionInfo << "$version_info_gl_version";
     versionInfo << gl_version;
+    versionInfo << "\n\n";
+    versionInfo << "$version_info_version" << "\n";
+    versionInfo << "$version_info_misc_stuff";
 
     sg_ClientFullscreenMessage("$version_info_title", versionInfo, 1000);
 }
@@ -2580,9 +2610,15 @@ void MainMenu(bool ingame){
 
 
 
+#ifndef DEDICATED
+    // Moviepack selection menu (replaces old toggle)
+    gMoviepackMenuItem mp(&misc);
+#else
+    // Dedicated server doesn't need moviepack selection
     uMenuItemToggle mp
     (&misc,"$misc_moviepack_text",
      "$misc_moviepack_help",sg_moviepackUse);
+#endif
 
 
     uMenuItemSubmenu misc_sm
@@ -3187,7 +3223,6 @@ void gGame::StateUpdate(){
             SetState(GS_CREATE_OBJECTS,GS_CAMERA);
             break;
         case GS_CREATE_OBJECTS:
-            // con << "Creating objects...\n";
 
             lastdeath = -100;
             drawtime = 0;
@@ -3230,7 +3265,6 @@ void gGame::StateUpdate(){
 
             break;
         case GS_TRANSFER_OBJECTS:
-            // con << "Transferring objects...\n";
             rITexture::LoadAll();
             // se_ResetGameTimer();
             // se_PauseGameTimer(true);
@@ -4556,12 +4590,12 @@ bool gGame::GameLoop(bool input){
 
             if (!su_HandleEvent(tEvent, false))
                 switch (tEvent.type){
-                case SDL_MOUSEBUTTONDOWN:
+                case SDL_EVENT_MOUSE_BUTTON_DOWN:
                     break;
-                case SDL_KEYDOWN:
-                    switch (tEvent.key.keysym.sym){
+                case SDL_EVENT_KEY_DOWN:
+                    switch (tEvent.key.key){
 
-                    case(27):
+                    case(SDLK_ESCAPE):
                                     //                                case('q'):
                                     st_ToDo(&ingame_menu);
                         break;
@@ -4728,21 +4762,27 @@ bool gGame::GameLoop(bool input){
 #ifndef DEDICATED
             if (input)
             {
-                if ( !synced )
-                {
-                    con.CenterDisplay(tString(tOutput("$network_login_sync")),0);
-                }
-
                 if ( sr_glOut )
-                    rSysDep::ClearGL();
+                {
+                    rRenderFrame([&]() {
+                        if ( !synced )
+                        {
+                            con.CenterDisplay(tString(tOutput("$network_login_sync")),0);
+                        }
+                    });
+                }
+                else
+                {
+                    // No GL output, just swap
+                    rSysDep::SwapGL();
+                }
             }
-
-            if ( input )
-                rSysDep::SwapGL();
 #endif
         }
         else
+        {
             Render(grid, gtime, input);
+        }
 
         if ( netstate != sn_GetNetState() )
         {
@@ -4765,8 +4805,13 @@ bool gGame::GameLoop(bool input){
         if (input)
         {
             if (sr_glOut)
-                rSysDep::ClearGL();
-            rSysDep::SwapGL();
+            {
+                rRenderFrame([](){});
+            }
+            else
+            {
+                rSysDep::SwapGL();
+            }
         }
 #endif
         tDelay( 10000 );
@@ -4927,6 +4972,7 @@ void sg_EnterGameCore( nNetState enter_state ){
 
 void sg_EnterGameCleanup()
 {
+
     //gStatistics - save high scores
 
     eSoundMixer& mixer = eSoundMixer::GetMixer();

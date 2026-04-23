@@ -36,6 +36,12 @@ Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
 #include "eTeam.h"
 #include "ePlayer.h"
 #include "rRender.h"
+#include "rVertex.h"
+#ifndef DEDICATED
+#include "rRenderQueue.h"
+#include "rZoneRenderer.h"
+#include "rRendererState.h"
+#endif
 #include "nConfig.h"
 #include "tString.h"
 #include "rScreen.h"
@@ -172,8 +178,7 @@ gZone::gZone( eGrid * grid, const eCoord & pos )
 
     // initialize position functions
     SetPosition( pos );
-    eSoundMixer* mixer = eSoundMixer::GetMixer();
-    mixer->PushButton(ZONE_SPAWN, pos);
+    eSoundMixer::GetMixer().PushButton(ZONE_SPAWN);
 }
 
 // *******************************************************************************
@@ -203,8 +208,7 @@ gZone::gZone( Game::ZoneV1Sync const & sync, nSenderInfo const & sender )
 
     // initialize position functions
     SetPosition( pos );
-    eSoundMixer* mixer = eSoundMixer::GetMixer();
-    mixer->PushButton(ZONE_SPAWN, pos);
+    eSoundMixer::GetMixer().PushButton(ZONE_SPAWN);
 }
 
 // *******************************************************************************
@@ -448,6 +452,10 @@ static nSettingItem< REAL > sg_zoneAlphaConfServer( "ZONE_ALPHA_SERVER", sg_zone
 void gZone::Render( const eCamera * cam )
 {
 #ifndef DEDICATED
+    // Set render context for zones (save/restore to avoid leaking state)
+    rRenderContext prevCtx = sr_GetRenderContext();
+    sr_SetRenderContext(rRenderContext::Game3D_Zones);
+
     if ( sg_zoneSegLength <= 0 )
         sg_zoneSegLength = .5;
     if ( sg_zoneSegments < 1 )
@@ -457,82 +465,26 @@ void gZone::Render( const eCamera * cam )
     if ( color_.a_ > .7f )
         color_.a_ = .7f;
     if ( color_.a_ <= 0 )
+    {
+        sr_SetRenderContext(prevCtx);
         return;
+    }
 
     color_.a_ *= sg_zoneAlpha * sg_zoneAlphaServer;
 
-    ModelMatrix();
-    glPushMatrix();
-
-    REAL seglen = 2 * M_PI / sg_zoneSegments * sg_zoneSegLength;
+    bool useAlpha = sr_alphaBlend ? !sg_zoneAlphaToggle : sg_zoneAlphaToggle;
 
     REAL r = Radius();
-    GLfloat m[4][4]={{r*rotation_.x,r*rotation_.y,0,0},
-                     {-r*rotation_.y,r*rotation_.x,0,0},
-                     {0,0,sg_zoneHeight,0},
-                     {pos.x,pos.y,sg_zoneBottom,1}};
+    REAL rotationAngle = atan2(rotation_.y, rotation_.x);
 
-    glMultMatrixf(&m[0][0]);
+    rZoneRenderMode mode =
+        useAlpha ? rZoneRenderMode::Filled : rZoneRenderMode::Wireframe;
 
-    color_.Apply();
-
-	bool useAlpha = sr_alphaBlend ? !sg_zoneAlphaToggle : sg_zoneAlphaToggle;
-    static bool lastAlpha = useAlpha;
-
-    static rDisplayList zoneList;
-    if ( lastAlpha != useAlpha || !zoneList.Call() )
-    {
-        lastAlpha = useAlpha;
-
-        rDisplayListFiller filler( zoneList );
-        
-        glDisable(GL_LIGHT0);
-        glDisable(GL_LIGHT1);
-        glDisable(GL_LIGHTING);
-        glDisable(GL_CULL_FACE);
-        glDepthMask(GL_FALSE);
-        glBlendFunc( GL_SRC_ALPHA, GL_ONE );
-        glDisable(GL_TEXTURE_2D);
-        
-        if ( useAlpha )
-            BeginQuads();
-        else
-        {
-            sr_DepthOffset(true);
-            BeginLineStrip();
-        }
-
-        for ( int i = sg_zoneSegments - 1; i>=0; --i )
-        {
-            REAL a = i * 2 * M_PI / REAL( sg_zoneSegments );
-            REAL b = a + seglen;
-            
-            REAL sa = sin(a);
-            REAL ca = cos(a);
-            REAL sb = sin(b);
-            REAL cb = cos(b);
-            
-            glVertex3f(sa, ca, 0);
-            glVertex3f(sa, ca, 1);
-            glVertex3f(sb, cb, 1);
-            glVertex3f(sb, cb, 0);
-            
-            if ( !useAlpha )
-            {
-                glVertex3f(sa, ca, 0);
-                RenderEnd();
-                BeginLineStrip();
-            }
-        }
-        
-        RenderEnd();
-
-        sr_DepthOffset(false);
-        glBlendFunc( GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA );
-        glDepthMask(GL_TRUE);
-    }
-
-    glPopMatrix();
+    rSubmitCircularZone(static_cast<float>(pos.x), static_cast<float>(pos.y),
+                        static_cast<float>(r), static_cast<float>(sg_zoneBottom),
+                        static_cast<float>(sg_zoneHeight), static_cast<float>(rotationAngle),
+                        color_.r_, color_.g_, color_.b_, color_.a_, sg_zoneSegments, mode);
+    sr_SetRenderContext(prevCtx);
 #endif
 }
 
@@ -541,44 +493,59 @@ void gZone::Render2D(tCoord) const {
     if ( color_.a_ <= 0 )
         return;
 
-    GLfloat m[4][4]={{rotation_.x,rotation_.y,0,0},
-                     {-rotation_.y,rotation_.x,0,0},
-                     {0,0,1,0},
-                     {pos.x,pos.y,0,1}};
-
-    ModelMatrix();
-    glPushMatrix();
-
-    glMultMatrixf(&m[0][0]);
-    //	glScalef(.5,.5,.5);
-
-    BeginLines();
-
+    REAL rad = Radius();
     const REAL seglen = .2f;
 
-    color_.Apply();
+    uint8_t cr = static_cast<uint8_t>(color_.r_ * 255.0f);
+    uint8_t cg = static_cast<uint8_t>(color_.g_ * 255.0f);
+    uint8_t cb = static_cast<uint8_t>(color_.b_ * 255.0f);
+    uint8_t ca = static_cast<uint8_t>(color_.a_ * 255.0f);
 
-    REAL r = Radius();
+    // Apply zone transform on CPU: rotation + translation
+    auto xform = [&](REAL lx, REAL ly, float &ox, float &oy) {
+        ox = static_cast<float>(rotation_.x * lx - rotation_.y * ly + pos.x);
+        oy = static_cast<float>(rotation_.y * lx + rotation_.x * ly + pos.y);
+    };
+
+    float mvp[16];
+    RenderGetMVPMatrix(mvp);
+    auto mvpXform = [&](float &x, float &y) {
+        float ix = x, iy = y;
+        x = mvp[0]*ix + mvp[4]*iy + mvp[12];
+        y = mvp[1]*ix + mvp[5]*iy + mvp[13];
+    };
+
+    int vp[4];
+    RenderGetViewport(vp);
+    float fx = float(vp[0]) / sr_screenWidth;
+    float fy = float(vp[1]) / sr_screenHeight;
+    float fw = float(vp[2]) / sr_screenWidth;
+    float fh = float(vp[3]) / sr_screenHeight;
+    auto remap = [&](float &x, float &y) {
+        x = (fx + (x + 1.0f) * 0.5f * fw) * 2.0f - 1.0f;
+        y = (fy + (y + 1.0f) * 0.5f * fh) * 2.0f - 1.0f;
+    };
+
+    std::vector<rVertex20> lines;
+    lines.reserve(sg_segments * 2);
     for ( int i = sg_segments - 1; i>=0; --i )
     {
         REAL a = i * 2 * 3.14159 / REAL( sg_segments );
         REAL b = a + seglen;
 
-        REAL sa = r * sin(a);
-        REAL ca = r * cos(a);
-        REAL sb = r * sin(b);
-        REAL cb = r * cos(b);
-
-        glVertex2f(sa, ca);
-        glVertex2f(sb, cb);
+        float x1, y1, x2, y2;
+        xform(rad * sin(a), rad * cos(a), x1, y1);
+        xform(rad * sin(b), rad * cos(b), x2, y2);
+        mvpXform(x1, y1);
+        mvpXform(x2, y2);
+        remap(x1, y1);
+        remap(x2, y2);
+        lines.push_back(rVertex20(x1, y1, 0, cr, cg, cb, ca, 0, 0));
+        lines.push_back(rVertex20(x2, y2, 0, cr, cg, cb, ca, 0, 0));
     }
 
-    RenderEnd();
-
-    glBlendFunc( GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA );
-    glDepthMask(GL_TRUE);
-
-    glPopMatrix();
+    rRenderStateKey state = rRenderStateKey::HUD(0, rBlendMode::Alpha);
+    rRenderQueue::Instance().SubmitLines(rRenderPhase::HUD, state, lines.data(), lines.size());
 #endif
 }
 

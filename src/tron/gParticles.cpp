@@ -38,7 +38,7 @@ void gParticles::Render(const eCamera *cam) {
     // Select this particle system in the PS API
     pCurrentGroup(thisSystem);
 
-    pDrawGroupp(GL_POINTS, true);
+    pDrawGroupp(rGLConst::Points, true);
 #endif
 }
 #endif

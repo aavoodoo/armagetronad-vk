@@ -252,6 +252,10 @@ public:
 
     int DirectionWinding() const;
     int WindingNumber() const;
+
+    //! Bridge helpers called from iOS/Android touch overlay C functions.
+    static void TriggerGlanceForward(bool active);
+    static void TriggerSwitchView();
 private:
     //! make sure CenterPos() + dirFromTarget() is visible from pos
     bool Bound( REAL ratio, eCoord & pos, eCoord const & dirFromTarget, REAL & hitCache );

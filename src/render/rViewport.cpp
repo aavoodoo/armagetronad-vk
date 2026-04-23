@@ -27,13 +27,19 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 
 #include "rFont.h"
 #include "rRender.h"
+#include "rVertex.h"
+#ifndef DEDICATED
+#include "rRenderQueue.h"
+#endif
 #include "rScreen.h"
 #include "rViewport.h"
 #include "rConsole.h"
 #include "tConfiguration.h"
+#if defined(__APPLE__)
+#include <TargetConditionals.h>
+#endif
 
 #ifndef DEDICATED
-#include "rGL.h"
 //#include <GL/glu>
 #ifdef POWERPAK_DEB
 #include "PowerPak/powerdraw.h"
@@ -43,10 +49,10 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 #ifndef DEDICATED
 void rViewport::Select(){
     if (sr_glOut)
-        glViewport (GLsizei(sr_screenWidth*left),
-                    GLsizei(sr_screenHeight*bottom),
-                    GLsizei(sr_screenWidth*width),
-                    GLsizei(sr_screenHeight*height));
+        RenderViewport(int(sr_screenWidth*left),
+                       int(sr_screenHeight*bottom),
+                       int(sr_screenWidth*width),
+                       int(sr_screenHeight*height));
 }
 #endif
 
@@ -86,21 +92,8 @@ void rViewport::Perspective(REAL fov,REAL nnear,REAL ffar,REAL xshift){
     REAL ymul = xmul/aspectratio;
     ProjMatrix();
     xshift *= nnear;
-    glFrustum(-nnear * xmul + xshift, nnear * xmul + xshift, -nnear * ymul, nnear * ymul, nnear, ffar);
-    glTranslatef(xshift, 0.f, 0.f);
-#endif
-
-#if 0 // Z-Man's old and clumsy version
-    REAL ratio=currentScreensetting.aspect*(width*sr_screenWidth)/(height*sr_screenHeight);
-    // REAL udfov=360*atan(tan(M_PI*fov/360)/ratio)/M_PI;
-    REAL udfov=UpDownFOV(fov);
-    glMatrixMode(GL_PROJECTION);
-    gluPerspective(
-        udfov,
-        ratio,
-        nnear,
-        ffar
-    );
+    Frustum(-nnear * xmul + xshift, nnear * xmul + xshift, -nnear * ymul, nnear * ymul, nnear, ffar);
+    TranslateMatrix(xshift, 0.f, 0.f);
 #endif
 
 #endif
@@ -228,25 +221,60 @@ void rViewportConfiguration::DemonstrateViewport(tString *titles){
 
     for(int i=s_viewportConfigurations[next_conf_num]->num_viewports-1;i>=0;i--){
         rViewport sub(rViewport::s_viewportDemonstation,*(s_viewportConfigurations[next_conf_num]->Port(i)));
-        sub.Select();
 
-        RenderEnd();
+        // Convert sub-viewport local NDC to fullscreen NDC
+        tCoord pos = sub.GetPosition();    // (left, bottom) in 0..1 screen fractions
+        tCoord dim = sub.GetDimensions();  // (width, height) in 0..1 screen fractions
 
-        glDisable(GL_TEXTURE_2D);
-        glDisable(GL_DEPTH_TEST);
+        // Map local NDC point to fullscreen NDC: ndc = (frac * 2) - 1
+        // where frac = pos + (local + 1) * 0.5 * dim
+        auto toNDC = [&](float lx, float ly, float &nx, float &ny) {
+            nx = (pos.x + (lx + 1.0f) * 0.5f * dim.x) * 2.0f - 1.0f;
+            ny = (pos.y + (ly + 1.0f) * 0.5f * dim.y) * 2.0f - 1.0f;
+        };
 
-        glColor3f(.1,.1,.4);
-        glRectf(-.9,-.9,.9,.9);
+        // Background quad (local -0.9..0.9)
+        float x0, y0, x1, y1;
+        toNDC(-0.9f, -0.9f, x0, y0);
+        toNDC( 0.9f,  0.9f, x1, y1);
+        rVertex20 q0(x0, y0, 0, 25, 25, 102, 255, 0, 0);
+        rVertex20 q1(x1, y0, 0, 25, 25, 102, 255, 0, 0);
+        rVertex20 q2(x1, y1, 0, 25, 25, 102, 255, 0, 0);
+        rVertex20 q3(x0, y1, 0, 25, 25, 102, 255, 0, 0);
+        rRenderStateKey qState = rRenderStateKey::HUD(0, rBlendMode::Opaque);
+        rRenderQueue::Instance().SubmitQuad(rRenderPhase::HUD, qState, q0, q1, q2, q3);
 
-        glColor3f(.6,.6,.6);
-        BeginLineLoop();
-        glVertex2f(-1,-1);
-        glVertex2f(-1,1);
-        glVertex2f(1,1);
-        glVertex2f(1,-1);
+        // Border line loop (local -1..1 = full sub-viewport edge)
+        float bx0, by0, bx1, by1;
+        toNDC(-1.0f, -1.0f, bx0, by0);
+        toNDC( 1.0f,  1.0f, bx1, by1);
+        rVertex20 border[5] = {
+            rVertex20(bx0, by0, 0, 153, 153, 153, 255, 0, 0),
+            rVertex20(bx0, by1, 0, 153, 153, 153, 255, 0, 0),
+            rVertex20(bx1, by1, 0, 153, 153, 153, 255, 0, 0),
+            rVertex20(bx1, by0, 0, 153, 153, 153, 255, 0, 0),
+            rVertex20(bx0, by0, 0, 153, 153, 153, 255, 0, 0)
+        };
+        rRenderStateKey lState = rRenderStateKey::HUD(0, rBlendMode::Opaque);
+        rRenderQueue::Instance().SubmitLineStrip(rRenderPhase::HUD, lState, border, 5);
 
-        glColor3f(1,1,1);
-        DisplayText(0,0,.5,titles[i], sr_fontMenu);
+        // Render the label in fullscreen NDC space so the font's global scaleX/Y
+        // mapping (2/sr_screenWidth, 2/sr_screenHeight) is never distorted by a
+        // sub-viewport scissor.  DisplayText x,y are NDC (−1..+1); cheight is
+        // also in NDC units.  We centre the digit in the sub-viewport.
+        {
+            // NDC centre of the sub-viewport
+            float cx = (pos.x + dim.x * 0.5f) * 2.0f - 1.0f;
+            float cy = (pos.y + dim.y * 0.5f) * 2.0f - 1.0f;
+
+            // cheight: 40 % of sub-viewport height in NDC
+            float cheight = dim.y * 0.8f;
+
+            // centre=0 means DisplayText centres horizontally on x.
+            // Vertical: place baseline so text midpoint aligns with viewport centre.
+            Color(1,1,1);
+            DisplayText(cx, cy + cheight * 0.1f, cheight, titles[i], sr_fontMenu, 0);
+        }
     }
 
     rViewport::s_viewportFullscreen.Select();
@@ -379,6 +407,47 @@ rViewport rViewport::EqualAspectBottom( void ) const
     ret.height = width * sr_screenWidth / sr_screenHeight;
 
     return ret;
+}
+
+int rViewportConfiguration::CurrentConfNum()
+{
+    return conf_num;
+}
+
+// Rotation degrees applied to a given viewport in a given configuration.
+// On mobile, rotates viewports so each player around a tablet sees their
+// viewport right-side-up. Top-half viewports get 180° (player across table).
+// Left-right viewports get ±90°.
+//
+// Configs: 0=single, 1=top/bottom, 2=left/right,
+//          3=top+BL+BR, 4=TL+TR+bottom, 5=TL+TR+BL+BR
+int sr_GetViewportRotationDeg(int confNum, int vpIdx)
+{
+#if defined(__ANDROID__) || (defined(__APPLE__) && TARGET_OS_IOS)
+    switch (confNum)
+    {
+    case 1: // top-bottom split
+        if (vpIdx == 0) return 180;
+        break;
+    case 2: // left-right split
+        if (vpIdx == 0) return 90;  // left viewport
+        if (vpIdx == 1) return 270; // right viewport
+        break;
+    case 3: // top + bottom-left + bottom-right
+        if (vpIdx == 0) return 180;
+        break;
+    case 4: // top-left + top-right + bottom
+        if (vpIdx == 0 || vpIdx == 1) return 180;
+        break;
+    case 5: // TL + TR + BL + BR
+        if (vpIdx == 0 || vpIdx == 1) return 180;
+        break;
+    }
+#else
+    (void)confNum;
+    (void)vpIdx;
+#endif
+    return 0;
 }
 
 

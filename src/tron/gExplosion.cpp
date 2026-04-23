@@ -28,6 +28,11 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 #include "gExplosion.h"
 #include "rModel.h"
 #include "rRender.h"
+#ifndef DEDICATED
+#include "rRendererState.h"
+#include "rEffectsRenderer.h"
+#include "rRenderQueue.h"
+#endif
 #include "tInitExit.h"
 #include "gWall.h"
 #include "gCycle.h"
@@ -38,6 +43,8 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 #include "tMath.h"
 #include "eLadderLog.h"
 #include "eSoundMixer.h"
+#include <iostream>
+#include <vector>
 #ifdef USEPARTICLES
 #include "papi.h"
 #endif
@@ -417,33 +424,12 @@ bool sg_crashExplosionHud = true;
 
 #ifndef DEDICATED
 void gExplosion::Render(const eCamera *cam){
-    //std::cout << "Starting render\n";
+    // Set render context for effects (save/restore to avoid leaking state)
+    rRenderContext prevCtx = sr_GetRenderContext();
+    sr_SetRenderContext(rRenderContext::Game3D_Effects);
+
 #ifdef USEPARTICLES
-    /*if(sg_crashExplosion){
-        ModelMatrix();
-        glPushMatrix();
-        pCurrentGroup(particle_handle_circle);
-        int cnt = (int)pGetGroupCount();
-        if(cnt < 1) return;
-
-        float *ptr;
-        size_t flstride, pos3Ofs, posB3Ofs, size3Ofs, vel3Ofs, velB3Ofs, color3Ofs, alpha1Ofs, age1Ofs;
-
-        cnt = (int)pGetParticlePointer(ptr, flstride, pos3Ofs, posB3Ofs,
-            size3Ofs, vel3Ofs, velB3Ofs, color3Ofs, alpha1Ofs, age1Ofs);
-        if(cnt < 1) return;
-
-        glEnableClientState(GL_COLOR_ARRAY);
-        glColorPointer(4, GL_FLOAT, int(flstride) * sizeof(float), ptr + color3Ofs);
-
-        glEnableClientState(GL_VERTEX_ARRAY);
-        glVertexPointer(3, GL_FLOAT, int(flstride) * sizeof(float), ptr + pos3Ofs);
-
-        glDrawArrays(GL_POINTS, 0, cnt);
-        glDisableClientState(GL_VERTEX_ARRAY);
-        glDisableClientState(GL_COLOR_ARRAY);
-        glPopMatrix();
-    }*/
+    // Particle rendering not implemented in GL3
 #else
     if (sg_crashExplosion){
         REAL a1=(lastTime-createTime)+.01f;//+.2;
@@ -458,48 +444,30 @@ void gExplosion::Render(const eCamera *cam){
         a1*=100;
         e*=100;
 
-        ModelMatrix();
-        glPushMatrix();
-        glTranslatef(pos.x,pos.y,0);
+        // Batched rendering path using rRenderQueue
+        if (sr_useBatchedEffects)
+        {
+            // Prepare direction vectors for rSubmitExplosion
+            std::vector<float> directions;
+            directions.reserve(expvec.Len() * 3);
+            for (int i = 0; i < expvec.Len(); ++i)
+            {
+                directions.push_back(expvec[i].x[0]);
+                directions.push_back(expvec[i].x[1]);
+                directions.push_back(expvec[i].x[2]);
+            }
 
-        //glDisable(GL_TEXTURE);
-        glDisable(GL_TEXTURE_2D);
-
-        glColor4f(explosion_r,explosion_g,explosion_b,fade);
-        BeginLines();
-        for (int i=expvec.Len()-1;i>=0;i--){
-            glVertex3f(a1*expvec[i].x[0],a1*expvec[i].x[1],a1*expvec[i].x[2]);
-            glVertex3f( e*expvec[i].x[0], e*expvec[i].x[1], e*expvec[i].x[2]);
+            // Submit explosion to render queue (z=0.05 to avoid depth fighting)
+            rSubmitExplosion(pos.x, pos.y, 0.05f, a1, e,
+                             explosion_r, explosion_g, explosion_b, fade,
+                             directions.data(), expvec.Len());
+            sr_SetRenderContext(prevCtx);
+            return;
         }
-        RenderEnd();
-        glPopMatrix();
     }
-    /*
-    if(sr_alphaBlend)
-    for(int i=2;i>=0;i--){
-    REAL age=a1-i*.1;
-    if (0<age && age<.5){
-    REAL alpha=(3-i)*.5*(1-age*2)*(1-age*2);
-    glColor4f(r,g,b,alpha);
-    glDisable(GL_LIGHTING);
-    glDisable(GL_TEXTURE_2D);
-    glMatrixMode(GL_MODELVIEW);
-    glPushMatrix();
-    glTranslatef(pos.x,pos.y,age*pow((age+1),3)*(age+.5)*100);
-    y
-
-    GLUquadricObj* q= gluNewQuadric();
-
-    gluSphere(q,(age*pow((age+1),3)*(age+.5))*100,5,5);
-
-    gluDeleteQuadric( q );
-
-    glPopMatrix();
-    }
-    }
-    */
 #endif
     //std::cout << "Finishing render\n";
+    sr_SetRenderContext(prevCtx);
 }
 
 void gExplosion::Render2D(tCoord scale) const {
@@ -517,20 +485,28 @@ void gExplosion::Render2D(tCoord scale) const {
         a1*=100;
         e*=100;
 
-        ModelMatrix();
-        glPushMatrix();
-        glTranslatef(pos.x,pos.y,0);
+        // Batched rendering path using rRenderQueue
+        if (sr_useBatchedEffects)
+        {
+            // Prepare 2D direction vectors for rSubmitExplosion
+            // Use only x,y components, set z=0
+            std::vector<float> directions;
+            directions.reserve(expvec.Len() * 3);
+            for (int i = 0; i < expvec.Len(); ++i)
+            {
+                directions.push_back(expvec[i].x[0]);
+                directions.push_back(expvec[i].x[1]);
+                directions.push_back(0.0f); // z=0 for 2D
+            }
 
-        glDisable(GL_TEXTURE_2D);
-
-        glColor4f(explosion_r,explosion_g,explosion_b,fade);
-        BeginLines();
-        for(int i=expvec.Len()-1;i>=0;i--){
-            glVertex2f(a1*expvec[i].x[0],a1*expvec[i].x[1]);
-            glVertex2f( e*expvec[i].x[0], e*expvec[i].x[1]);
+            // Submit 2D explosion to Sky phase and execute immediately, so the
+            // map's matrix transform and scissor clip are applied (same pattern as gCycle::Render2D).
+            rSubmitExplosion(pos.x, pos.y, 0.0f, a1, e,
+                             explosion_r, explosion_g, explosion_b, fade,
+                             directions.data(), expvec.Len(), true);  // useHUDPhase=true → Sky phase
+            rRenderQueue::Instance().ExecutePhase(rRenderPhase::Sky);
+            return;
         }
-        RenderEnd();
-        glPopMatrix();
     }
 #endif
     //std::cout << "Finishing render\n";

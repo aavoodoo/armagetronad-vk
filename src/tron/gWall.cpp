@@ -39,6 +39,11 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 #include "gGame.h"
 #include "rScreen.h"
 #include "rRender.h"
+#include "rVertex.h"
+#ifndef DEDICATED
+#include "rRenderQueue.h"
+#include "rRendererState.h"
+#endif
 #include "eCamera.h"
 #include "tConfiguration.h"
 #include "gExplosion.h"
@@ -175,32 +180,27 @@ extern REAL se_lowerSkyHeight,se_upperSkyHeight;
 #ifndef DEDICATED
 
 
+// Static accumulators declared before gWallRim_helper so it can push to them.
+static std::vector<rVertex20> wallQuads_[5]; // 0-3: moviepack textures, 4: default
+static std::vector<rVertex20> shadowQuads_;
+static std::vector<float> wallRawTexCoords_; // 2 floats (u,v) per vertex in wallQuads_[4]
+
+// Accumulates a rim wall quad into the appropriate texture bucket.
+// wallQuads[0..3] are for moviepack textures, wallQuads[4] is for the default texture.
 static void gWallRim_helper(eCoord p1,eCoord p2,REAL tBeg,REAL tEnd,REAL h,
-                            REAL Z_SCALE,bool sw){
+                            REAL Z_SCALE,bool sw,
+                            uint8_t r, uint8_t g, uint8_t b,
+                            std::vector<rVertex20> wallQuads[5], int &texBucket){
 
-    // draw additional upper line
-    /*
-    sr_DepthOffset(true);
-    glPolygonOffset(-100,10000000);
-    glDisable(GL_TEXTURE_2D);
-    BeginLines();
-    Color(1,1,1);
-    Vertex(p1.x,p1.y,1);
-    Vertex(p2.x,p2.y,1);
-    RenderEnd();
-    sr_DepthOffset(false);
-    glDisable(GL_POLYGON_OFFSET_LINE);
-    glEnable(GL_TEXTURE_2D);
-    */
-
+    int bucket = 4; // default texture
     if (sg_MoviePack()){
         int t=int(floor((tBeg+tEnd)/2));
         tBeg-=t;
         tEnd-=t;
         t=t%4;
-        while (t<0)
+        while(t<0)
             t+=4;
-        gWallRim_mp[t]->Select();
+        bucket = t;
     }
 
     if (sw){
@@ -208,25 +208,54 @@ static void gWallRim_helper(eCoord p1,eCoord p2,REAL tBeg,REAL tEnd,REAL h,
         Swap(tBeg,tEnd);
     }
 
-
     if (h>se_lowerSkyHeight){
         if (sr_upperSky && !sg_MoviePack() && h>se_upperSkyHeight) h=se_upperSkyHeight;
         else if (sr_lowerSky || sg_MoviePack()) h=se_lowerSkyHeight;
     }
 
-    BeginQuads();
+    float hfrac = 1.0f - static_cast<float>(h/Z_SCALE);
 
-    TexVertex(p1.x, p1.y, 0,
-              tBeg      , 1);
+    // Build position + color vertices (texcoords set below)
+    rVertex20 v0; v0.SetPosition(p1.x, p1.y, 0); v0.SetColor(r, g, b, 255);
+    rVertex20 v1; v1.SetPosition(p1.x, p1.y, h); v1.SetColor(r, g, b, 255);
+    rVertex20 v2; v2.SetPosition(p2.x, p2.y, h); v2.SetColor(r, g, b, 255);
+    rVertex20 v3; v3.SetPosition(p2.x, p2.y, 0); v3.SetColor(r, g, b, 255);
 
-    TexVertex(p1.x, p1.y, h,
-              tBeg,       1-h/Z_SCALE);
+    if (bucket < 4)
+    {
+        // Moviepack: texcoords already normalized to [0,1] — store directly
+        v0.SetTexCoord(tBeg, 1.0f);
+        v1.SetTexCoord(tBeg, hfrac);
+        v2.SetTexCoord(tEnd, hfrac);
+        v3.SetTexCoord(tEnd, 1.0f);
+    }
+    else
+    {
+        // Default texture: texcoords may exceed [-1,1] (large U from tiling,
+        // negative V from tall walls). Store raw floats in parallel array;
+        // FlushBatch will normalize and apply a texture matrix.
+        // Leave rVertex20 texcoords at (0,0) — overwritten in FlushBatch.
+        float rawU0 = static_cast<float>(tBeg), rawV0 = 1.0f;
+        float rawU1 = static_cast<float>(tBeg), rawV1 = hfrac;
+        float rawU2 = static_cast<float>(tEnd), rawV2 = hfrac;
+        float rawU3 = static_cast<float>(tEnd), rawV3 = 1.0f;
+        // 6 vertices per quad (2 triangles): v0,v1,v2, v0,v2,v3
+        wallRawTexCoords_.push_back(rawU0); wallRawTexCoords_.push_back(rawV0);
+        wallRawTexCoords_.push_back(rawU1); wallRawTexCoords_.push_back(rawV1);
+        wallRawTexCoords_.push_back(rawU2); wallRawTexCoords_.push_back(rawV2);
+        wallRawTexCoords_.push_back(rawU0); wallRawTexCoords_.push_back(rawV0);
+        wallRawTexCoords_.push_back(rawU2); wallRawTexCoords_.push_back(rawV2);
+        wallRawTexCoords_.push_back(rawU3); wallRawTexCoords_.push_back(rawV3);
+    }
 
-    TexVertex(p2.x, p2.y, h,
-              tEnd,       1-h/Z_SCALE);
+    wallQuads[bucket].push_back(v0);
+    wallQuads[bucket].push_back(v1);
+    wallQuads[bucket].push_back(v2);
+    wallQuads[bucket].push_back(v0);
+    wallQuads[bucket].push_back(v2);
+    wallQuads[bucket].push_back(v3);
 
-    TexVertex(p2.x, p2.y, 0,
-              tEnd      , 1);
+    texBucket = bucket;
 }
 
 // maximal size of the arena wall shadow compared to the camera height
@@ -245,6 +274,83 @@ static tSettingItem<REAL> sg_arenaWallShadowNearConf("ARENA_WALL_SHADOW_NEAR",sg
 static REAL sg_arenaWallShadowDist = 100.0;
 static tSettingItem<REAL> sg_arenaWallShadowDistConf("ARENA_WALL_SHADOW_DIST",sg_arenaWallShadowDist);
 
+// (wallQuads_, shadowQuads_, wallRawTexCoords_ declared above gWallRim_helper)
+
+void gWallRim_BeginBatch()
+{
+    for (int i = 0; i < 5; ++i) wallQuads_[i].clear();
+    shadowQuads_.clear();
+    wallRawTexCoords_.clear();
+}
+
+void gWallRim_FlushBatch(rITexture* defaultTexture)
+{
+#ifndef DEDICATED
+    // Submit shadows (colored, no texture)
+    if (!shadowQuads_.empty())
+    {
+        rRenderStateKey state = rRenderStateKey::Colored(rBlendMode::Alpha);
+        rRenderQueue::Instance().Submit(rRenderPhase::OpaqueDynamic, state,
+                                        shadowQuads_.data(), shadowQuads_.size());
+    }
+
+    // Submit moviepack wall quads (buckets 0-3) — texcoords already in [0,1]
+    for (int i = 0; i < 4; ++i)
+    {
+        if (wallQuads_[i].empty()) continue;
+
+        gWallRim_mp[i]->Select();
+
+        unsigned int texId = RenderGetBoundTexture2D();
+
+        rRenderStateKey state = rRenderStateKey::Textured(texId, rBlendMode::Alpha);
+        rRenderQueue::Instance().Submit(rRenderPhase::OpaqueDynamic, state,
+                                        wallQuads_[i].data(), wallQuads_[i].size());
+    }
+
+    // Submit default texture wall quads (bucket 4) with texture matrix compensation
+    if (!wallQuads_[4].empty() && defaultTexture)
+    {
+        defaultTexture->Select();
+
+        unsigned int texId = RenderGetBoundTexture2D();
+
+        // Find max absolute texcoord across all default rim wall vertices
+        float maxTC = 1.0f;
+        for (size_t j = 0; j < wallRawTexCoords_.size(); ++j)
+        {
+            float absVal = fabs(wallRawTexCoords_[j]);
+            if (absVal > maxTC) maxTC = absVal;
+        }
+
+        // Normalize raw texcoords into [-1,1] and write into rVertex20
+        float invScale = 1.0f / maxTC;
+        size_t numVerts = wallQuads_[4].size();
+        for (size_t j = 0; j < numVerts && j * 2 + 1 < wallRawTexCoords_.size(); ++j)
+        {
+            wallQuads_[4][j].SetTexCoord(
+                wallRawTexCoords_[j * 2]     * invScale,
+                wallRawTexCoords_[j * 2 + 1] * invScale
+            );
+        }
+
+        // Build texture matrix that scales back up: shader computes (normalized * scale) = original
+        float texMatrix[16] = {0};
+        texMatrix[0]  = maxTC;  // scale U
+        texMatrix[5]  = maxTC;  // scale V
+        texMatrix[10] = 1.0f;
+        texMatrix[15] = 1.0f;
+
+        rRenderStateKey state = rRenderStateKey::Textured(texId, rBlendMode::Alpha);
+        state.SetTexMatrix(texMatrix);
+        rRenderQueue::Instance().Submit(rRenderPhase::OpaqueDynamic, state,
+                                        wallQuads_[4].data(), wallQuads_[4].size());
+    }
+
+    rRenderQueue::Instance().ExecutePhase(rRenderPhase::OpaqueDynamic);
+#endif
+}
+
 void gWallRim::RenderReal(const eCamera *cam){
     if ( Edge() ){
         const eCoord *p1=&EndPoint(0);
@@ -256,8 +362,6 @@ void gWallRim::RenderReal(const eCamera *cam){
         // determine height and transparency
         bool transparency = sg_bugTransparency || ( sg_bugTransparencyDemand && renderHeight_ < height );
         REAL h = transparency ? height : renderHeight_;
-        if ( transparency )
-            glDisable( GL_DEPTH_TEST );
 
       if (sg_MoviePack()){
             X_SCALE=sg_MPRimStretchX;
@@ -394,12 +498,12 @@ void gWallRim::RenderReal(const eCamera *cam){
                 eCoord P4=P2+normal*extension;
 
                 // render shadow
-                Color(0,0,0);
-                BeginQuads();
-                Vertex(P1.x, P1.y, 0);
-                Vertex(P2.x, P2.y, 0);
-                Vertex(P4.x, P4.y, 0);
-                Vertex(P3.x, P3.y, 0);
+                rVertex20 s0(P1.x, P1.y, 0, 0, 0, 0, 255, 0, 0);
+                rVertex20 s1(P2.x, P2.y, 0, 0, 0, 0, 255, 0, 0);
+                rVertex20 s2(P4.x, P4.y, 0, 0, 0, 0, 255, 0, 0);
+                rVertex20 s3(P3.x, P3.y, 0, 0, 0, 0, 255, 0, 0);
+                shadowQuads_.push_back(s0); shadowQuads_.push_back(s1); shadowQuads_.push_back(s2);
+                shadowQuads_.push_back(s0); shadowQuads_.push_back(s2); shadowQuads_.push_back(s3);
             }
         }
 
@@ -407,54 +511,54 @@ void gWallRim::RenderReal(const eCamera *cam){
             eCoord vec = P1-P2;
             REAL xs = vec.x*vec.x;
             REAL ys = vec.y*vec.y;
-            
+
             REAL intensity = .3 * xs/(xs+ys+1E-30);
-            
+
             REAL rwr = (rim_wall_red * .7) + intensity;
             REAL rwg = (rim_wall_green * .7) + intensity;
             REAL rwb = (rim_wall_blue * .7) + intensity;
-            
-            RenderEnd( true );
-            Color(rwr, rwg, rwb);
-        }
 
-        if (sg_MoviePack()){
-            bool sw=false;
+            uint8_t wr = static_cast<uint8_t>(rwr * 255.0f);
+            uint8_t wg = static_cast<uint8_t>(rwg * 255.0f);
+            uint8_t wb = static_cast<uint8_t>(rwb * 255.0f);
+            int texBucket = 0;
 
-            if (tBeg>tEnd){
-                Swap(P1,P2);
-                Swap(tBeg,tEnd);
-                //sw=true;
+            if (sg_MoviePack()){
+                bool sw=false;
+
+                if (tBeg>tEnd){
+                    Swap(P1,P2);
+                    Swap(tBeg,tEnd);
+                }
+
+                REAL ta=tBeg;
+                eCoord ca=P1;
+                for (int i=int(ceil(tBeg));i<tEnd;i++){
+                    eCoord cb=P1+(P2-P1)*((i-tBeg)/(tEnd-tBeg));
+                    gWallRim_helper(ca,cb,ta,i,h,Z_SCALE,sw, wr,wg,wb, wallQuads_, texBucket);
+                    ca=cb;
+                    ta=i;
+                }
+                gWallRim_helper(ca,P2,ta,tEnd,h,Z_SCALE,sw, wr,wg,wb, wallQuads_, texBucket);
             }
+            else{
+                // Original approach: offset to positive range, single call.
+                // Texture matrix in FlushBatch handles values > 1.0.
+                REAL offset = 0;
+                if (tBeg>tEnd)
+                    offset = -floor(tEnd);
+                else
+                    offset = -floor(tBeg);
 
-            REAL ta=tBeg;
-            eCoord ca=P1;
-            for (int i=int(ceil(tBeg));i<tEnd;i++){
-                eCoord cb=P1+(P2-P1)*((i-tBeg)/(tEnd-tBeg));
-                gWallRim_helper(ca,cb,ta,i,h,Z_SCALE,sw);
-                ca=cb;
-                ta=i;
+                tBeg += offset;
+                tEnd += offset;
+
+                gWallRim_helper(*p1,*p2,tBeg,tEnd,h,Z_SCALE,false, wr,wg,wb, wallQuads_, texBucket);
             }
-            gWallRim_helper(ca,P2,ta,tEnd,h,Z_SCALE,sw);
-        }
-        else{
-            // wrap manually in y-direction, some graphics card are bad at it
-            REAL offset = 0;
-            if (tBeg>tEnd)
-                offset = -floor(tEnd);
-            else
-                offset = -floor(tBeg);
-
-            tBeg += offset;
-            tEnd += offset;
-
-            gWallRim_helper(*p1,*p2,tBeg,tEnd,h,Z_SCALE,false);
         }
 
         //eWall::Render_helper(edge,(p1->x+p1->y)/SCALE,(p2->x+p2->y)/SCALE,40,height);
             
-        if ( transparency )
-            glEnable( GL_DEPTH_TEST );
     }
 
     // grow the wall again
@@ -829,12 +933,25 @@ void gPlayerWall::Split(eWall *& w1,eWall *& w2,REAL a){
 //#define gCYCLE_LEN 1.6
 #define gCYCLE_LEN 1.5
 #define gBEG_OFFSET .25
-#define gBEG_LEN 2
 #define gBEG_LEN_GIVEUP .4
 //#define gCYCLE_LEN 3.8
 //#define gBEG_OFFSET 1
 
+// Begin segment fade-in length - exported for new wall renderer
+REAL gBEG_LEN = 2.0;
+
 #ifndef DEDICATED
+
+#include "rWallGeometryCollector.h"
+
+// Flag indicating new wall renderer is active - suppresses InvalidateCache for begin segments
+// Set to true during RenderAllNew, false otherwise
+static bool sg_newWallRendererActive = false;
+
+void gWall_SetNewRendererActive(bool active)
+{
+    sg_newWallRendererActive = active;
+}
 void gPlayerWall::Render(const eCamera *cam){
     // no direct rendering
     tASSERT(false);
@@ -877,9 +994,14 @@ void gPlayerWall::RenderList(bool list)
 bool sg_simpleTrail = false;
 static tConfItem< bool > sgc_simpleTrail( "SIMPLE_TRAIL", sg_simpleTrail );
 
-void gNetPlayerWall::RenderList(bool list, gWallRenderMode renderMode ){
+void gNetPlayerWall::RenderList(bool list, gWallRenderMode renderMode, rWallGeometryCollector* collector ){
+    // Set render context for player walls (cycle trails)
+    rRenderContext prevCtx = sr_GetRenderContext();
+    sr_SetRenderContext(rRenderContext::Game3D_PlayerWalls);
+
     if ( !cycle_ )
     {
+        sr_SetRenderContext(prevCtx);
         return;
     }
 
@@ -895,14 +1017,14 @@ void gNetPlayerWall::RenderList(bool list, gWallRenderMode renderMode ){
     // or this is the cycle's first wall
     if ( gWallRenderMode_Lines == renderMode )
     {
-        if ( gCycleWallsDisplayListManager::CannotHaveList( dbegin, cycle_ ) ||
+        if ( gCycleWallsRenderCache::CannotCache( dbegin, cycle_ ) ||
              this == cycle_->currentWall )
         {
-            ClearDisplayList(2);
+            InvalidateCache(2);
         }
-        else if ( displayListInhibition_ > 0  )
+        else if ( cacheInhibition_ > 0  )
         {
-            displayListInhibition_--;
+            cacheInhibition_--;
         }
     }
 
@@ -927,6 +1049,7 @@ void gNetPlayerWall::RenderList(bool list, gWallRenderMode renderMode ){
             if( denom <= 0 )
             {
                 // zero length wall
+                sr_SetRenderContext(prevCtx);
                 return;
             }
 
@@ -1009,7 +1132,7 @@ void gNetPlayerWall::RenderList(bool list, gWallRenderMode renderMode ){
             {
                 if (te+gBEG_LEN_GIVEUP <= time)
                 {
-                    RenderNormal(p1,p2,ta,te,r,g,b,a,renderMode);
+                    RenderNormal(p1,p2,ta,te,r,g,b,a,renderMode,collector);
                 }
                 else if( ta+gBEG_LEN_GIVEUP <= time )
                 {
@@ -1021,22 +1144,26 @@ void gNetPlayerWall::RenderList(bool list, gWallRenderMode renderMode ){
 
                     REAL s=((time-gBEG_LEN_GIVEUP)-ta)/denom;
                     eCoord pm=p1+(p2-p1)*s;
-                    RenderNormal(p1,pm,ta,ta+(te-ta)*s,r,g,b,a,renderMode);
+                    RenderNormal(p1,pm,ta,ta+(te-ta)*s,r,g,b,a,renderMode,collector);
                 }
             }
             else if (te+gBEG_LEN<=time){
-                RenderNormal(p1,p2,ta,te,r,g,b,a,renderMode);
+                RenderNormal(p1,p2,ta,te,r,g,b,a,renderMode,collector);
             }
             else{ // complicated
-                // can't squeeze that into a display list
-                ClearDisplayList();
+                // can't squeeze that into a VBO cache
+                // Note: With new renderer, begin segments go to streaming buffer,
+                // so we don't invalidate the static cache
+                if (!sg_newWallRendererActive)
+                {
+                    InvalidateCache();
+                }
 
                 if (ta+gBEG_LEN>=time){
                     RenderBegin(p1,p2,ta,te,
                                 1+(ta-time)/gBEG_LEN,
                                 1+(te-time)/gBEG_LEN,
-                                r,g,b,a,renderMode);
-                    sr_CheckGLError();
+                                r,g,b,a,renderMode,collector);
                 }
                 else
                 {
@@ -1051,19 +1178,19 @@ void gNetPlayerWall::RenderList(bool list, gWallRenderMode renderMode ){
                     RenderBegin(pm,p2,
                                 ta+(te-ta)*s,te,0,
                                 1+(te-time)/gBEG_LEN,
-                                r,g,b,a,renderMode);
-                    sr_CheckGLError();
-                    RenderNormal(p1,pm,ta,ta+(te-ta)*s,r,g,b,a,renderMode);
+                                r,g,b,a,renderMode,collector);
+                    RenderNormal(p1,pm,ta,ta+(te-ta)*s,r,g,b,a,renderMode,collector);
                 }
             }
         }
     }
+    sr_SetRenderContext(prevCtx);
 }
 
 
 inline bool upperlinecolor(REAL r,REAL g,REAL b, REAL a){
     if (rTextureGroups::TextureMode[rTextureGroups::TEX_WALL]<0)
-        glColor4f(1,1,1,a);
+        Color(1,1,1,a);
     else{
         /*
           REAL upperline_alpha=fabs(se_cameraRise*2);
@@ -1072,10 +1199,9 @@ inline bool upperlinecolor(REAL r,REAL g,REAL b, REAL a){
           upperline_alpha=1;
           if (upperline_alpha<=.5)
           return false;
-          glColor4f(r,g,b,upperline_alpha);
+          Color(r,g,b,upperline_alpha);
         */
-        //glDisable(GL_TEXTURE);
-        glColor4f(r,g,b,a);
+        Color(r,g,b,a);
     }
 
     return true;
@@ -1098,8 +1224,9 @@ static const bool sg_renderBulkLines = true;
 static const bool sg_renderBulkQuads = true;
 #endif
 
-void gNetPlayerWall::RenderNormal(const eCoord &p1,const eCoord &p2,REAL ta,REAL te,REAL r,REAL g,REAL b,REAL a, gWallRenderMode mode ){
+void gNetPlayerWall::RenderNormal(const eCoord &p1,const eCoord &p2,REAL ta,REAL te,REAL r,REAL g,REAL b,REAL a, gWallRenderMode mode, rWallGeometryCollector* collector ){
     REAL hfrac=1;
+    bool isDeath = false;
 
     if (bool(cycle_) && !cycle_->Alive() && gCycle::WallsStayUpDelay() >= 0 ){
         REAL dt=(se_GameTime()-cycle_->deathTime-gCycle::WallsStayUpDelay())*2;
@@ -1113,6 +1240,7 @@ void gNetPlayerWall::RenderNormal(const eCoord &p1,const eCoord &p2,REAL ta,REAL
 
         if (dt>=0)
         {
+            isDeath = true;
             REAL ca=REAL(.5/(dt+.5));
             REAL alpha=1-dt;
             if (alpha>1) alpha=1;
@@ -1127,20 +1255,7 @@ void gNetPlayerWall::RenderNormal(const eCoord &p1,const eCoord &p2,REAL ta,REAL
     }
     REAL h=1;
 
-
     if (hfrac>0){
-        if ( ( mode & gWallRenderMode_Lines && sg_renderBulkLines  ) ){
-
-            BeginLines();
-
-            upperlinecolor(r,g,b,a);
-            glVertex3f(p1.x,p1.y,h*hfrac);
-            upperlinecolor(r,g,b,a);
-            glVertex3f(p2.x,p2.y,h*hfrac);
-        }
-
-        //glColor4f(r,g,b,a);
-
 #ifdef XDEBUG
         REAL extrarise = 0;
         if ( this->id >= 0 )
@@ -1150,25 +1265,28 @@ void gNetPlayerWall::RenderNormal(const eCoord &p1,const eCoord &p2,REAL ta,REAL
 #else
         static const REAL extrarise = 0;
 #endif
+        // Add line (top edge)
+        if ( mode & gWallRenderMode_Lines && sg_renderBulkLines )
+        {
+            rPackedLineVertex lv0(p1.x, p1.y, h*hfrac, r, g, b, a);
+            rPackedLineVertex lv1(p2.x, p2.y, h*hfrac, r, g, b, a);
+            if (isDeath)
+                collector->AddDeathLine(lv0, lv1);
+            else
+                collector->AddNormalLine(lv0, lv1);
+        }
+
+        // Add quad (wall surface)
         if ( mode & gWallRenderMode_Quads && sg_renderBulkQuads )
         {
-            BeginQuads();
-
-            glColor4f(r,g,b,1);
-            glTexCoord2f(ta,hfrac);
-            glVertex3f(p1.x,p1.y,extrarise);
-            
-            glColor4f(r,g,b,1);
-            glTexCoord2f(ta,0);
-            glVertex3f(p1.x,p1.y,extrarise + h*hfrac);
-            
-            glColor4f(r,g,b,1);
-            glTexCoord2f(te,0);
-            glVertex3f(p2.x,p2.y,extrarise + h*hfrac);
-            
-            glColor4f(r,g,b,1);
-            glTexCoord2f(te,hfrac);
-            glVertex3f(p2.x,p2.y,extrarise);
+            rPackedWallVertex v0(p1.x, p1.y, extrarise, ta, hfrac, r, g, b, 1.0f);
+            rPackedWallVertex v1(p1.x, p1.y, extrarise + h*hfrac, ta, 0, r, g, b, 1.0f);
+            rPackedWallVertex v2(p2.x, p2.y, extrarise + h*hfrac, te, 0, r, g, b, 1.0f);
+            rPackedWallVertex v3(p2.x, p2.y, extrarise, te, hfrac, r, g, b, 1.0f);
+            if (isDeath)
+                collector->AddDeathQuad(v0, v1, v2, v3);
+            else
+                collector->AddNormalQuad(v0, v1, v2, v3);
         }
     }
 }
@@ -1182,7 +1300,7 @@ static inline REAL sfunc(REAL x){return (x*x);}
 //static inline REAL xfunc(REAL x){return (x+x*x)/2;}
 static inline REAL xfunc(REAL x){return REAL((x*.2+x*x)/2);}
 
-void gNetPlayerWall::RenderBegin(const eCoord &p1,const eCoord &pp2,REAL ta,REAL te,REAL ra,REAL re,REAL r,REAL g,REAL b,REAL a, gWallRenderMode mode ){
+void gNetPlayerWall::RenderBegin(const eCoord &p1,const eCoord &pp2,REAL ta,REAL te,REAL ra,REAL re,REAL r,REAL g,REAL b,REAL a, gWallRenderMode mode, rWallGeometryCollector* collector ){
     if ( !cycle_ )
     {
         return;
@@ -1230,7 +1348,7 @@ void gNetPlayerWall::RenderBegin(const eCoord &p1,const eCoord &pp2,REAL ta,REAL
         !good(ta)   || !good(te) ||
         !good(h)   || !good(hfrac) ||
         !good(cycle_->dir.x)   || !good(cycle_->dir.y) ||
-        !good(cycle_->skew) || 
+        !good(cycle_->skew) ||
         !good(r)   || !good(g) || !good(b) || !good(a)
         )
     {
@@ -1241,63 +1359,64 @@ void gNetPlayerWall::RenderBegin(const eCoord &p1,const eCoord &pp2,REAL ta,REAL
         return;
     }
 
-
-    if ( hfrac>0 ){
-        if( mode & gWallRenderMode_Lines && sg_renderBeginLines )
-        {
-        //REAL H=h*hfrac;
 #define segs 5
 #define seginv (1/float(segs))
-            BeginLineStrip();
-            
-            // upperlinecolor(r,g,b,a);//a*afunc(rat));
 
-            for (int i=0;i<=segs;i++){
-                REAL frag=i*seginv;
-                REAL rat=ra+frag*(re-ra);
-                REAL x=(p1.x+frag*(p2.x-p1.x))*(1-xfunc(rat))+ppos.x*xfunc(rat);
-                REAL y=(p1.y+frag*(p2.y-p1.y))*(1-xfunc(rat))+ppos.y*xfunc(rat);
-
-                REAL H=h*hfrac*hfunc(rat);
-                upperlinecolor(r,g,b,a*afunc(rat));
-                glVertex3f(x+H*cycle_->skew*sfunc(rat)*cycle_->dir.y,
-                           y-H*cycle_->skew*sfunc(rat)*cycle_->dir.x,
-                           H);//+se_cameraZ*.005);
-            }
-        }
-    }
-
-    if( mode & gWallRenderMode_Quads && sg_renderBeginQuads )
+    if (hfrac > 0)
     {
-        BeginQuadStrip();
+        // Collect line strip vertices
+        if ( mode & gWallRenderMode_Lines && sg_renderBeginLines )
+        {
+            std::vector<rPackedLineVertex> lineVerts;
+            lineVerts.reserve(segs + 1);
 
-        for (int i=0;i<=segs;i++){
-            REAL frag=i*seginv;
-            REAL rat=ra+frag*(re-ra);
-            REAL x=(p1.x+frag*(p2.x-p1.x))*(1-xfunc(rat))+ppos.x*xfunc(rat);
-            REAL y=(p1.y+frag*(p2.y-p1.y))*(1-xfunc(rat))+ppos.y*xfunc(rat);
+            for (int i=0; i<=segs; i++){
+                REAL frag = i * seginv;
+                REAL rat = ra + frag*(re-ra);
+                REAL x = (p1.x + frag*(p2.x-p1.x))*(1-xfunc(rat)) + ppos.x*xfunc(rat);
+                REAL y = (p1.y + frag*(p2.y-p1.y))*(1-xfunc(rat)) + ppos.y*xfunc(rat);
+                REAL H = h*hfrac*hfunc(rat);
 
-            // bottom
-            glColor4f(r+cfunc(rat),g+cfunc(rat),b+cfunc(rat),a*afunc(rat));
-            glTexCoord2f(ta+(te-ta)*frag,hfrac);
-            glVertex3f(x,y,0);
+                REAL vx = x + H*cycle_->skew*sfunc(rat)*cycle_->dir.y;
+                REAL vy = y - H*cycle_->skew*sfunc(rat)*cycle_->dir.x;
 
-            // top
-            //glTexCoord2f(ta+(te-ta)*frag,hfrac*(1-hfunc(rat)));
-            glColor4f(r+cfunc(rat),g+cfunc(rat),b+cfunc(rat),a*afunc(rat));
-            glTexCoord2f(ta+(te-ta)*frag,0);
-            REAL H=h*hfrac*hfunc(rat);
-            glVertex3f(x+H*cycle_->skew*sfunc(rat)*cycle_->dir.y,
-                       y-H*cycle_->skew*sfunc(rat)*cycle_->dir.x,
-                       H);
+                lineVerts.emplace_back(vx, vy, H, r, g, b, a*afunc(rat));
+            }
+            collector->AddBeginLineStrip(lineVerts);
+        }
+
+        // Collect quad strip vertices (alternating bottom/top)
+        if ( mode & gWallRenderMode_Quads && sg_renderBeginQuads )
+        {
+            std::vector<rPackedWallVertex> quadVerts;
+            quadVerts.reserve((segs + 1) * 2);
+
+            for (int i=0; i<=segs; i++){
+                REAL frag = i * seginv;
+                REAL rat = ra + frag*(re-ra);
+                REAL x = (p1.x + frag*(p2.x-p1.x))*(1-xfunc(rat)) + ppos.x*xfunc(rat);
+                REAL y = (p1.y + frag*(p2.y-p1.y))*(1-xfunc(rat)) + ppos.y*xfunc(rat);
+                REAL H = h*hfrac*hfunc(rat);
+
+                REAL cr = r + cfunc(rat);
+                REAL cg = g + cfunc(rat);
+                REAL cb = b + cfunc(rat);
+                REAL ca = a * afunc(rat);
+                REAL tc = ta + (te-ta)*frag;
+
+                // Bottom vertex - add small z-offset to prevent z-fighting with static buffer
+                // at the boundary where both buffers meet
+                static const REAL zOffset = 0.0001f;
+                quadVerts.emplace_back(x, y, zOffset, tc, hfrac, cr, cg, cb, ca);
+
+                // Top vertex
+                REAL vx = x + H*cycle_->skew*sfunc(rat)*cycle_->dir.y;
+                REAL vy = y - H*cycle_->skew*sfunc(rat)*cycle_->dir.x;
+                quadVerts.emplace_back(vx, vy, H, tc, 0, cr, cg, cb, ca);
+            }
+            collector->AddBeginQuadStrip(quadVerts);
         }
     }
-
-
-
-    // don't mix strips of different wall segments
-    RenderEnd();
-    sr_CheckGLError();
 }
 #endif
 
@@ -1378,14 +1497,14 @@ REAL gPlayerWall::LocalToGlobal( REAL a ) const
     return ret;
 }
 
-void gNetPlayerWall::ClearDisplayList( int inhibitThis, int inhibitCycle )
+void gNetPlayerWall::InvalidateCache( int inhibitThis, int inhibitCycle )
 {
 #ifndef DEDICATED
-    if ( CanHaveDisplayList() && cycle_ && inhibitCycle >= 0 )
+    if ( CanBeCached() && cycle_ && inhibitCycle >= 0 )
     {
-        cycle_->displayList_.Clear( inhibitCycle );
+        cycle_->wallsCache_.Clear( inhibitCycle );
     }
-    displayListInhibition_ = inhibitThis;
+    cacheInhibition_ = inhibitThis;
 #endif
 }
 
@@ -1614,7 +1733,7 @@ void gNetPlayerWall::MyInitAfterCreation()
     // put yourself into rendering list
     if ( cycle_ )
     {
-        Insert( cycle_->displayList_.wallList_ );
+        Insert( cycle_->wallsCache_.wallList_ );
     }
 #endif
 
@@ -1647,7 +1766,7 @@ void gNetPlayerWall::MyInitAfterCreation()
 
     Wall()->Remove();
 
-    ClearDisplayList();
+    InvalidateCache();
 }
 
 
@@ -1659,7 +1778,7 @@ gNetPlayerWall::gNetPlayerWall(gCycle *cyc,
         id(-1),griddedid(-1),
         cycle_(cyc),lastWall_(NULL),dir(d),dbegin(dbeg),
         beg(begi),end(begi),tBeg(tBegi),tEnd(tBegi),
-        inGrid(false){
+        inGrid(false),cacheInhibition_(0){
     preliminary=(sn_GetNetState()==nCLIENT);
     obsoleted_=-100;
     gridding=1E+20;
@@ -1855,7 +1974,7 @@ void gNetPlayerWall::real_CopyIntoGrid(eGrid *grid){
                 sg_netPlayerWallsGridded.Add(this,griddedid);
                 Wall()->Insert();
                 this->ReleaseData();
-                ClearDisplayList();
+                InvalidateCache();
             }
             else{
                 sg_netPlayerWallsGridded.Add(this,griddedid);
@@ -2025,7 +2144,7 @@ gNetPlayerWall::gNetPlayerWall( Game::PlayerWallSync const & sync, nSenderInfo c
         dir(0,0),dbegin(0),
         beg(0,0),end(0,0),
         tBeg(0),tEnd(0),
-        inGrid(0)
+        inGrid(0),cacheInhibition_(0)
 {
     gridding=1E+20;
     IDToPointer( sync.cycle_id(), cycle_ );
@@ -2096,7 +2215,7 @@ void gNetPlayerWall::ReleaseData()
 gNetPlayerWall::~gNetPlayerWall()
 {
     ReleaseData();
-    ClearDisplayList();
+    InvalidateCache();
 }
 
 bool gNetPlayerWall::ActionOnQuit()
@@ -2186,7 +2305,7 @@ void gNetPlayerWall::ReadSync( Game::PlayerWallSync const & sync, nSenderInfo co
 {
     nNetObject::ReadSync( sync.base(), sender );
 
-    ClearDisplayList();
+    InvalidateCache();
 
     REAL tEnd_new = sync.end_time();
     eCoord end_new;
@@ -2550,7 +2669,7 @@ void gNetPlayerWall::BlowHole	( REAL beg, REAL end, gExplosion * holer )
     CHECKWALL;
 
 #ifndef DEDICATED
-    ClearDisplayList(60);
+    InvalidateCache(60);
 #endif
 
 #ifdef DEBUG

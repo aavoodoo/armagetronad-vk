@@ -29,20 +29,12 @@ SECTION(Required libraries,libs)
 ULIST([
 ITEM(ELINK(www.xmlsoft.org/,LibXML2) version 2.6.0 (some binaries: 2.6.12) or later for map file parsing)
 ITEM([OpenGL or ELINK(mesa3d.sourceforge.net/,Mesa) for rendering])
-ITEM(ELINK(www.libsdl.org,SDL) version 1.2.x (Simple Direct Media Layer) for input and sound output)
-ITEM(ELINK(www.freetype.org,FreeType 2) for font loading)
-ITEM(ELINK(homepages.paradise.net.nz/henryj/code/index.html,FTGL), version 2.X, for font rendering)
-ITEM(ELINK(www.libsdl.org/projects/SDL_image/index.html, SDL_image)
-version 1.2.x for the textures
-which itself needs the libs)
-ITEM(ELINK(www.libpng.org/pub/png/pngcode.html,pnglib and zlib)
-(they should be included in your distribution))
+ITEM(ELINK(www.libsdl.org,SDL) version 2.x (Simple Direct Media Layer) for input and windowing)
 ITEM([Binary versions only: libstdc++.so.6 (any version that came with
 your System if it uses GCC 4.1 or higher should do).])
 ])
 
 SECTION(Optional libraries,libs_opt)
-ITEM(ELINK(www.libsdl.org/projects/SDL_mixer/,SDL_mixer))
 ITEM(ELINK(glew.sourceforge.net,GLEW))
 
 PARAGRAPH(,[

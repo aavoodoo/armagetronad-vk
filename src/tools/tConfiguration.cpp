@@ -46,7 +46,11 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 #include "utf8.h"
 
 #ifndef DEDICATED
+#ifdef HAVE_SDL3
+#include <SDL3/SDL_version.h>
+#else
 #include <SDL_version.h>
+#endif
 #endif
 
 #include <vector>
@@ -1002,11 +1006,8 @@ void st_LoadConfig( bool printChange )
     {
         Load( config, "default.cfg" );
 #ifndef DEDICATED
-#if SDL_VERSION_ATLEAST(2,0,0)
+        // SDL2/SDL3 compatible config
         Load( config, "sdl2/default.cfg" );
-#else
-        Load( config, "sdl1/default.cfg" );
-#endif
 #endif
     }
 #endif

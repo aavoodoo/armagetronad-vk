@@ -44,24 +44,24 @@ REAL se_GridSize(){
         return 4;
 }
 
-void se_glFloorColor(REAL alpha, REAL intens){
+void se_SetFloorColor(REAL alpha, REAL intens){
     if (eFloor::Floor)
-        eFloor::Floor->glFloorColor(alpha, intens);
+        eFloor::Floor->SetFloorColor(alpha, intens);
 }
 
-void se_glFloorTexture(){
+void se_SelectFloorTexture(){
     if (eFloor::Floor)
-        eFloor::Floor->glFloorTexture();
+        eFloor::Floor->SelectFloorTexture();
 }
 
-void se_glFloorTexture_a(){
+void se_SelectFloorTextureA(){
     if (eFloor::Floor)
-        eFloor::Floor->glFloorTexture_a();
+        eFloor::Floor->SelectFloorTextureA();
 }
 
-void se_glFloorTexture_b(){
+void se_SelectFloorTextureB(){
     if (eFloor::Floor)
-        eFloor::Floor->glFloorTexture_b();
+        eFloor::Floor->SelectFloorTextureB();
 }
 
 bool se_BlackSky()

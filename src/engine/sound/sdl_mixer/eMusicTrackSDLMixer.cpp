@@ -1,3 +1,7 @@
+#include "aa_config.h"
+
+#ifdef HAVE_LIBSDL_MIXER
+
 #include "sdl_mixer/eMusicTrackSDLMixer.h"
 
 
@@ -380,3 +384,4 @@ void eMusicTrack::Update() {
 #endif
 }
 
+#endif // HAVE_LIBSDL_MIXER

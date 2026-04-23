@@ -1,5 +1,11 @@
 #include "eSoundMixer.h"
 #include "rScreen.h"
+#include "rRender.h"
+#include "rVertex.h"
+#ifndef DEDICATED
+#include "rRenderQueue.h"
+#include "rZoneRenderer.h"
+#endif
 #include "zShape.h"
 #include "gCycle.h"
 #include "gParser.h"
@@ -495,46 +501,13 @@ void zShapeCircle::Render(const eCamera * cam )
     if ( color_.a_ <= 0 )
         return;
 
-    tCoord rot = GetRotation();
-
-    GLfloat m[4][4]={{rot.x,rot.y,0,0},
-                     {-rot.y,rot.x,0,0},
-                     {0,0,1,0},
-                     {posx_.Evaluate(lasttime_ - referencetime_), posy_.Evaluate(lasttime_ - referencetime_), 0,1}};
-
-    ModelMatrix();
-    glPushMatrix();
-
-    glDisable(GL_LIGHT0);
-    glDisable(GL_LIGHT1);
-    glDisable(GL_LIGHTING);
-    glDisable(GL_CULL_FACE);
-    glBlendFunc( GL_SRC_ALPHA, GL_ONE );
-
-    //glDisable(GL_TEXTURE);
-    glDisable(GL_TEXTURE_2D);
-
-    //	glTranslatef(pos.x,pos.y,0);
-
-    glMultMatrixf(&m[0][0]);
-    //	glScalef(.5,.5,.5);
-
-    if ( useAlpha ) {
-        glDepthMask(GL_FALSE);
-        BeginTriangleFan();
-    } else {
-        glDepthMask(GL_TRUE);
-        BeginLineStrip();
-    }
-
+    // Calculate common values needed for both rendering paths
     const REAL effectiveRadius = scale_.Evaluate(lasttime_ - referencetime_) *
                                  radius.Evaluate(lasttime_ - referencetime_);
     const int sg_segments = GetEffectiveSegments();
-    const int sg_steps = GetEffectiveSegmentSteps(); //<=0 ? 1 : sz_zoneSegSteps;
     const REAL sg_floor_radius_pct = GetEffectiveFloorScalePct();
     const REAL sg_proximity_distance = GetEffectiveProximityDistance();
     const REAL sg_proximity_offset = GetEffectiveProximityOffset();
-    const REAL seglen = 2 * M_PI / sg_segments * GetEffectiveSegmentLength();
 
     REAL height_mult;
     if (cam->Center() && sg_proximity_distance>=.0) {
@@ -549,68 +522,33 @@ void zShapeCircle::Render(const eCamera * cam )
         height_mult = 1.0;
     }
     const REAL bot = GetEffectiveBottom();
-    const REAL top = bot + GetEffectiveHeight()*height_mult;
+    const REAL effectiveHeight = GetEffectiveHeight();
 
-    // apply color, respecting client chosen extra alpha factor
-    rColor color = color_;
-    color.a_ *= sz_zoneAlpha;
-    color.Apply();
+    // Apply client-chosen extra alpha factor
+    REAL effectiveAlpha = color_.a_ * sz_zoneAlpha;
 
-    if (effectiveRadius >= 0.0)
-    {
-        for ( int i = sg_segments - 1; i>=0; --i )
-        {
-            REAL a = i * 2 * 3.14159 / REAL( sg_segments );
-            REAL sa = effectiveRadius * sin(a);
-            REAL ca = effectiveRadius * cos(a);
-            for ( int s = 0; s<sg_steps; ++s )
-            {
-                REAL b = a + seglen/sg_steps;                
-                REAL sb = effectiveRadius * sin(b);
-                REAL cb = effectiveRadius * cos(b);
-                
-                // classic zone
-                glVertex3f(sa, ca, bot);
-                if (top!=bot) {
-                    glVertex3f(sa, ca, top);
-                    glVertex3f(sb, cb, top);
-                }
-                glVertex3f(sb, cb, bot);
-                
-                if ( useAlpha )
-                {
-                    if (bot!=.0) {
-                        RenderEnd();
-                        BeginTriangleFan();
-                        color.Apply();
-                        glVertex3f(sa, ca, 0);
-                        glVertex3f(sb, cb, 0);
-                    }
-                    // floor zone
-                    glVertex3f(sb*sg_floor_radius_pct, cb*sg_floor_radius_pct, 0);
-                    glVertex3f(sa*sg_floor_radius_pct, ca*sg_floor_radius_pct, 0);
-                    RenderEnd();
-                    BeginTriangleFan();
-                } else {
-                    glVertex3f(sa, ca, bot);
-                    RenderEnd();
-                    BeginLineStrip();
-                }
-                a = b; // next segment step
-                sa = sb;
-                ca = cb;
-            }
-        }
-    }
+    if (effectiveRadius < 0.0)
+        return;
 
-    RenderEnd();
+    tCoord rot = GetRotation();
+    REAL rotationAngle = atan2(rot.y, rot.x);
+    REAL px = posx_.Evaluate(lasttime_ - referencetime_);
+    REAL py = posy_.Evaluate(lasttime_ - referencetime_);
 
-    glBlendFunc( GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA );
-    glDepthMask(GL_TRUE);
+    int sg_steps = GetEffectiveSegmentSteps();
+    float sg_segLength = static_cast<float>(GetEffectiveSegmentLength());
 
-    glPopMatrix();
+    rZoneRenderMode mode =
+        useAlpha ? rZoneRenderMode::Filled : rZoneRenderMode::Wireframe;
+
+    rSubmitCircularZoneProximity(
+        static_cast<float>(px), static_cast<float>(py),
+        static_cast<float>(effectiveRadius), static_cast<float>(bot),
+        static_cast<float>(effectiveHeight), static_cast<float>(height_mult),
+        static_cast<float>(rotationAngle), color_.r_, color_.g_, color_.b_,
+        static_cast<float>(effectiveAlpha), sg_segments, sg_segLength, sg_steps,
+        static_cast<float>(sg_floor_radius_pct), mode);
 #endif
-
 }
 
 //HACK: render2d and render should probably be merged somehow, too much copy and paste here
@@ -620,52 +558,82 @@ void zShapeCircle::Render2D(tCoord scale) const {
     if ( color_.a_ <= 0 )
         return;
 
+    REAL effectiveRadius = scale_.Evaluate(lasttime_ - referencetime_) * radius.Evaluate(lasttime_ - referencetime_);
+    if (effectiveRadius < 0.0)
+        return;
+
     tCoord rot = GetRotation();
-
-    GLfloat m[4][4]={{rot.x,rot.y,0,0},
-                     {-rot.y,rot.x,0,0},
-                     {0,0,1,0},
-                     {posx_.Evaluate(lasttime_ - referencetime_), posy_.Evaluate(lasttime_ - referencetime_), 0,1}};
-
-    ModelMatrix();
-    glPushMatrix();
-
-    glMultMatrixf(&m[0][0]);
-
-    BeginLineStrip();
+    REAL px = posx_.Evaluate(lasttime_ - referencetime_);
+    REAL py = posy_.Evaluate(lasttime_ - referencetime_);
 
     int sg_segments = GetEffectiveSegments();
     const int sg_steps = GetEffectiveSegmentSteps();
     const REAL seglen = 2 * M_PI / sg_segments * GetEffectiveSegmentLength();
 
-    color_.Apply();
+    uint8_t cr = static_cast<uint8_t>(color_.r_ * 255.0f);
+    uint8_t cg = static_cast<uint8_t>(color_.g_ * 255.0f);
+    uint8_t cb = static_cast<uint8_t>(color_.b_ * 255.0f);
+    uint8_t ca = static_cast<uint8_t>(color_.a_ * 255.0f);
 
-    REAL effectiveRadius;
-    effectiveRadius = scale_.Evaluate(lasttime_ - referencetime_) * radius.Evaluate(lasttime_ - referencetime_);
-    if (effectiveRadius >= 0.0)
+    // Apply zone transform to vertices on CPU
+    // m = rotation + translation (column-major)
+    auto xform = [&](REAL lx, REAL ly, float &ox, float &oy) {
+        ox = static_cast<float>(rot.x * lx - rot.y * ly + px);
+        oy = static_cast<float>(rot.y * lx + rot.x * ly + py);
+    };
+
+    // Get MVP to transform from map space to clip space
+    float mvp[16];
+    RenderGetMVPMatrix(mvp);
+    auto mvpXform = [&](float &x, float &y) {
+        float ix = x, iy = y;
+        x = mvp[0]*ix + mvp[4]*iy + mvp[12];
+        y = mvp[1]*ix + mvp[5]*iy + mvp[13];
+    };
+
+    // Viewport remap
+    int vp[4];
+    RenderGetViewport(vp);
+    float fx = float(vp[0]) / sr_screenWidth;
+    float fy = float(vp[1]) / sr_screenHeight;
+    float fw = float(vp[2]) / sr_screenWidth;
+    float fh = float(vp[3]) / sr_screenHeight;
+    auto remap = [&](float &x, float &y) {
+        x = (fx + (x + 1.0f) * 0.5f * fw) * 2.0f - 1.0f;
+        y = (fy + (y + 1.0f) * 0.5f * fh) * 2.0f - 1.0f;
+    };
+
+    // Generate line segments for each arc
+    std::vector<rVertex20> lines;
+    for ( int i = sg_segments - 1; i>=0; --i )
     {
-        for ( int i = sg_segments - 1; i>=0; --i )
+        REAL a = i * 2 * 3.14159 / REAL( sg_segments );
+        REAL sa = effectiveRadius * sin(a);
+        REAL la = effectiveRadius * cos(a);
+        for ( int s = 0; s <= sg_steps; ++s )
         {
-            REAL a = i * 2 * 3.14159 / REAL( sg_segments );
-            REAL sa = effectiveRadius * sin(a);
-            REAL ca = effectiveRadius * cos(a);
-            glVertex2f(sa, ca);
-            for ( int s = 0; s<sg_steps; ++s )
-            {
-                REAL b = a + seglen/sg_steps;
-                REAL sb = effectiveRadius * sin(b);
-                REAL cb = effectiveRadius * cos(b);
-                glVertex2f(sb, cb);
-                a = b; // next step
-                sa = sb;
-                ca = cb;
-            }
-            RenderEnd();
-            BeginLineStrip();
+            REAL b = a + seglen / sg_steps;
+            REAL sb = effectiveRadius * sin(b);
+            REAL lb = effectiveRadius * cos(b);
+
+            float x1, y1, x2, y2;
+            xform(sa, la, x1, y1);
+            xform(sb, lb, x2, y2);
+            mvpXform(x1, y1);
+            mvpXform(x2, y2);
+            remap(x1, y1);
+            remap(x2, y2);
+            lines.push_back(rVertex20(x1, y1, 0, cr, cg, cb, ca, 0, 0));
+            lines.push_back(rVertex20(x2, y2, 0, cr, cg, cb, ca, 0, 0));
+
+            a = b;
+            sa = sb;
+            la = lb;
         }
     }
-    RenderEnd();
-    glPopMatrix();
+
+    rRenderStateKey state = rRenderStateKey::HUD(0, rBlendMode::Alpha);
+    rRenderQueue::Instance().SubmitLines(rRenderPhase::HUD, state, lines.data(), lines.size());
 #endif
 }
 
@@ -834,79 +802,38 @@ void zShapePolygon::Render(const eCamera * cam )
     if ( color_.a_ <= 0 )
         return;
 
+    REAL currentScale = scale_.Evaluate(lasttime_ - referencetime_);
 
-    ModelMatrix();
-    glPushMatrix();
+    if (currentScale <= 0.0 || points.empty())
+        return;
 
-    glDisable(GL_LIGHT0);
-    glDisable(GL_LIGHT1);
-    glDisable(GL_LIGHTING);
-    glDisable(GL_CULL_FACE);
-    glBlendFunc( GL_SRC_ALPHA, GL_ONE );
+    REAL px = posx_.Evaluate(lasttime_ - referencetime_);
+    REAL py = posy_.Evaluate(lasttime_ - referencetime_);
+    REAL rotationAngle = rotation2.evaluate(lasttime_);
+    REAL bot = GetEffectiveBottom();
+    REAL effectiveHeight = GetEffectiveHeight();
+    REAL effectiveAlpha = color_.a_ * sz_zoneAlpha;
 
-    //glDisable(GL_TEXTURE);
-    glDisable(GL_TEXTURE_2D);
-
-    //    glMultMatrixf(&m[0][0]);
-
-    REAL currentScale = 0.0;
-    glTranslatef(posx_.Evaluate(lasttime_ - referencetime_), posy_.Evaluate(lasttime_ - referencetime_), 0);
-    currentScale = scale_.Evaluate(lasttime_ - referencetime_);
-
-    if(currentScale > 0.0)
+    std::vector<float> pointsArray;
+    pointsArray.reserve(points.size() * 2);
+    for (const auto& point : points)
     {
-        glScalef(currentScale, currentScale, 1.0);
-
-        glRotatef(rotation2.evaluate(lasttime_)*180/M_PI, 0.0, 0.0, 1.0);
-
-        if ( useAlpha ) {
-            glDepthMask(GL_FALSE);
-            BeginQuads();
-        } else {
-            RenderEnd();
-            glDepthMask(GL_TRUE);
-            BeginLineStrip();
-        }
-
-        const REAL bot = GetEffectiveBottom();
-        const REAL top = bot + GetEffectiveHeight();
-
-        color_.Apply();
-
-
-
-
-        std::vector< myPoint >::const_iterator iter;
-        std::vector< myPoint >::const_iterator prevIter = points.end() - 1;
-
-        for(iter = points.begin();
-                iter != points.end();
-                prevIter = iter++)
-        {
-            REAL xp = (*iter).first.Evaluate( lasttime_ - referencetime_ ) ;
-            REAL yp = (*iter).second.Evaluate( lasttime_ - referencetime_ ) ;
-            REAL xpp = (*prevIter).first.Evaluate( lasttime_ - referencetime_ ) ;
-            REAL ypp = (*prevIter).second.Evaluate( lasttime_ - referencetime_ ) ;
-
-            glVertex3f(xp, yp, bot);
-            glVertex3f(xp, yp, top);
-            glVertex3f(xpp, ypp, top);
-            glVertex3f(xpp, ypp, bot);
-
-            if ( !useAlpha )
-            {
-                glVertex3f(xp, yp, bot);
-                RenderEnd();
-                BeginLineStrip();
-            }
-        }
-
-        RenderEnd();
-
-        glBlendFunc( GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA );
-        glDepthMask(GL_TRUE);
+        REAL x = point.first.Evaluate(lasttime_ - referencetime_);
+        REAL y = point.second.Evaluate(lasttime_ - referencetime_);
+        pointsArray.push_back(static_cast<float>(x));
+        pointsArray.push_back(static_cast<float>(y));
     }
-    glPopMatrix();
+
+    rZoneRenderMode mode = useAlpha ? rZoneRenderMode::Filled : rZoneRenderMode::Wireframe;
+
+    rSubmitPolygonZone(
+        static_cast<float>(px), static_cast<float>(py),
+        static_cast<float>(currentScale), static_cast<float>(currentScale),
+        static_cast<float>(bot), static_cast<float>(effectiveHeight),
+        static_cast<float>(rotationAngle),
+        pointsArray.data(), pointsArray.size() / 2,
+        color_.r_, color_.g_, color_.b_, static_cast<float>(effectiveAlpha),
+        mode);
 #endif
 }
 void zShapePolygon::Render2D(tCoord scale) const {
@@ -914,43 +841,75 @@ void zShapePolygon::Render2D(tCoord scale) const {
     if ( color_.a_ <= 0 )
         return;
 
-    ModelMatrix();
-    glPushMatrix();
+    REAL currentScale = scale_.Evaluate(lasttime_ - referencetime_);
+    if (currentScale <= 0.0 || points.empty())
+        return;
 
-    REAL currentScale = 0.0;
-    glTranslatef(posx_.Evaluate(lasttime_ - referencetime_), posy_.Evaluate(lasttime_ - referencetime_), 0);
+    REAL px = posx_.Evaluate(lasttime_ - referencetime_);
+    REAL py = posy_.Evaluate(lasttime_ - referencetime_);
+    REAL angle = rotation2.evaluate(lasttime_);
+    float cosA = static_cast<float>(cos(angle));
+    float sinA = static_cast<float>(sin(angle));
+    float sc = static_cast<float>(currentScale);
 
-    currentScale = scale_.Evaluate(lasttime_ - referencetime_);
+    uint8_t cr = static_cast<uint8_t>(color_.r_ * 255.0f);
+    uint8_t cg = static_cast<uint8_t>(color_.g_ * 255.0f);
+    uint8_t cb = static_cast<uint8_t>(color_.b_ * 255.0f);
+    uint8_t ca = static_cast<uint8_t>(color_.a_ * 255.0f);
 
-    if(currentScale > 0.0)
+    // Transform: translate + scale + rotate applied on CPU
+    auto xform = [&](REAL lx, REAL ly, float &ox, float &oy) {
+        float sx = sc * static_cast<float>(lx);
+        float sy = sc * static_cast<float>(ly);
+        ox = static_cast<float>(px) + cosA * sx - sinA * sy;
+        oy = static_cast<float>(py) + sinA * sx + cosA * sy;
+    };
+
+    float mvp[16];
+    RenderGetMVPMatrix(mvp);
+    auto mvpXform = [&](float &x, float &y) {
+        float ix = x, iy = y;
+        x = mvp[0]*ix + mvp[4]*iy + mvp[12];
+        y = mvp[1]*ix + mvp[5]*iy + mvp[13];
+    };
+
+    int vp[4];
+    RenderGetViewport(vp);
+    float fx = float(vp[0]) / sr_screenWidth;
+    float fy = float(vp[1]) / sr_screenHeight;
+    float fw = float(vp[2]) / sr_screenWidth;
+    float fh = float(vp[3]) / sr_screenHeight;
+    auto remap = [&](float &x, float &y) {
+        x = (fx + (x + 1.0f) * 0.5f * fw) * 2.0f - 1.0f;
+        y = (fy + (y + 1.0f) * 0.5f * fh) * 2.0f - 1.0f;
+    };
+
+    std::vector<rVertex20> lines;
+    lines.reserve(points.size() * 2);
+
+    std::vector< myPoint >::const_iterator iter;
+    std::vector< myPoint >::const_iterator prevIter = points.end() - 1;
+
+    for(iter = points.begin(); iter != points.end(); prevIter = iter++)
     {
-        glScalef(currentScale, currentScale, 1.0);
+        REAL xp = (*iter).first.Evaluate( lasttime_ - referencetime_ );
+        REAL yp = (*iter).second.Evaluate( lasttime_ - referencetime_ );
+        REAL xpp = (*prevIter).first.Evaluate( lasttime_ - referencetime_ );
+        REAL ypp = (*prevIter).second.Evaluate( lasttime_ - referencetime_ );
 
-        glRotatef(rotation2.evaluate(lasttime_)*180/M_PI, 0.0, 0.0, 1.0);
-
-        BeginLines();
-
-        color_.Apply();
-
-        std::vector< myPoint >::const_iterator iter;
-        std::vector< myPoint >::const_iterator prevIter = points.end() - 1;
-
-        for(iter = points.begin();
-                iter != points.end();
-                prevIter = iter++)
-        {
-            REAL xp = (*iter).first.Evaluate( lasttime_ - referencetime_ ) ;
-            REAL yp = (*iter).second.Evaluate( lasttime_ - referencetime_ ) ;
-            REAL xpp = (*prevIter).first.Evaluate( lasttime_ - referencetime_ ) ;
-            REAL ypp = (*prevIter).second.Evaluate( lasttime_ - referencetime_ ) ;
-
-            glVertex2f(xp, yp);
-            glVertex2f(xpp, ypp);
-        }
-
-        RenderEnd();
+        float x1, y1, x2, y2;
+        xform(xp, yp, x1, y1);
+        xform(xpp, ypp, x2, y2);
+        mvpXform(x1, y1);
+        mvpXform(x2, y2);
+        remap(x1, y1);
+        remap(x2, y2);
+        lines.push_back(rVertex20(x1, y1, 0, cr, cg, cb, ca, 0, 0));
+        lines.push_back(rVertex20(x2, y2, 0, cr, cg, cb, ca, 0, 0));
     }
-    glPopMatrix();
+
+    rRenderStateKey state = rRenderStateKey::HUD(0, rBlendMode::Alpha);
+    rRenderQueue::Instance().SubmitLines(rRenderPhase::HUD, state, lines.data(), lines.size());
 #endif
 }
 

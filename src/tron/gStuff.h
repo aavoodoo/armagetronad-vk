@@ -64,6 +64,11 @@ extern bool sg_moviepackUse;       // do we use it?
 
 bool sg_MoviePack();
 
+#ifndef DEDICATED
+//! Reset floor textures (for moviepack switching)
+void gFloor_ResetTextures();
+#endif
+
 #ifdef POWERPAK_DEB
 extern bool pp_out; // or 2d-output?
 extern bool pp_tess_deb;

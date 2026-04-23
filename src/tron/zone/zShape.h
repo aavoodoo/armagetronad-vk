@@ -3,7 +3,7 @@
 
 #include "tValue.h"
 #include "rColor.h"
-#include <boost/shared_ptr.hpp>
+#include <memory>
 #include "eNetGameObject.h"
 #include "tSysTime.h"
 

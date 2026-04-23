@@ -26,6 +26,7 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 */
 
 #include "rModel.h"
+#include "rModelMesh.h"
 #include <string>
 #include <fstream>
 #include <stdlib.h>
@@ -34,26 +35,10 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 #include "tDirectories.h"
 #include "tConfiguration.h"
 #include "tLocale.h"
-#include "rGL.h"
 #include <string.h>
 
 #define DONTDOIT
 #include "rRender.h"
-
-tCONFIG_ENUM(rDisplayListUsage);
-
-static tConfItem<rDisplayListUsage> mod_udl("USE_DISPLAYLISTS", sr_useDisplayLists);
-
-#ifndef DEDICATED
-
-void Vec3::RenderVertex(){
-    glVertex3f(x[0],x[1],x[2]);
-}
-
-void Vec3::RenderNormal(){
-    glNormal3f(x[0],x[1],x[2]);
-}
-#endif
 
 void rModel::Load(std::istream &in,const char *fileName){
 
@@ -234,13 +219,18 @@ void rModel::Load(std::istream &in,const char *fileName){
                 normals[modelFaces[i].A[j]]+=normal;
         }
     for(int i=normals.Len()-1;i>=0;i--){
-        normals[i]=normals[i]*(1/normals[i].Norm());
+        REAL len = normals[i].Norm();
+        if (len > 1e-6f)
+            normals[i]=normals[i]*(1/len);
+        else
+            normals[i]=Vec3(0,1,0);
     }
 
 #endif
 }
 
 rModel::rModel(const char *fileName)
+    : meshBuilt_(false)
 {
 #ifndef DEDICATED
     //	tString s;
@@ -262,88 +252,145 @@ rModel::rModel(const char *fileName)
 }
 
 #ifndef DEDICATED
+
+// Build VBO mesh from loaded model data
+void rModel::BuildMesh()
+{
+    if (meshBuilt_ || modelFaces.Len() == 0)
+    {
+        return;
+    }
+
+    mesh_ = std::make_unique<rModelMesh>();
+
+    // Check if we have texture coordinates
+    bool hasTexCoords = (texVert.Len() > 0) &&
+                        (modelTexFaces.Len() == modelFaces.Len() || modelTexFacesCoherent);
+
+    // Build interleaved vertex data
+    // For non-coherent tex faces, we need to expand vertices
+    std::vector<rModelVertex> verts;
+    std::vector<unsigned int> indices;
+
+    if (modelTexFacesCoherent)
+    {
+        // Vertex and tex coords share indices - use indexed rendering
+        verts.reserve(vertices.Len());
+        indices.reserve(modelFaces.Len() * 3);
+
+        for (int i = 1; i < vertices.Len(); i++)
+        {
+            rModelVertex v;
+            v.position[0] = vertices[i].x[0];
+            v.position[1] = vertices[i].x[1];
+            v.position[2] = vertices[i].x[2];
+
+            if (normals.Len() > i)
+            {
+                v.normal[0] = normals[i].x[0];
+                v.normal[1] = normals[i].x[1];
+                v.normal[2] = normals[i].x[2];
+            }
+
+            if (hasTexCoords && texVert.Len() > i)
+            {
+                v.texcoord[0] = texVert[i].x[0];
+                v.texcoord[1] = texVert[i].x[1];
+                v.texcoord[2] = texVert[i].x[2];
+            }
+
+            verts.push_back(v);
+        }
+
+        // Build index array (adjust for 0-based indexing in mesh)
+        for (int i = 0; i < modelFaces.Len(); i++)
+        {
+            indices.push_back(modelFaces[i].A[0] - 1);
+            indices.push_back(modelFaces[i].A[1] - 1);
+            indices.push_back(modelFaces[i].A[2] - 1);
+        }
+
+        mesh_->Build(verts, indices);
+    }
+    else
+    {
+        // Non-coherent - expand all triangles
+        verts.reserve(modelFaces.Len() * 3);
+
+        for (int i = 0; i < modelFaces.Len(); i++)
+        {
+            for (int j = 0; j < 3; j++)
+            {
+                rModelVertex v;
+                int vi = modelFaces[i].A[j];
+
+                v.position[0] = vertices(vi).x[0];
+                v.position[1] = vertices(vi).x[1];
+                v.position[2] = vertices(vi).x[2];
+
+                if (normals.Len() > vi)
+                {
+                    v.normal[0] = normals(vi).x[0];
+                    v.normal[1] = normals(vi).x[1];
+                    v.normal[2] = normals(vi).x[2];
+                }
+
+                if (modelTexFaces.Len() > i)
+                {
+                    int ti = modelTexFaces[i].A[j];
+                    if (texVert.Len() > ti)
+                    {
+                        v.texcoord[0] = texVert(ti).x[0];
+                        v.texcoord[1] = texVert(ti).x[1];
+                        v.texcoord[2] = texVert(ti).x[2];
+                    }
+                }
+
+                verts.push_back(v);
+            }
+        }
+
+        mesh_->Build(verts);
+    }
+
+    meshBuilt_ = true;
+}
+
+// Render using VBO mesh
+void rModel::RenderVBO()
+{
+    if (!meshBuilt_)
+    {
+        BuildMesh();
+    }
+
+    if (mesh_ && mesh_->IsValid())
+    {
+        // Models use lighting and textures
+        sr_SetLightingEnabled(true);
+        sr_SetTextureEnabled(texVert.Len() > 0);
+
+        // No face culling: .mod files predate culling and may have inconsistent winding.
+        // The original immediate-mode renderer never enabled GL_CULL_FACE for models.
+        mesh_->Render();
+
+        // Reset state
+        sr_SetLightingEnabled(false);
+    }
+}
+
 void rModel::Render(){
     if (!sr_glOut)
         return;
-    if ( !displayList_.Call() )
-    {
-        // close pending glBegin() blocks
-        RenderEnd();
 
-        // model display lists should definitely be compiled before other lists
-        rDisplayList::Cancel();
-
-        bool texcoord=true;
-        if (texVert.Len()<0)
-            texcoord=false;
-        if (modelTexFaces.Len()!=modelFaces.Len())
-            texcoord=false;
-        if ( !modelTexFacesCoherent )
-            texcoord=false;
-
-        if (texcoord)
-        {
-            glTexCoordPointer(3,GL_FLOAT,0,&texVert[0]);
-            glEnableClientState(GL_TEXTURE_COORD_ARRAY);
-        }
-
-           
-
-        if ( !modelTexFacesCoherent )
-        {
-            rDisplayListFiller filler( displayList_, false );
-            glEnable(GL_CULL_FACE);
-
-            // sigh, we need to do it the complicated way
-            glBegin( GL_TRIANGLES );
-            for(int i=modelFaces.Len()-1;i>=0;i--)
-            {
-                for(int j=0;j<=2;j++)
-                {
-                    if ( modelTexFaces.Len() > 0 )
-                    {
-                        glTexCoord3fv(reinterpret_cast<REAL *>(&(texVert(modelTexFaces(i).A[j]))));
-                    }
-                    if ( normals.Len() > 0 )
-                    {
-                        glNormal3fv(reinterpret_cast<REAL *>(&(normals(modelFaces(i).A[j]))));
-                    }
-                    glVertex3fv(reinterpret_cast<REAL *>(&(vertices(modelFaces(i).A[j]))));
-                }
-            }
-            glEnd();
-
-            glDisable(GL_CULL_FACE);
-        }
-        else
-        {
-            // glDrawElements works
-            if (normals.Len()>=vertices.Len())
-            {
-                glNormalPointer(GL_FLOAT,0,&normals[0]);
-                glEnableClientState(GL_NORMAL_ARRAY);
-            }
-            glVertexPointer(3,GL_FLOAT,0,&vertices[0]);
-            glEnableClientState(GL_VERTEX_ARRAY);
-
-            rDisplayListFiller filler( displayList_, false );
-            glEnable(GL_CULL_FACE);
-
-            glDrawElements(GL_TRIANGLES,
-                           modelFaces.Len()*3,
-                           GL_UNSIGNED_INT,
-                           &modelFaces(0));
-
-            glDisable(GL_CULL_FACE);
-        }
-
-
-        glDisableClientState(GL_TEXTURE_COORD_ARRAY);
-        glDisableClientState(GL_VERTEX_ARRAY);
-        glDisableClientState(GL_NORMAL_ARRAY);
-    }
+    RenderVBO();
 }
 #endif
+
+rModelMesh& rModel::GetMesh(){
+    if (!meshBuilt_) BuildMesh();
+    return *mesh_;
+}
 
 rModel::~rModel(){
     tCHECK_DEST;

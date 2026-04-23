@@ -30,7 +30,7 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 
 class gCycle;
 #include <vector>
-#include <boost/shared_ptr.hpp>
+#include <memory>
 #include "gVectorExtra.h"
 #include "ePlayer.h"
 #include "gCycle.h"

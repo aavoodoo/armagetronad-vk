@@ -30,10 +30,18 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 #include "gStuff.h"
 #include "rTexture.h"
 #include "rRender.h"
+#include "tDirectories.h"
 #include "rScreen.h"
 #include "eCoord.h"
 #include "uMenu.h"
 #include "tSysTime.h"
+
+#ifndef DEDICATED
+#include "rVertex.h"
+#include "rRenderQueue.h"
+#include "rRenderBucket.h"
+#include <vector>
+#endif
 
 // static rFileTexture sg_LogoTexture(rTextureGroups::TEX_FONT, "textures/KGN_logo.png",0,0,1);
 static rISurfaceTexture* sg_LogoMPTitle = NULL;
@@ -46,7 +54,7 @@ static bool sg_Big       = true;
 
 static eCoord sg_SpinStatus(1,0);    // current spinning position
 static REAL   sg_SizeStatus(1);    // 1 -> big      , 0 -> small
-static REAL   sg_DisplayStatus(-1); // 1 -> displayed, 0->invisible
+static REAL   sg_DisplayStatus(1); // 1 -> displayed, 0->invisible (start visible, no fade-in)
 
 void gLogo::SetDisplayed(bool d, bool immediately)
 {
@@ -88,9 +96,12 @@ void gLogo::Display()
 
     if (sg_MoviePack() && !sg_LogoMPTitle)
     {
-        sg_LogoMPTitle = tNEW(rFileTexture)(rTextureGroups::TEX_FONT, "moviepack/title.jpg",0,0,1);
-        // sg_LogoMPTitle = tNEW(rFileTexture)(rTextureGroups::TEX_FONT, sg_mp_title, 0,0,1);
-        sg_DisplayStatus = 1;
+        // Check if moviepack has its own title; fall back to default if not
+        tString mpTitle = tDirectories::Data().GetReadPath("moviepack/title.jpg");
+        if (mpTitle.Len() > 1)
+            sg_LogoMPTitle = tNEW(rFileTexture)(rTextureGroups::TEX_FONT, "moviepack/title.jpg",0,0,1);
+        else
+            sg_LogoMPTitle = tNEW(rFileTexture)(rTextureGroups::TEX_FONT, "textures/title.jpg",0,0,1);
     }
 
     renderer->SetFlag(rRenderer::DEPTH_TEST, false);
@@ -127,22 +138,34 @@ void gLogo::Display()
         if(!sg_LogoMPTitle->Loaded())
             return;
 
-        Color(1,1,1, sg_DisplayStatus);
+        // Get texture ID for batch rendering
+        unsigned int textureId = RenderGetBoundTexture2D();
 
-        BeginQuads();
-        TexCoord(0,0);
-        Vertex(-1, 1);
+        // Create vertices for fullscreen quad with alpha
+        uint8_t alpha = static_cast<uint8_t>(sg_DisplayStatus * 255.0f);
+        std::vector<rVertex20> vertices;
+        vertices.reserve(6);
 
-        TexCoord(0,1);
-        Vertex(-1, -1);
+        // Triangle 1 (top-left, bottom-left, bottom-right)
+        vertices.push_back(rVertex20(-1.0f, 1.0f, 0.0f, 255, 255, 255, alpha, 0.0f, 0.0f));
+        vertices.push_back(rVertex20(-1.0f, -1.0f, 0.0f, 255, 255, 255, alpha, 0.0f, 1.0f));
+        vertices.push_back(rVertex20(1.0f, -1.0f, 0.0f, 255, 255, 255, alpha, 1.0f, 1.0f));
 
-        TexCoord(1,1);
-        Vertex(1, -1);
+        // Triangle 2 (top-left, bottom-right, top-right)
+        vertices.push_back(rVertex20(-1.0f, 1.0f, 0.0f, 255, 255, 255, alpha, 0.0f, 0.0f));
+        vertices.push_back(rVertex20(1.0f, -1.0f, 0.0f, 255, 255, 255, alpha, 1.0f, 1.0f));
+        vertices.push_back(rVertex20(1.0f, 1.0f, 0.0f, 255, 255, 255, alpha, 1.0f, 0.0f));
 
-        TexCoord(1,0);
-        Vertex(1, 1);
+        // Set up identity matrices for HUD rendering (clip space coordinates)
+        ModelMatrix();
+        IdentityMatrix();
+        ProjMatrix();
+        IdentityMatrix();
 
-        RenderEnd();
+        // Submit to render queue
+        rRenderStateKey state = rRenderStateKey::HUD(textureId, rBlendMode::Alpha);
+        rRenderQueue::Instance().Submit(rRenderPhase::HUD, state, vertices.data(), vertices.size());
+        rRenderQueue::Instance().ExecutePhase(rRenderPhase::HUD);
     }
     else
     {
@@ -174,23 +197,35 @@ void gLogo::Display()
         if (!sg_LogoMPTitle->Loaded())
             return;
 
-        Color(1,1,1, sg_DisplayStatus);
+        // Get texture ID for batch rendering
+        unsigned int textureId = RenderGetBoundTexture2D();
 
-        BeginQuads();
-        TexCoord(0,0);
-        Vertex(-1, 1);
+        // Create vertices for fullscreen quad with alpha
+        uint8_t alpha = static_cast<uint8_t>(sg_DisplayStatus * 255.0f);
+        std::vector<rVertex20> vertices;
+        vertices.reserve(6);
 
-        TexCoord(0,1);
-        Vertex(-1, -1);
+        // Triangle 1 (top-left, bottom-left, bottom-right)
+        vertices.push_back(rVertex20(-1.0f, 1.0f, 0.0f, 255, 255, 255, alpha, 0.0f, 0.0f));
+        vertices.push_back(rVertex20(-1.0f, -1.0f, 0.0f, 255, 255, 255, alpha, 0.0f, 1.0f));
+        vertices.push_back(rVertex20(1.0f, -1.0f, 0.0f, 255, 255, 255, alpha, 1.0f, 1.0f));
 
-        TexCoord(1,1);
-        Vertex(1, -1);
+        // Triangle 2 (top-left, bottom-right, top-right)
+        vertices.push_back(rVertex20(-1.0f, 1.0f, 0.0f, 255, 255, 255, alpha, 0.0f, 0.0f));
+        vertices.push_back(rVertex20(1.0f, -1.0f, 0.0f, 255, 255, 255, alpha, 1.0f, 1.0f));
+        vertices.push_back(rVertex20(1.0f, 1.0f, 0.0f, 255, 255, 255, alpha, 1.0f, 0.0f));
 
-        TexCoord(1,0);
-        Vertex(1, 1);
+        // Set up identity matrices for HUD rendering (clip space coordinates)
+        ModelMatrix();
+        IdentityMatrix();
+        ProjMatrix();
+        IdentityMatrix();
 
-        RenderEnd();
-#endif	  
+        // Submit to render queue
+        rRenderStateKey state = rRenderStateKey::HUD(textureId, rBlendMode::Alpha);
+        rRenderQueue::Instance().Submit(rRenderPhase::HUD, state, vertices.data(), vertices.size());
+        rRenderQueue::Instance().ExecutePhase(rRenderPhase::HUD);
+#endif
 
 #ifdef KRAWALL
         sg_LogoTexture.Select();
@@ -243,22 +278,34 @@ void gLogo::Display()
         eCoord ur = center - extension;
         eCoord ll = center + extension;
 
-        Color(1,1,1, sg_DisplayStatus);
+        // Get texture ID for batch rendering
+        unsigned int textureId = RenderGetBoundTexture2D();
 
-        BeginQuads();
-        TexCoord(0,0);
-        Vertex(ur.x, ur.y);
+        // Create vertices for positioned quad with alpha
+        uint8_t alpha = static_cast<uint8_t>(sg_DisplayStatus * 255.0f);
+        std::vector<rVertex20> vertices;
+        vertices.reserve(6);
 
-        TexCoord(0,1);
-        Vertex(ur.x, ll.y);
+        // Triangle 1 (top-left, bottom-left, bottom-right)
+        vertices.push_back(rVertex20(ur.x, ur.y, 0.0f, 255, 255, 255, alpha, 0.0f, 0.0f));
+        vertices.push_back(rVertex20(ur.x, ll.y, 0.0f, 255, 255, 255, alpha, 0.0f, 1.0f));
+        vertices.push_back(rVertex20(ll.x, ll.y, 0.0f, 255, 255, 255, alpha, 1.0f, 1.0f));
 
-        TexCoord(1,1);
-        Vertex(ll.x, ll.y);
+        // Triangle 2 (top-left, bottom-right, top-right)
+        vertices.push_back(rVertex20(ur.x, ur.y, 0.0f, 255, 255, 255, alpha, 0.0f, 0.0f));
+        vertices.push_back(rVertex20(ll.x, ll.y, 0.0f, 255, 255, 255, alpha, 1.0f, 1.0f));
+        vertices.push_back(rVertex20(ll.x, ur.y, 0.0f, 255, 255, 255, alpha, 1.0f, 0.0f));
 
-        TexCoord(1,0);
-        Vertex(ll.x, ur.y);
+        // Set up identity matrices for HUD rendering (clip space coordinates)
+        ModelMatrix();
+        IdentityMatrix();
+        ProjMatrix();
+        IdentityMatrix();
 
-        RenderEnd();
+        // Submit to render queue
+        rRenderStateKey state = rRenderStateKey::HUD(textureId, rBlendMode::Alpha);
+        rRenderQueue::Instance().Submit(rRenderPhase::HUD, state, vertices.data(), vertices.size());
+        rRenderQueue::Instance().ExecutePhase(rRenderPhase::HUD);
 #endif
 
     }
@@ -272,4 +319,14 @@ gLogo::~gLogo()
     {
         tDESTROY(sg_LogoMPTitle);
     }
+}
+
+void gLogo::ResetTexture()
+{
+    if (sg_LogoMPTitle)
+    {
+        tDESTROY(sg_LogoMPTitle);
+        sg_LogoMPTitle = NULL;
+    }
+    // Keep current display status — no fade-in on texture reload
 }

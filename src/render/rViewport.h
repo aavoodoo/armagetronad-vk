@@ -114,7 +114,14 @@ public:
     static rViewport * CurrentViewport(int i);
 
     static void UpdateConf();
+
+    //! Returns the index of the currently active viewport configuration.
+    static int CurrentConfNum();
 };
+
+//! Returns the rotation in degrees (0/90/180/270) applied to viewport \a vpIdx
+//! in configuration \a confNum. Used by touch input to reverse-map coordinates.
+int sr_GetViewportRotationDeg(int confNum, int vpIdx);
 
 #endif
 

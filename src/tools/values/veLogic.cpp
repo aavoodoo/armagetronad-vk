@@ -25,8 +25,6 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 
 */
 
-#include <boost/lexical_cast.hpp>
-
 #include "vCore.h"
 #include "vRegistry.h"
 #include "veLogic.h"
@@ -36,6 +34,15 @@ using namespace vValue::Registry;
 namespace vValue {
 namespace Expr {
 namespace Logic {
+
+// Helper visitor for converting Variant to bool
+struct ToBoolVisitor {
+    bool operator()(int i) const { return i != 0; }
+    bool operator()(float f) const { return f != 0.0f; }
+    bool operator()(const std::string& s) const {
+        return !s.empty() && s != "0" && s != "false" && s != "FALSE";
+    }
+};
 
 Registration register_iff("func\nlogic", "iff", 3, (Registration::fptr)
                           ( ctor::a3* )& Creator<Condition>::create<BasePtr,BasePtr,BasePtr> );
@@ -70,12 +77,7 @@ Base *Condition::copy(void) const {
 //! @param fun the return value of this function is used for the comparison
 //! @returns a reference to either m_lvalue or m_rvalue based on if the condition is true or false
 Base const &Condition::GetExpr() const {
-    bool truth = false;
-    // In the future, we might want to define some kind of rules for truth
-    try {
-        truth = boost::lexical_cast<bool>(m_condvalue->GetValue());
-    }
-    catch(boost::bad_lexical_cast &) { }
+    bool truth = std::visit(ToBoolVisitor{}, m_condvalue->GetValue());
     return truth ? *m_truevalue : *m_falsevalue;
 }
 
@@ -114,11 +116,7 @@ bool Condition::operator< (Base const &other) const { return GetExpr() <  other;
 //! @returns the result
 Variant
 Not::GetValue(void) const {
-    bool truth = false;
-    try {
-        truth = boost::lexical_cast<bool>(m_value->GetValue());
-    }
-    catch(boost::bad_lexical_cast &) { }
+    bool truth = std::visit(ToBoolVisitor{}, m_value->GetValue());
     return (int)(!truth);
 }
 

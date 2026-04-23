@@ -31,23 +31,26 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 
 #include "rFont.h"
 #include "rRender.h"
+#include "rVertex.h"
+#include "rRenderQueue.h"
 #include "tSysTime.h"
 #include "rConsole.h"
 #include "rSysdep.h"
 #include "rScreen.h"
-#include "rGL.h"
 #include "tConfiguration.h"
-#include "rDisplayList.h"
 
 static tColoredString sr_centerString;
 static REAL center_r,center_g,center_b,center_fadetime;
 
 static REAL Time;
 
-static rDisplayListAlphaSensitive sr_consoleDisplayList;
-
 // flag memorizing whether the console already has been rendered this frame
 static bool sr_alreadyDisplayed = false;
+
+// Left/right insets in OpenGL units (0 = no inset). Set by iOS overlay to avoid
+// overlapping corner buttons. Values are in the [-1,+1] viewport coordinate space.
+float sr_consoleInsetLeft  = 0.0f;
+float sr_consoleInsetRight = 0.0f;
 
 static void sr_ConsolePerFrame(){
     if (sr_con.autoDisplayAtSwap)
@@ -180,8 +183,6 @@ void rConsole::Render(){
             }
 
             DisplayText(0,centerMessageY,height,sr_centerString,sr_fontCenterMessage);
-            //std::cerr << "DisplayText(0," << centerMessageY << "," << (rCWIDTH_CON*4*fak) << "," << (rCHEIGHT_CON*4*fak) << "," <<sr_centerString << ");\n";
-            RenderEnd();
             rTextField::SetDefaultColor(tColor(1,1,1));
             sr_ResetRenderState(true);
         }
@@ -193,7 +194,9 @@ void rConsole::Render(){
                 lastTimeout=Time;
             }
 
-            rTextField out(rTextField::Pixelize(-.95f,W),rTextField::Pixelize(.99f,H),rCHEIGHT_CON, sr_fontConsole);//,&rFont::s_defaultFontSmall);
+            rTextField out(rTextField::Pixelize(-.95f + sr_consoleInsetLeft, W),
+                           rTextField::Pixelize(.99f, H),
+                           rCHEIGHT_CON, sr_fontConsole);
 
             static int lastTop = currentTop;
             static int lastIn  = currentIn;
@@ -203,30 +206,31 @@ void rConsole::Render(){
             {
                 lastTop = currentTop;
                 lastIn  = currentIn;
-                sr_consoleDisplayList.Clear();
             }
 
             rTextField::SetDefaultColor( tColor(1,1,1) );
 
-            if ( sr_consoleDisplayList.Call() )
-            {
-                return;
-            }
-            rDisplayListFiller filler( sr_consoleDisplayList );
-
-            out.SetWidth(1.9f);
+            out.SetWidth(1.9f - sr_consoleInsetLeft - sr_consoleInsetRight);
             out.EnableLineWrap();
             out.SetIndent(sr_indent);
 
             if( sr_alphaBlend && sr_chatLayer > 0 && predictBottom < out.GetTop() )
             {
-                RenderEnd();
-                glColor4f(0, 0, 0, sr_chatLayer);
-                glRectf(-1,predictBottom-.4*out.GetCHeight(),1,1);
+                // Semi-transparent background for message area
+                REAL bottom = predictBottom - .4*out.GetCHeight();
+                uint8_t chatA = static_cast<uint8_t>(sr_chatLayer * 255.0f);
+                rVertex20 v0(-1, bottom, 0, 0, 0, 0, chatA, 0, 0);
+                rVertex20 v1( 1, bottom, 0, 0, 0, 0, chatA, 0, 0);
+                rVertex20 v2( 1,      1, 0, 0, 0, 0, chatA, 0, 0);
+                rVertex20 v3(-1,      1, 0, 0, 0, 0, chatA, 0, 0);
+                rRenderStateKey state = rRenderStateKey::HUD(0, rBlendMode::Alpha);
+                rRenderQueue::Instance().SubmitQuad(rRenderPhase::HUD, state, v0, v1, v2, v3);
+                // Flush immediately so background renders BEFORE the text that follows
+                rRenderQueue::Instance().ExecutePhase(rRenderPhase::HUD);
             }
 
             int i;
-            for (i=currentTop;i<=currentIn && i<=currentTop+MaxHeight();i++)
+            for (i=currentTop;i<lines.Len() && i<=currentIn && i<=currentTop+MaxHeight();i++)
                 if (lines[i].Len()>1){
                     rTextField::SetDefaultColor( tColor(1,1,1) );
                     out << lines[i];
@@ -244,12 +248,8 @@ void rConsole::Render(){
                 currentTop+=(over+1)/2;
             }
            
-            // check for mispredictions of console height
+            // track console height
             lastBottom = out.GetBottom();
-            if( fabs(predictBottom - lastBottom) > .0001 )
-            {
-                sr_consoleDisplayList.Clear();
-            }
 
         }
 

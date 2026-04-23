@@ -31,6 +31,8 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 #include "rRender.h"
 #include "rFont.h"
 #include "rScreen.h"
+#include "rVertex.h"
+#include "rRenderQueue.h"
 
 namespace cWidget {
 
@@ -83,9 +85,6 @@ void VerticalBarGauge::RenderCaption(void) {
 }
 
 void BarGauge::Render() {
-    glDisable(GL_TEXTURE_2D);
-    //sr_ResetRenderState(0); //needs this because rFont has bugs i presume.. Ie I have problems as soon as rTextFirld is used
-    // z-man: actually, it is needed because per-frame-tasks get called without rendering context, so it has to be set.
 
     const tValue::Base &val_s = m_data.GetVal();
     const tValue::Base &min_s = m_data.GetMin();
@@ -128,19 +127,22 @@ void BarGauge::RenderGraph(float min, float max, float val, float factor, tValue
     right.SetValue(y);
     m_line_color.SetValue(y);
 
-    right.DrawRect(
-        tCoord(m_size.x*x+m_position.x, m_position.y),
-        tCoord(m_size.x+m_position.x, m_position.y+m_size.y));
+    {
+        std::vector<rVertex20> rv = right.GenerateRectVertices(
+            tCoord(m_size.x*x+m_position.x, m_position.y),
+            tCoord(m_size.x+m_position.x, m_position.y+m_size.y));
+        rRenderQueue::Instance().Submit(rRenderPhase::HUD, right.GetRenderStateKey(), rv.data(), rv.size());
 
-    left.DrawRect(
-        tCoord(m_size.x*x+m_position.x, m_position.y),
-        tCoord(m_position.x-m_size.x, m_position.y+m_size.y));
+        std::vector<rVertex20> lv = left.GenerateRectVertices(
+            tCoord(m_size.x*x+m_position.x, m_position.y),
+            tCoord(m_position.x-m_size.x, m_position.y+m_size.y));
+        rRenderQueue::Instance().Submit(rRenderPhase::HUD, left.GetRenderStateKey(), lv.data(), lv.size());
 
-    m_line_color.BeginDraw();
-    BeginLines();
-    m_line_color.DrawPoint(tCoord(m_size.x*x+m_position.x,m_position.y));
-    m_line_color.DrawPoint(tCoord(m_size.x*x+m_position.x,m_size.y+m_position.y));
-    RenderEnd();
+        tCoord lp1(m_size.x*x+m_position.x, m_position.y);
+        tCoord lp2(m_size.x*x+m_position.x, m_size.y+m_position.y);
+        rVertex20 line[2] = { m_line_color.GeneratePointVertex(lp1), m_line_color.GeneratePointVertex(lp2) };
+        rRenderQueue::Instance().SubmitLines(rRenderPhase::HUD, m_line_color.GetRenderStateKey(), line, 2);
+    }
 
     //Value
     if(m_showvalue)
@@ -163,19 +165,22 @@ void VerticalBarGauge::RenderGraph(float min, float max, float val, float factor
     m_background.SetValue(y);
     m_line_color.SetValue(y);
 
-    m_background.DrawRect(
-        tCoord(m_position.x+m_size.x, m_position.y+m_size.y*x),
-        tCoord(m_position.x-m_size.x, m_position.y+m_size.y));
+    {
+        std::vector<rVertex20> bv = m_background.GenerateRectVertices(
+            tCoord(m_position.x+m_size.x, m_position.y+m_size.y*x),
+            tCoord(m_position.x-m_size.x, m_position.y+m_size.y));
+        rRenderQueue::Instance().Submit(rRenderPhase::HUD, m_background.GetRenderStateKey(), bv.data(), bv.size());
 
-    m_foreground.DrawRect(
-        tCoord(m_position.x+m_size.x, m_position.y-m_size.y),
-        tCoord(m_position.x-m_size.x, m_position.y+m_size.y*x));
+        std::vector<rVertex20> fv = m_foreground.GenerateRectVertices(
+            tCoord(m_position.x+m_size.x, m_position.y-m_size.y),
+            tCoord(m_position.x-m_size.x, m_position.y+m_size.y*x));
+        rRenderQueue::Instance().Submit(rRenderPhase::HUD, m_foreground.GetRenderStateKey(), fv.data(), fv.size());
 
-    m_line_color.BeginDraw();
-    BeginLines();
-    m_line_color.DrawPoint(tCoord(m_position.x+m_size.x,m_position.y+m_size.y*x));
-    m_line_color.DrawPoint(tCoord(m_position.x-m_size.x,m_position.y+m_size.y*x));
-    RenderEnd();
+        tCoord lp1(m_position.x+m_size.x, m_position.y+m_size.y*x);
+        tCoord lp2(m_position.x-m_size.x, m_position.y+m_size.y*x);
+        rVertex20 line[2] = { m_line_color.GeneratePointVertex(lp1), m_line_color.GeneratePointVertex(lp2) };
+        rRenderQueue::Instance().SubmitLines(rRenderPhase::HUD, m_line_color.GetRenderStateKey(), line, 2);
+    }
 
     //Value
     if(m_showvalue)
@@ -190,28 +195,13 @@ void NeedleGauge::RenderGraph(float min, float max, float val, float factor, tVa
     x= cos(a);
     y= sin(a);
 
-    /* Draws an ugly background on the gauge
-    BeginQuads();
-    Color(1.,1.,1.,.8);
-    Vertex(m_position.x-m_size-.04,m_position.y-.04,0);
-    Vertex(m_position.x-m_size-.04,m_position.y+m_size+.04,0);
-    Vertex(m_position.x+m_size+.04,m_position.y+m_size+.04,0);
-    Vertex(m_position.x+m_size+.04,m_position.y-.04,0);
-
-    Color(.1,.1,.1,.8);
-    Vertex(m_position.x-m_size-.02,m_position.y-.02,0);
-    Vertex(m_position.x-m_size-.02,m_position.y+m_size+.02,0);
-    Vertex(m_position.x+m_size+.02,m_position.y+m_size+.02,0);
-    Vertex(m_position.x+m_size+.02,m_position.y-.02,0);
-
-    RenderEnd();*/
-
-    BeginLines();
-    m_foreground.SetValue((factor * ((val-min)/(max-min)*2. - 1.)+1.)/2.);
-    m_foreground.DrawAt(tCoord(0.,0.));
-    Vertex(-.1*x*m_size.x+m_position.x,.1*y*m_size.y+m_position.y,0);
-    Vertex(-x*m_size.x+m_position.x,y*m_size.y+m_position.y,0);
-    RenderEnd();
+    {
+        m_foreground.SetValue((factor * ((val-min)/(max-min)*2. - 1.)+1.)/2.);
+        tCoord np1(-.1*x*m_size.x+m_position.x, .1*y*m_size.y+m_position.y);
+        tCoord np2(-x*m_size.x+m_position.x, y*m_size.y+m_position.y);
+        rVertex20 line[2] = { m_foreground.GeneratePointVertex(np1), m_foreground.GeneratePointVertex(np2) };
+        rRenderQueue::Instance().SubmitLines(rRenderPhase::HUD, m_foreground.GetRenderStateKey(), line, 2);
+    }
 
     if(m_showvalue)
         DisplayText( -x*1.45*m_size.x+m_position.x, y*1.35*m_size.y+m_position.y,

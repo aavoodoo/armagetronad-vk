@@ -34,6 +34,7 @@ public:
     static void SetSpinning(bool spinning);
     static void SetBig(bool big, bool immediately = false);
     static void Display();
+    static void ResetTexture();  //!< Reset title texture (for moviepack switching)
 
     ~gLogo();
 };

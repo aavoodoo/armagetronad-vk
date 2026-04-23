@@ -64,6 +64,10 @@ void tPlayList::Randomize() {
 }
 
 const tSong& tPlayList::GetNextSong() {
+    static tSong emptySong;
+    if (m_Playlist.empty())
+        return emptySong;
+
     std::cout << "Getting next song from playlist\n";
     if(m_CurrentSong == m_Playlist.end() ) {
         m_CurrentSong = m_Playlist.begin();
@@ -78,6 +82,10 @@ const tSong& tPlayList::GetNextSong() {
 }
 
 const tSong& tPlayList::GetPreviousSong() {
+    static tSong emptySong;
+    if (m_Playlist.empty())
+        return emptySong;
+
     std::cout << "Getting previous song from playlist\n";
     if(m_CurrentSong == m_Playlist.begin() ) {
         m_CurrentSong = m_Playlist.end();

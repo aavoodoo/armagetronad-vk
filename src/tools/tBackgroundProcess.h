@@ -47,13 +47,13 @@ public:
     }
 
     //! runs the function
-    void run()
+    void run() const
     {
         (object_->*function_)();
     }
 
-    //! runs the function, too. 
-    void operator () ()
+    //! runs the function, too.
+    void operator () () const
     {
         run();
     }

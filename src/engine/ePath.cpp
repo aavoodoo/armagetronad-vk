@@ -358,33 +358,39 @@ tHeapBase *eHalfEdge::Heap() const
 
 #ifdef DEBUG
 #include "rRender.h"
+#include "rVertex.h"
+#include "rRenderQueue.h"
 
 void ePath::Render()  // renders the last found path
 {
 #ifndef DEDICATED
-    glDisable(GL_TEXTURE_2D);
-    glDisable(GL_LIGHTING);
-
-    glColor4f(1,0,0,1);
-
-    BeginLineStrip();
-    for (int i = positions.Len()-1; i>=0; i--)
-    {
-        eCoord c = positions(i) + offsets(i);
-        Vertex(c.x, c.y, 0.1f);
+    // Path positions (red line strip → line segments)
+    if (positions.Len() > 1) {
+        std::vector<rVertex20> lines;
+        lines.reserve(positions.Len() * 2);
+        for (int i = positions.Len()-1; i > 0; i--) {
+            eCoord c1 = positions(i) + offsets(i);
+            eCoord c2 = positions(i-1) + offsets(i-1);
+            lines.push_back(rVertex20(c1.x, c1.y, 0.1f, 255, 0, 0, 255, 0, 0));
+            lines.push_back(rVertex20(c2.x, c2.y, 0.1f, 255, 0, 0, 255, 0, 0));
+        }
+        rRenderStateKey state = rRenderStateKey::Colored(rBlendMode::Opaque);
+        rRenderQueue::Instance().SubmitLines(rRenderPhase::OpaqueDynamic, state, lines.data(), lines.size());
     }
-    RenderEnd();
 
-    glColor4f(1,1,0,1);
-
-    BeginLineStrip();
-    if (current >= 0 && positions.Len() > 0)
-    {
+    // Current position marker (yellow vertical line)
+    if (current >= 0 && positions.Len() > 0) {
         eCoord c = CurrentPosition();
-        Vertex(c.x, c.y, 0);
-        Vertex(c.x, c.y, 50);
+        rVertex20 marker[2] = {
+            rVertex20(c.x, c.y, 0, 255, 255, 0, 255, 0, 0),
+            rVertex20(c.x, c.y, 50, 255, 255, 0, 255, 0, 0)
+        };
+        rRenderStateKey state = rRenderStateKey::Colored(rBlendMode::Opaque);
+        rRenderQueue::Instance().SubmitLines(rRenderPhase::OpaqueDynamic, state, marker, 2);
     }
-    RenderEnd();
+
+    // Execute immediately (called after main phase executions)
+    rRenderQueue::Instance().ExecutePhase(rRenderPhase::OpaqueDynamic);
 #endif
 }
 

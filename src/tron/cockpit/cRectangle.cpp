@@ -31,6 +31,8 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 
 #include "rRender.h"
 #include "rScreen.h"
+#include "rVertex.h"
+#include "rRenderQueue.h"
 
 namespace cWidget {
 
@@ -56,17 +58,12 @@ void Rectangle::Render() {
     const tCoord edge1(tCoord(m_position.x-m_size.x, m_position.y+m_size.y));
     const tCoord edge2(tCoord(m_position.x+m_size.x, m_position.y-m_size.y));
 
-    m_foreground.SetGradientEdges(edge1, edge2);
     m_background.SetGradientEdges(edge1, edge2);
-
-    glEnable(GL_ALPHA_TEST);
-    glAlphaFunc(GL_GREATER,0);
-
-    m_foreground.SetValue(where);
     m_background.SetValue(where);
 
-    m_background.BeginDraw();
-    m_background.DrawRect(edge1, edge2);
+    std::vector<rVertex20> verts = m_background.GenerateRectVertices(edge1, edge2);
+    rRenderStateKey state = m_background.GetRenderStateKey(rBlendMode::Alpha);
+    rRenderQueue::Instance().Submit(rRenderPhase::HUD, state, verts.data(), verts.size());
 }
 
 }

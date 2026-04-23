@@ -28,6 +28,10 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 #include "gSparks.h"
 #include "eTimer.h"
 #include "rRender.h"
+#ifndef DEDICATED
+#include "rRendererState.h"
+#include "rEffectsRenderer.h"
+#endif
 #include "tRandom.h"
 
 #ifdef USEPARTICLES
@@ -157,61 +161,77 @@ void gSpark::Kill(){createTime=lastTime-100000;}
 
 #ifndef DEDICATED
 void gSpark::Render(const eCamera *cam){
+    // Set render context for effects (save/restore to avoid leaking state)
+    rRenderContext prevCtx = sr_GetRenderContext();
+    sr_SetRenderContext(rRenderContext::Game3D_Effects);
+
 #ifndef USEPARTICLES
-    glBlendFunc(GL_SRC_ALPHA,GL_ONE);
+    // Batched rendering path using rRenderQueue
+    if (sr_useBatchedEffects)
+    {
+        rBeginSparkBatch();
+        for (int i = SPARKS - 1; i >= 0; i--)
+        {
+            #define rmax 1.2
+            #define gmax 1.1
+            REAL ago = .2;
+            if (ago > se_GameTime() - lastBreak[i])
+                ago = se_GameTime() - lastBreak[i];
 
-    //glMatrixMode(GL_MODELVIEW);
-    //glPushMatrix();
-    //glLoadIdentity();
+            REAL a = heat[i] + 1.5;
+            if (a > 1) a = 1;
+            if (a < 0) a = 0;
 
-    //glDisable(GL_TEXTURE);
-    glDisable(GL_TEXTURE_2D);
-
-    BeginLines();
-    for (int i=SPARKS-1;i>=0;i--){
-    #define rmax 1.2
-    #define gmax 1.1
-        REAL ago=.2;
-        if (ago>se_GameTime()-lastBreak[i])
-            ago=se_GameTime()-  lastBreak[i];
-
-        REAL a=heat[i]+1.5;
-        if (a>1) a=1;
-        if (a<0) a=0;
-
-        if(!white_sparks) {
-            if(i%2)
-                glColor4f(sparkowncolor_r,sparkowncolor_g,sparkowncolor_b,a);
+            REAL r, g, b;
+            if (!white_sparks)
+            {
+                if (i % 2)
+                {
+                    r = sparkowncolor_r;
+                    g = sparkowncolor_g;
+                    b = sparkowncolor_b;
+                }
+                else
+                {
+                    r = sparkenemycolor_r;
+                    g = sparkenemycolor_g;
+                    b = sparkenemycolor_b;
+                }
+            }
             else
-                glColor4f(sparkenemycolor_r,sparkenemycolor_g,sparkenemycolor_b,a);
+            {
+                r = heat[i] + 1;
+                if (r > rmax) r = rmax;
+                if (r > 1) r = 2 - r;
+                if (r < 0) r = 0;
+                g = heat[i] + .5;
+                if (g > gmax) g = gmax;
+                if (g > 1) g = 2 - g;
+                if (g < 0) g = 0;
+                b = heat[i];
+                if (b > 1) b = 1;
+                if (b < 0) b = 0;
+            }
+
+            // Calculate trail end position
+            Vec3 trailEnd = x[i];
+            trailEnd += xDot[i] * (-ago * .8);
+
+            // Submit spark trail
+            rBatchSparkTrail(x[i].x[0], x[i].x[1], x[i].x[2],
+                             trailEnd.x[0], trailEnd.x[1], trailEnd.x[2],
+                             r, g, b, a);
+
+            // Update position tracking (needed for next frame)
+            preLastX[i] = lastX[i];
+            lastX[i] = x[i];
         }
-        else {
-            REAL r=heat[i]+1;
-            if (r>rmax) r=rmax;
-            if (r>1) r=2-r;
-            if (r<0) r=0;
-            REAL g=heat[i]+.5;
-            if (g>gmax) g=gmax;
-            if (g>1) g=2-g;
-            if (g<0) g=0;
-            REAL b=heat[i];
-            if (b>1) b=1;
-            if (b<0) b=0;
-
-            glColor4f(r,g,b,a);
-        }
-
-        x[i].RenderVertex();
-        preLastX[i]=x[i];
-        preLastX[i]+=xDot[i]*(-ago*.8);
-
-        preLastX[i].RenderVertex();
-        preLastX[i]=lastX[i];
-        lastX[i]=x[i];
+        rEndSparkBatch();
+        sr_SetRenderContext(prevCtx);
+        return;
     }
-    RenderEnd();
-    glBlendFunc(GL_SRC_ALPHA,GL_ONE_MINUS_SRC_ALPHA);
-    //glPopMatrix();
+    // Fallthrough path (immediate mode removed): restore context
+    sr_SetRenderContext(prevCtx);
 #else
     pCurrentGroup(particle_handle);
     int cnt = (int)pGetGroupCount();
@@ -224,15 +244,15 @@ void gSpark::Render(const eCamera *cam){
                                    size3Ofs, vel3Ofs, velB3Ofs, color3Ofs, alpha1Ofs, age1Ofs);
     if(cnt < 1) return;
 
-    glEnableClientState(GL_COLOR_ARRAY);
-    glColorPointer(4, GL_FLOAT, int(flstride) * sizeof(float), ptr + color3Ofs);
+    RenderEnableClientState(rGLConst::ColorArray);
+    RenderColorPointer(4, rGLConst::Float, int(flstride) * sizeof(float), ptr + color3Ofs);
 
-    glEnableClientState(GL_VERTEX_ARRAY);
-    glVertexPointer(3, GL_FLOAT, int(flstride) * sizeof(float), ptr + pos3Ofs);
+    RenderEnableClientState(rGLConst::VertexArray);
+    RenderVertexPointer(3, rGLConst::Float, int(flstride) * sizeof(float), ptr + pos3Ofs);
 
-    glDrawArrays(GL_POINTS, 0, cnt);
-    glDisableClientState(GL_VERTEX_ARRAY);
-    glDisableClientState(GL_COLOR_ARRAY);
+    RenderDrawArrays(rGLConst::Points, 0, cnt);
+    RenderDisableClientState(rGLConst::VertexArray);
+    RenderDisableClientState(rGLConst::ColorArray);
 #endif
 }
 

@@ -1,0 +1,6 @@
+# Generated Info.plist (substituted from Info.plist.in at build time)
+Info.plist
+
+# Xcode derived data / user-specific project settings
+xcuserdata/
+*.xcuserstate

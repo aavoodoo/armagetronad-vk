@@ -46,18 +46,15 @@ public:
         rSwap_ThroughputFastest = 4 // don't sync OpenGL at all
     };
 
-    // in latency mode, how careful should we be to avoid dropped frames?
-    enum rFramedropTolerance
-    {
-        rSwap_Lenient = 0, // framedrops don't worry me too much
-        rSwap_Normal = 1,  // allow some drops
-        rSwap_Strict = 2,  // try hard to avoid them
-        rSwap_Draconic = 3 // don't do anything that may cause additional drops
-    };
 
 #ifndef DEDICATED
-    static void SwapGL();  //!< swaps back and front buffer
-    static void ClearGL(); //!< clears the backbuffer
+    //! Swaps back and front buffer
+    //! @deprecated Prefer using rRenderFrame() from rFrameLifecycle.h for proper frame lifecycle management
+    static void SwapGL();
+
+    //! Clears the backbuffer
+    //! @deprecated Prefer using rRenderFrame() from rFrameLifecycle.h for proper frame lifecycle management
+    static void ClearGL();
 
     static bool IsBenchmark(); //!< returns true if a benchmark is running
 
@@ -77,7 +74,6 @@ public:
 #endif
 
     static rSwapOptimize swapOptimize_;
-    static rFramedropTolerance framedropTolerance_;
 };
 
 extern tString sr_screenshotName;

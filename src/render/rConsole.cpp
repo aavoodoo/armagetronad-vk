@@ -122,6 +122,8 @@ tConsole & rConsole::DoPrint(const tString &s){
     if (sr_screen){
         const char *c=s;
         while (*c!=0){
+            if (currentIn < 0 || currentIn >= MAXBACK + BACKEXTRA)
+                currentIn = (currentIn < 0) ? 0 : MAXBACK + BACKEXTRA - 1;
             lines[currentIn] << *c;
             if (*c=='\n'){
                 if (currentIn<=currentTop+1)
@@ -142,6 +144,10 @@ tConsole & rConsole::DoPrint(const tString &s){
                     currentTop-=BACKEXTRA;
                     if (currentTop<0)
                         currentTop=0;
+                    if (currentIn >= lines.Len())
+                        currentIn = lines.Len() - 1;
+                    if (currentIn < 0)
+                        currentIn = 0;
                 }
             }
             c++;

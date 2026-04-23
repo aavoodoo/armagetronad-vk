@@ -31,11 +31,19 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 
 #include "defs.h"
 #include "rSDL.h"
+#include "uEvent.h"
 
 void su_FetchAndStoreSDLInput();
 
 bool su_StoreSDLEvent(const SDL_Event &tEvent);    //!< stores an event so it will be returned by GetSDLInput() later
-bool su_GetSDLInput(SDL_Event &tEvent,REAL &time); //!< fetches an event
+bool su_GetSDLInput(SDL_Event &tEvent,REAL &time); //!< fetches an event (SDL_Event for backward compatibility)
+
+//! Fetches an event as platform-agnostic uEvent
+//! This wraps su_GetSDLInput() and converts to uEvent, maintaining recording compatibility.
+//! @param event Output: the platform-agnostic event
+//! @param time Output: the event timestamp
+//! @return true if an event was retrieved
+bool su_GetInput(uEvent &event, REAL &time);
 
 //! have one object of this class around while processing input
 class uInputProcessGuard

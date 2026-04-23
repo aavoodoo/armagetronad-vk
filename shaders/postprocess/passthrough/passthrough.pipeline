@@ -1,0 +1,18 @@
+# Passthrough — single pass copying the scene color to the swapchain.
+# This is the simplest possible .pipeline file and serves as a working
+# reference for effect authors.
+#
+# Format:
+#   RESOURCE <name> <format> <scale>   (intermediate render target)
+#   PASS <shader> <target>             (pass target; shader = <basename>.frag.spv)
+#   SAMPLER <binding> <source>         (sampler binding for the previous PASS)
+#
+# Built-in source names:
+#   SCENE_COLOR    — the scene's offscreen color buffer
+#   SCENE_DEPTH    — the scene's offscreen depth buffer
+#   SCENE_EMISSIVE — emissive attachment (Phase B — falls back to SCENE_COLOR)
+# Built-in target names:
+#   SWAPCHAIN — the final presented image
+
+PASS passthrough SWAPCHAIN
+  SAMPLER 0 SCENE_COLOR

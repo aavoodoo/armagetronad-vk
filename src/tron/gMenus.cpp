@@ -32,10 +32,13 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 #include "nConfig.h"
 #include "rConsole.h"
 #include "tToDo.h"
-#include "rGL.h"
 #include "eTimer.h"
 #include "eFloor.h"
 #include "rRender.h"
+#include "rVertex.h"
+#ifndef DEDICATED
+#include "rRenderQueue.h"
+#endif
 #include "rModel.h"
 #include "gGame.h"
 #include "gCycle.h"
@@ -73,8 +76,11 @@ static uMenuItemSubmenu smd(&sg_screenMenu,&screen_menu_detail,
                             "$detail_settings_menu_help");
 static uMenuItemSubmenu smp(&sg_screenMenu,&screen_menu_prefs,
                             "$preferences_menu_help");
+#if !defined(__ANDROID__) && !(defined(__APPLE__) && TARGET_OS_IOS)
+// Resolution/fullscreen settings are meaningless on mobile (always fullscreen at native res)
 static uMenuItemFunction smm(&sg_screenMenu,"$screen_mode_menu",
                              "$screen_mode_menu_help", sg_ScreenModeMenu );
+#endif
 
 static tConfItemLine c_ext("GL_EXTENSIONS",gl_extensions);
 static tConfItemLine c_ver("GL_VERSION",gl_version);
@@ -128,25 +134,25 @@ public:
             ("$texture_off_text","$texture_off_help",-1);
 #ifndef DEDICATED
         uMenuItemSelection<int>::NewChoice
-        ("$texture_nearest_text","$texture_nearest_help",GL_NEAREST);
+        ("$texture_nearest_text","$texture_nearest_help",rGLConst::Nearest);
 
         uMenuItemSelection<int>::NewChoice
-        ("$texture_bilinear_text","$texture_bilinear_help",GL_LINEAR);
+        ("$texture_bilinear_text","$texture_bilinear_help",rGLConst::Linear);
 
         if(!font)
         {
             uMenuItemSelection<int>::NewChoice
             ("$texture_mipmap_nearest_text",
              "$texture_mipmap_nearest_help",
-             GL_NEAREST_MIPMAP_NEAREST);
+             rGLConst::NearestMipmapNearest);
             uMenuItemSelection<int>::NewChoice
             ("$texture_mipmap_bilinear_text",
              "$texture_mipmap_bilinear_help",
-             GL_LINEAR_MIPMAP_NEAREST);
+             rGLConst::LinearMipmapNearest);
             uMenuItemSelection<int>::NewChoice
             ("$texture_mipmap_trilinear_text",
              "$texture_mipmap_trilinear_help",
-             GL_LINEAR_MIPMAP_LINEAR);
+             rGLConst::LinearMipmapLinear);
         }
     #endif
     }
@@ -176,9 +182,6 @@ static tConfItem<bool> po("PREDICT_OBJECTS",sr_predictObjects);
 static tConfItem<bool> t32("TEXTURES_HI",sr_texturesTruecolor);
 
 static tConfItem<bool> kwa("KEEP_WINDOW_ACTIVE",sr_keepWindowActive);
-#ifdef USE_HEADLIGHT
-static tConfItem<bool> chl("HEADLIGHT",headlights);
-#endif
 
 #ifndef SDL_OPENGL
 #ifndef DIRTY
@@ -191,7 +194,6 @@ bool operator < ( rScreenSize const & a, rScreenSize const & b )
     return a.Compare(b) < 0;
 }
 
-#if SDL_VERSION_ATLEAST(2,0,0)
 class gRefreshRateMenuItem: public uMenuItemSelection<int>
 {
 public:
@@ -201,40 +203,47 @@ public:
 
         // collect refresh rates
         std::set<int> refreshRates;
-        int modes = SDL_GetNumDisplayModes(currentScreensetting.displayIndex);
+
+        // SDL3: Get display modes array
+        SDL_DisplayID displayID = AA_GetDisplayID(currentScreensetting.displayIndex);
+        int modeCount = 0;
+        SDL_DisplayMode** displayModes = SDL_GetFullscreenDisplayModes(displayID, &modeCount);
 
         for(int run = 0; run <= 1; ++run)
         {
             int width = currentScreensetting.res.width;
             int height = currentScreensetting.res.height;
-            
+
             if(width + height == 0)
             {
                 // desktop mode, get real res
-                SDL_DisplayMode mode;
-                if(SDL_GetDesktopDisplayMode(currentScreensetting.displayIndex, &mode) == 0)
+                const SDL_DisplayMode* desktopMode = SDL_GetDesktopDisplayMode(displayID);
+                if(desktopMode)
                 {
-                    width = mode.w;
-                    height = mode.h;
+                    width = desktopMode->w;
+                    height = desktopMode->h;
                 }
             }
 
-            for(int i = modes-1; i >= 0; --i)
+            if(displayModes)
             {
-                SDL_DisplayMode mode;
-                if (0>SDL_GetDisplayMode(currentScreensetting.displayIndex, i, &mode)) continue;
+                for(int i = modeCount-1; i >= 0; --i)
+                {
+                    const SDL_DisplayMode* mode = displayModes[i];
+                    if(!mode) continue;
 
-                // first scan only matching modes, then all
-                if(run == 0)
-                {
-                    if(width != mode.w)
-                        continue;
-                    if(height != mode.h)
-                        continue;
-                }
-                if(refreshRates.find(mode.refresh_rate) == refreshRates.end())
-                {
-                    refreshRates.insert(mode.refresh_rate);
+                    // first scan only matching modes, then all
+                    if(run == 0)
+                    {
+                        if(width != mode->w)
+                            continue;
+                        if(height != mode->h)
+                            continue;
+                    }
+                    if(refreshRates.find(static_cast<int>(mode->refresh_rate)) == refreshRates.end())
+                    {
+                        refreshRates.insert(static_cast<int>(mode->refresh_rate));
+                    }
                 }
             }
 
@@ -242,7 +251,9 @@ public:
                 break;
         }
 
-        // emergenct default fallback
+        SDL_free(displayModes);
+
+        // emergency default fallback
         if(refreshRates.size() == 0)
             refreshRates.insert(60);
 
@@ -283,7 +294,6 @@ public:
 };
 
 static gRefreshRateMenuItem * sg_refreshRateMenuItem = NULL;
-#endif // SDL_VER
 
 class gResolutionMenuItem: uMenuItemSelection<rScreenSize> 
 {
@@ -315,25 +325,21 @@ public:
 #ifndef DEDICATED
         // fetch valid screen modes from SDL
         int i;
-#if SDL_VERSION_ATLEAST(2,0,0)
-        int modes = SDL_GetNumDisplayModes(currentScreensetting.displayIndex);
+        // SDL3: Use SDL_GetFullscreenDisplayModes
+        SDL_DisplayID displayID = AA_GetDisplayID(currentScreensetting.displayIndex);
+        int modeCount = 0;
+        SDL_DisplayMode** displayModes = SDL_GetFullscreenDisplayModes(displayID, &modeCount);
 
         // Check is there are any modes available
-        if(modes < 0)
-#else
-        SDL_Rect **modes;
-        modes=SDL_ListModes(NULL, SDL_FULLSCREEN|SDL_OPENGL);
-
-        // Check is there are any modes available
-        if(modes == 0 || modes == (SDL_Rect **)-1)
-#endif
-
+        if(!displayModes || modeCount <= 0)
         {
             // add all fixed resolutions
             for ( i = ArmageTron_Custom; i>=0; --i )
             {
                 NewSize( rResolution(i) );
             }
+            if (displayModes)
+                SDL_free(displayModes);
         }
         else
         {
@@ -348,25 +354,19 @@ public:
             rScreenSize maxSize(0,0);
 
             // fill in available modes (avoid duplicates)
-#if SDL_VERSION_ATLEAST(2,0,0)
-            for ( i = 0 ; i < modes ; i++ )
+            for ( i = 0 ; i < modeCount ; i++ )
             {
-                SDL_DisplayMode mode;
+                SDL_DisplayMode* mode = displayModes[i];
+                if (!mode) continue;
                 // add mode (if it's new)
-                if (0>SDL_GetDisplayMode(currentScreensetting.displayIndex, i, &mode)) continue;
-                rScreenSize size(mode.w, mode.h);
- #else
-            for(i=0;modes[i];++i)
-            {
-                // add mode (if it's new)
-                rScreenSize size(modes[i]->w, modes[i]->h);
-#endif
+                rScreenSize size(mode->w, mode->h);
                 NewSize( size );
                 if ( maxSize.width < size.width )
                     maxSize.width = size.width;
                 if ( maxSize.height < size.height )
                     maxSize.height = size.height;
             }
+            SDL_free(displayModes);
 
             // add fixed resolutions (as window sizes)
             if ( addFixed )
@@ -412,10 +412,8 @@ public:
     {
         uMenuItemSelection<rScreenSize>::LeftRight(lr);
 
-#if SDL_VERSION_ATLEAST(2,0,0)       
         if(sg_refreshRateMenuItem)
             sg_refreshRateMenuItem->Rescan();
-#endif
     }
 
     gResolutionMenuItem( uMenu & screen_menu_mode, rScreenSize& res, const tOutput& text, const tOutput& help, bool addFixed )
@@ -476,30 +474,7 @@ static void sg_ScreenModeAdvanced()
         "$screen_keep_window_active_help",
         sr_keepWindowActive);
 
-#if !SDL_VERSION_ATLEAST(2,0,0)
-    uMenuItemToggle ie_t
-    (&screen_menu_mode,
-     "$screen_check_errors_text",
-     "$screen_check_errors_help",
-     currentScreensetting.checkErrors);
-#endif
-
-#ifdef SDL_OPENGL
-#if SDL_VERSION_ATLEAST(1, 2, 10)
-    uMenuItemSelection<rVSync> zvs_t
-    (&screen_menu_mode,
-     "$screen_vsync_text",
-     "$screen_vsync_help",
-     currentScreensetting.vSync);
-
-    uSelectEntry<rVSync> zvs_on(zvs_t,"$screen_vsync_on_text","$screen_vsync_on_help",ArmageTron_VSync_On);
-    uSelectEntry<rVSync> zvs_d(zvs_t,"$screen_vsync_default_text","$screen_vsync_default_help",ArmageTron_VSync_Default);
-    uSelectEntry<rVSync> zvs_off(zvs_t,"$screen_vsync_off_text","$screen_vsync_off_help",ArmageTron_VSync_Off);
-#ifdef HAVE_GLEW
-    uSelectEntry<rVSync> zvs_blur(zvs_t,"$screen_vsync_motionblur_text","$screen_vsync_motionblur_help",ArmageTron_VSync_MotionBlur);
-#endif // HAVE_GLEW
-#endif // SDL_GL_SWAP_CONTROL
-#endif // SDL_OPENGL
+    // VSync / present mode is now in Performance Tweaks menu (Vulkan present mode)
 
     uMenuItemSelection<rColorDepth> zd_t
     (&screen_menu_mode,
@@ -553,14 +528,12 @@ static void sg_ScreenModeMenu()
      currentScreensetting.lowDPIWindow);
 #endif
 
-#if SDL_VERSION_ATLEAST(2,0,0)
     gRefreshRateMenuItem refreshRate
     (screen_menu_mode,
      "$screen_refreshrate_text",
      "$screen_refreshrate_help");
 
     sg_refreshRateMenuItem = &refreshRate;
-#endif
 
 
     gResolutionMenuItem res( screen_menu_mode, currentScreensetting.res, "$screen_resolution_text", "$screen_resolution_help", false );
@@ -568,9 +541,7 @@ static void sg_ScreenModeMenu()
     sg_windowResMen = &winsize;
     sg_screenResMen = &res;
 
-#if SDL_VERSION_ATLEAST(2,0,0)
-
-    int numDisplays = SDL_GetNumVideoDisplays();
+    int numDisplays = AA_GetNumVideoDisplays();
     std::unique_ptr<uMenuItemInt> pDisplayIndex;
     if(numDisplays > 1)
     {
@@ -580,16 +551,13 @@ static void sg_ScreenModeMenu()
          "$screen_displayindex_help",
          numDisplays-1) );
     }
-#endif
 
     screen_menu_mode.Enter();
 
     sg_windowResMen = NULL;
     sg_screenResMen = NULL;
 
-#if SDL_VERSION_ATLEAST(2,0,0)       
     sg_refreshRateMenuItem = NULL;
-#endif
 }
 
 
@@ -793,12 +761,6 @@ uMenuItemToggle fps2
 (&screen_menu_prefs,"$misc_fps_text",
  "$misc_fps_help",sr_FPSOut);
 
-#ifdef USE_HEADLIGHT
-static uMenuItemToggle uchl(&screen_menu_prefs,"$pref_headlight_text","$pref_headlight_help",
-                            headlights);
-#endif
-
-
 static uMenuItemToggle ws2
 (&screen_menu_prefs,"$pref_skymove_text",
  "$pref_skymove_help",
@@ -819,48 +781,47 @@ static uMenuItemToggle cs
  "$pref_sparks_help",
  crash_sparks);
 
-static uMenuItemSelection<rDisplayListUsage> dl
-(&screen_menu_tweaks,"$tweaks_displaylists_text",
- "$tweaks_displaylists_help", sr_useDisplayLists);
-static uSelectEntry<rDisplayListUsage> dl_off(dl,"$tweaks_displaylists_off_text","$tweaks_displaylists_off_help",rDisplayList_Off);
-static uSelectEntry<rDisplayListUsage> dl_cac(dl,"$tweaks_displaylists_cac_text","$tweaks_displaylists_cac_help",rDisplayList_CAC);
-static uSelectEntry<rDisplayListUsage> dl_cae(dl,"$tweaks_displaylists_cae_text","$tweaks_displaylists_cae_help",rDisplayList_CAE);
+// MSDF Font Quality Settings
+extern int sr_fontMSDFMode;
+extern float sr_fontMSDFRange;
+extern int sr_fontMSDFGlyphSize;
+
+// Note: No callback needed here - tConfItem for sr_fontMSDFMode already
+// has sr_ReloadFont as callback, which gets called when value changes.
+static uMenuItemSelection<int> fontMSDFModeMenu
+(&screen_menu_prefs,
+ "$font_msdf_mode_text",
+ "$font_msdf_mode_help",
+ sr_fontMSDFMode);
+static uSelectEntry<int> fontMSDFMode0(fontMSDFModeMenu,
+                                        "$font_msdf_mode_legacy_text",
+                                        "$font_msdf_mode_legacy_help", 0);
+static uSelectEntry<int> fontMSDFMode1(fontMSDFModeMenu,
+                                        "$font_msdf_mode_sdf_text",
+                                        "$font_msdf_mode_sdf_help", 1);
+static uSelectEntry<int> fontMSDFMode2(fontMSDFModeMenu,
+                                        "$font_msdf_mode_msdf_text",
+                                        "$font_msdf_mode_msdf_help", 2);
+static uSelectEntry<int> fontMSDFMode3(fontMSDFModeMenu,
+                                        "$font_msdf_mode_mtsdf_text",
+                                        "$font_msdf_mode_mtsdf_help", 3);
 
 static uMenuItemToggle infp
 (&screen_menu_tweaks,"$tweaks_infinity_text",
  "$tweaks_infinity_help"
  ,sr_infinityPlane);
 
-uMenuItemSelection<rSysDep::rFramedropTolerance> framedropTolerance
+// Vulkan present mode selector
+static uMenuItemSelection<int> presentModeMenu
 (&screen_menu_tweaks,
- "$framedroptolerance_text",
- "$framedroptolerance_help",
- rSysDep::framedropTolerance_);
+ "$present_mode_text",
+ "$present_mode_help",
+ currentScreensetting.presentMode);
 
-static uSelectEntry<rSysDep::rFramedropTolerance> framedropTolerance_Lenient(framedropTolerance,"$framedrop_tolerance_lenient_text","$framedrop_tolerance_lenient_help",rSysDep::rSwap_Lenient);
-static uSelectEntry<rSysDep::rFramedropTolerance> framedropTolerance_Normal(framedropTolerance,"$framedrop_tolerance_normal_text","$framedrop_tolerance_normal_help",rSysDep::rSwap_Normal);
-static uSelectEntry<rSysDep::rFramedropTolerance> framedropTolerance_Strict(framedropTolerance,"$framedrop_tolerance_strict_text","$framedrop_tolerance_strict_help",rSysDep::rSwap_Strict);
-static uSelectEntry<rSysDep::rFramedropTolerance> framedropTolerance_Draconic(framedropTolerance,"$framedrop_tolerance_draconic_text","$framedrop_tolerance_draconic_help",rSysDep::rSwap_Draconic);
-
-tCONFIG_ENUM( rSysDep::rFramedropTolerance );
-
-static tConfItem< rSysDep::rFramedropTolerance > framedropToleranceCI("FRAMEDROP_TOLERANCE", rSysDep::framedropTolerance_ );
-
-uMenuItemSelection<rSysDep::rSwapOptimize> swapOptimize
-(&screen_menu_tweaks,
- "$swapoptimize_text",
- "$swapoptimize_help",
- rSysDep::swapOptimize_);
-
-static uSelectEntry<rSysDep::rSwapOptimize> swapOptimize_Latency(swapOptimize,"$swapoptimize_latency_text","$swapoptimize_latency_help",rSysDep::rSwap_Latency);
-static uSelectEntry<rSysDep::rSwapOptimize> swapOptimize_Auto(swapOptimize,"$swapoptimize_auto_text","$swapoptimize_auto_help",rSysDep::rSwap_Auto);
-static uSelectEntry<rSysDep::rSwapOptimize> swapOptimize_Throughput(swapOptimize,"$swapoptimize_throughput_text","$swapoptimize_throughput_help",rSysDep::rSwap_Throughput);
-static uSelectEntry<rSysDep::rSwapOptimize> swapOptimize_ThroughputFlush(swapOptimize,"$swapoptimize_throughput_flush_text","$swapoptimize_throughput_flush_help",rSysDep::rSwap_ThroughputFlush);
-static uSelectEntry<rSysDep::rSwapOptimize> swapOptimize_ThroughputFastest(swapOptimize,"$swapoptimize_throughput_fastest_text","$swapoptimize_throughput_fastest_help",rSysDep::rSwap_ThroughputFastest);
-
-tCONFIG_ENUM( rSysDep::rSwapOptimize );
-
-static tConfItem< rSysDep::rSwapOptimize > swapOptimizeCI("SWAP_OPTIMIZE", rSysDep::swapOptimize_ );
+static uSelectEntry<int> pm_auto(presentModeMenu,"$present_mode_auto_text","$present_mode_auto_help", 0);
+static uSelectEntry<int> pm_vsync(presentModeMenu,"$present_mode_vsync_text","$present_mode_vsync_help", 1);
+static uSelectEntry<int> pm_immediate(presentModeMenu,"$present_mode_immediate_text","$present_mode_immediate_help", 2);
+static uSelectEntry<int> pm_mailbox(presentModeMenu,"$present_mode_mailbox_text","$present_mode_mailbox_help", 3);
 
 static tConfItem<bool> WRAP("WRAP_MENU",uMenu::wrap);
 
@@ -899,8 +860,9 @@ gMemuItemConsole::gMemuItemConsole(uMenu *M,tString &c, uAutoCompleter *complete
 
 
 bool gMemuItemConsole::Event(SDL_Event &e){
-    if (e.type==SDL_KEYDOWN &&
-            (e.key.keysym.sym==SDLK_KP_ENTER || e.key.keysym.sym==SDLK_RETURN)){
+    // SDL3: SDL_KEYDOWN → SDL_EVENT_KEY_DOWN, keysym.sym → key.key
+    if (e.type==SDL_EVENT_KEY_DOWN &&
+            (e.key.key==SDLK_KP_ENTER || e.key.key==SDLK_RETURN)){
 
         con << tColoredString::ColorString(.5,.5,1) << " > " << *content << '\n';
 
@@ -914,8 +876,8 @@ bool gMemuItemConsole::Event(SDL_Event &e){
         MyMenu()->Exit();
         return true;
     }
-    else if (e.type==SDL_KEYDOWN &&
-             uActionGlobal::IsBreakingGlobalBind(e.key.keysym.sym))
+    else if (e.type==SDL_EVENT_KEY_DOWN &&
+             uActionGlobal::IsBreakingGlobalBind(e.key.key))
         return su_HandleEvent(e, true);
     else
         return uMenuItemStringWithHistory::Event(e);
@@ -936,7 +898,8 @@ void do_con(){
     gMemuItemConsole s(&con_menu,c,&completer);
     con_menu.SetCenter(-.75);
     con_menu.SetBot(-2);
-    con_menu.SetTop(-.7);
+    REAL kbFrac = sr_ScreenKeyboardHeightFraction();
+    con_menu.SetTop(kbFrac > 0.1f ? 0.0f : -.7f);
     con_menu.Enter();
 
     se_ChatState( ePlayerNetID::ChatFlags_Console, false );
@@ -977,6 +940,13 @@ public:
     }
 
     virtual REAL SpaceRight(){return 1;}
+
+    virtual void Enter(){
+        // Tap on selected entry: cycle to next configuration, wrap around to 0
+        rViewportConfiguration::next_conf_num =
+            (rViewportConfiguration::next_conf_num + 1) %
+             rViewportConfiguration::s_viewportNumConfigurations;
+    }
 
     virtual void RenderBackground(){
         uMenuItem::RenderBackground();
@@ -1100,9 +1070,17 @@ public:
         REAL g = rgb[1]/15.0;
         REAL b = rgb[2]/15.0;
         se_MakeColorValid(r, g, b, 1.0f);
-        RenderEnd();
-        glColor3f(r, g, b);
-        glRectf(.8,-.8,.98,-.98);
+        {
+            uint8_t cr = static_cast<uint8_t>(r * 255.0f);
+            uint8_t cg = static_cast<uint8_t>(g * 255.0f);
+            uint8_t cb = static_cast<uint8_t>(b * 255.0f);
+            rVertex20 q0(.8f,  -.8f,  0, cr, cg, cb, 255, 0, 0);
+            rVertex20 q1(.98f, -.8f,  0, cr, cg, cb, 255, 0, 0);
+            rVertex20 q2(.98f, -.98f, 0, cr, cg, cb, 255, 0, 0);
+            rVertex20 q3(.8f,  -.98f, 0, cr, cg, cb, 255, 0, 0);
+            rRenderStateKey state = rRenderStateKey::HUD(0, rBlendMode::Opaque);
+            rRenderQueue::Instance().SubmitQuad(rRenderPhase::HUD, state, q0, q1, q2, q3);
+        }
 #endif
     }
 
@@ -1111,6 +1089,7 @@ public:
 
 
 void sg_PlayerMenu(int Player){
+#ifndef DEDICATED
     tOutput name;
     name.SetTemplateParameter(1, Player+1);
 
@@ -1333,6 +1312,7 @@ void sg_PlayerMenu(int Player){
         }
     }
     */
+#endif // !DEDICATED
 }
 
 
@@ -1455,12 +1435,9 @@ static bool toggle_fullscreen_func( REAL x )
 #endif
 
     // only do anything if the application is active (work around odd bug)
-#if SDL_VERSION_ATLEAST(2,0,0)
     Uint32 flags = SDL_GetWindowFlags(sr_screen);
-    if ( x > 0 && (flags & SDL_WINDOW_SHOWN) && !(flags & SDL_WINDOW_MINIMIZED))
-#else
-    if ( x > 0 && ( SDL_GetAppState() & SDL_APPACTIVE ) )
-#endif
+    // SDL3: SDL_WINDOW_SHOWN removed, check for NOT hidden instead
+    if ( x > 0 && !(flags & SDL_WINDOW_HIDDEN) && !(flags & SDL_WINDOW_MINIMIZED))
     {
         currentScreensetting.fullscreen = !currentScreensetting.fullscreen;
         sr_ReinitDisplay();

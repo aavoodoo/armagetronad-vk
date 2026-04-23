@@ -94,55 +94,6 @@ void eWall::CalcLen(){
     //  Insert();
 }
 
-
-
-
-#ifdef DEDICATED_XXX
-void eWall::Render_helper(eWall *w,REAL tBeg,REAL tEnd,REAL h,REAL hfrac,REAL bot){
-    glDisable(GL_CULL_FACE);
-
-    const eCoord *p1 = &w->EndPoint(0);
-    const eCoord *p2 = &w->EndPoint(1);
-
-    BeginQuads();
-    TexVertex(p1->x, p1->y, bot,
-              tBeg        , hfrac);
-
-    TexVertex(p1->x, p1->y, h*hfrac,
-              tBeg        , 0);
-
-    TexVertex(p2->x, p2->y, h*hfrac,
-              0           , 0);
-
-    TexVertex(p2->x, p2->y, bot,
-              0           , hfrac);
-
-    RenderEnd();
-
-    if (TextureMode[rTEX_WALL]<0){
-        Color(1,1,1);
-
-        Line(p1->x,p1->y,h*hfrac,
-             p2->x,p2->y,h*hfrac);
-
-    }
-}
-
-void eWall::Render(){
-    return;
-    /*
-    if (edge){
-      const eCoord *p1 = &EndPoint(0);
-      const eCoord *p2 = &EndPoint(1);
-      
-      Color(0,0,1,.5);
-      
-      eWall::Render_helper(this,(p1->x+p1->y)/40,(p2->x+p2->y)/40,4,1);
-    }
-    */
-}
-#endif
-
 //ArmageTron_eWalltype eWall::type(){return ArmageTron_GENERIC_WALL;}
 
 //void eWall::Flip(){}

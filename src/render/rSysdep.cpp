@@ -27,11 +27,10 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 
 #include "defs.h"
 
-#include "rGL.h"
+#include "rRender.h"
 
 #ifndef DEDICATED
 #include "rSDL.h"
-#include "rGLEW.h"
 #endif
 
 #include "rSysdep.h"
@@ -46,145 +45,74 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 #include "tCommandLine.h"
 #include "tConfiguration.h"
 #include "tRecorder.h"
-#include "rTextureRenderTarget.h"
+#include "tBackgroundProcess.h"
+#ifndef DEDICATED
+#include "rRenderQueue.h"
+#include "rRenderBucket.h"
+#include "rVertex.h"
+#endif
 #include <memory>
+#include <vector>
 
 #ifndef DEDICATED
-#include "SDL_thread.h"
-#include "SDL_mutex.h"
+// SDL3: Include via rSDL.h for proper header path
+#include "rSDL.h"
 
-//#ifndef WIN32
-//#define PNG_SCREENSHOT
-//#else
-//#if !SDL_VERSION_ATLEAST(2, 0, 0)
-#define PNG_SCREENSHOT
-//#endif
-//#endif
+// Use stb_image_write for PNG screenshots (replaces libpng)
+#define STB_IMAGE_WRITE_IMPLEMENTATION
+#include "stb_image_write.h"
 
-#ifdef PNG_SCREENSHOT
-#include <png.h>
-#endif
 #include <unistd.h>
-#define SCREENSHOT_PNG_BITDEPTH 8
 #define SCREENSHOT_BYTES_PER_PIXEL 3
 
-#ifndef SDL_OPENGL
-#error "need SDL 1.1"
-#endif
+// SDL3: SDL_OPENGL always defined
 
 #ifndef DEDICATED
-// fence support
-class rGLFence: public rGLuintObject
+// Modern fence sync using renderer abstraction (replaces legacy NV/APPLE fence extensions)
+class rFence
 {
 public:
-    // check whether fences are availalbe
     static bool Available()
     {
-        static bool ret = CheckAvailable();
-        return ret;
+        return true;  // GL 3.2+ always has fence sync
     }
 
-    // sets the fence up
     void Set()
     {
-        sr_CheckGLError();
-#ifdef GLEW_NV_fence
-        if( GLEW_NV_fence )
-        {
-            glSetFenceNV( *this, GL_ALL_COMPLETED_NV );
-        }
-#endif
-#ifdef GLEW_APPLE_fence
-        if( GLEW_APPLE_fence )
-        {
-            glSetFenceAPPLE( *this );
-        }
-#endif
-        sr_CheckGLError();
+        Delete();
+        fence_ = RenderCreateFence();
     }
 
-    // finishes the fence (waits for all commands sent before it was set to be finished)
     void Finish()
     {
-        sr_CheckGLError();
-#ifdef GLEW_NV_fence
-        if( GLEW_NV_fence )
+        if (fence_)
         {
-            glFinishFenceNV( *this );
+            RenderWaitFence(fence_);
         }
-#endif
-#ifdef GLEW_APPLE_fence
-        if( GLEW_APPLE_fence )
-        {
-            glFinishFenceAPPLE( *this );
-        }
-#endif
-        sr_CheckGLError();
+        Delete();
     }
 
-    virtual ~rGLFence()
+    void Delete()
+    {
+        if (fence_)
+        {
+            RenderDeleteFence(fence_);
+            fence_ = nullptr;
+        }
+    }
+
+    ~rFence()
     {
         Delete();
     }
 private:
-    static bool CheckAvailable()
-    {
-#ifdef HAVE_GLEW
-#ifdef GLEW_NV_fence
-        if( GLEW_NV_fence )
-        {
-            return true;
-        }
-#endif
-#ifdef GLEW_APPLE_fence
-        if( GLEW_APPLE_fence )
-        {
-            return true;
-        }
-#endif
-#endif
-        // fallback: no fence
-        return false;
-    }
-
-    virtual void DoGen()       //!< really reserves the object
-    {
-#ifdef GLEW_NV_fence
-        if( GLEW_NV_fence )
-        {
-            glGenFencesNV( 1, &object_ );
-        }
-#endif
-#ifdef GLEW_APPLE_fence
-        if( GLEW_APPLE_fence )
-        {
-            glGenFencesAPPLE( 1, &object_ );
-        }
-#endif
-    }
-
-    virtual void DoDelete()    //!< really frees the object
-    {
-#ifdef GLEW_NV_fence
-        if( GLEW_NV_fence )
-        {
-            glDeleteFencesNV( 1, &object_ );
-        }
-#endif
-#ifdef GLEW_APPLE_fence
-        if( GLEW_APPLE_fence )
-        {
-            glDeleteFencesAPPLE( 1, &object_ );
-        }
-#endif
-    }
+    void* fence_ = nullptr;
 };
 
 // returns the fence to be used for syncing the GPU and CPU
-static rGLFence & sr_GetFence()
+static rFence & sr_GetFence()
 {
-    static rGLFence fence;
-    fence.Set();
+    static rFence fence;
     return fence;
 }
 
@@ -199,133 +127,102 @@ static bool png_screenshot=true;
 static tConfItem<bool> pns("PNG_SCREENSHOT",png_screenshot);
 #ifndef DEDICATED
 
-#ifdef PNG_SCREENSHOT
-static void SDL_SavePNG(SDL_Surface *image, tString filename){
-    png_structp png_ptr;
-    png_infop info_ptr;
-    png_byte **row_ptrs;
-    int i;
-    static FILE *fp;
+// Async screenshot saving - runs on background thread
+static void SaveScreenshotAsync(std::shared_ptr<std::vector<unsigned char>> pixels,
+                                 int width, int height, int channels,
+                                 tString baseName, bool usePng)
+{
+    // Find unused filename (done in background to avoid blocking)
+    int number = 0;
+    bool done = false;
+    while (!done)
+    {
+        tString fileName(baseName);
+        if (number)
+        {
+            fileName << '_' << number;
+        }
+        if (usePng)
+            fileName << ".png";
+        else
+            fileName << ".bmp";
 
-    if (!(fp = fopen(filename, "wb"))) {
-        fprintf(stderr, "can't open file for writing\n");
-        return;
+        // Test if file exists
+        std::ifstream s;
+        if (tDirectories::Screenshot().Open(s, fileName))
+        {
+            number++;
+            continue;
+        }
+
+        // Flip image vertically (OpenGL gives bottom-to-top, PNG expects top-to-bottom)
+        std::vector<unsigned char> flipped(width * height * channels);
+        for (int y = 0; y < height; y++)
+        {
+            memcpy(flipped.data() + y * width * channels,
+                   pixels->data() + (height - 1 - y) * width * channels,
+                   width * channels);
+        }
+
+        // Write file
+        tString fullPath = tDirectories::Screenshot().GetWritePath(fileName);
+        if (usePng)
+        {
+            stbi_write_png(fullPath.c_str(), width, height, channels,
+                           flipped.data(), width * channels);
+        }
+        else
+        {
+            // For BMP, create temporary SDL surface
+            SDL_Surface* temp = SDL_CreateSurface(width, height, SDL_PIXELFORMAT_RGB24);
+            if (temp)
+            {
+                memcpy(temp->pixels, flipped.data(), width * height * channels);
+                SDL_SaveBMP(temp, fullPath);
+                SDL_DestroySurface(temp);
+            }
+        }
+        done = true;
     }
-
-    if (!(png_ptr = png_create_write_struct(PNG_LIBPNG_VER_STRING, NULL, NULL, NULL))) {
-        return;
-    }
-
-    if (!(info_ptr = png_create_info_struct(png_ptr))) {
-        png_destroy_write_struct(&png_ptr, (png_infopp)NULL);
-        return;
-    }
-
-    png_init_io(png_ptr, fp);
-
-    png_set_IHDR(png_ptr, info_ptr, sr_screenWidth, sr_screenHeight,
-                 SCREENSHOT_PNG_BITDEPTH, PNG_COLOR_TYPE_RGB,
-                 PNG_INTERLACE_NONE, PNG_COMPRESSION_TYPE_DEFAULT,
-                 PNG_FILTER_TYPE_DEFAULT);
-    png_write_info(png_ptr, info_ptr);
-
-    // get pointers
-    if (!(row_ptrs = (png_byte**) malloc(sr_screenHeight * sizeof(png_byte*)))) {
-        png_destroy_write_struct(&png_ptr, &info_ptr);
-        return;
-    }
-
-    for (i = 0; i < sr_screenHeight; i++) {
-        row_ptrs[i] = (png_byte *)image->pixels + (sr_screenHeight - i - 1)
-                      * image->pitch;
-    }
-
-    png_write_image(png_ptr, row_ptrs);
-    png_write_end(png_ptr, info_ptr);
-    png_destroy_write_struct(&png_ptr, &info_ptr);
-
-    free(row_ptrs);
-    fclose(fp);
 }
-#endif
-#endif
 
 static void make_screenshot(){
-#ifndef DEDICATED
-    // duplicate count (if we already took a screenshot the same second/with the same name)
-    int number=0;
+    // Read pixels from OpenGL (must be on main thread)
+    int width = sr_screenWidth;
+    int height = sr_screenHeight;
+    int channels = SCREENSHOT_BYTES_PER_PIXEL;
 
-    SDL_Surface *image;
-    SDL_Surface *temp;
-    int idx;
-    image = SDL_CreateRGBSurface(SDL_SWSURFACE, sr_screenWidth, sr_screenHeight,
-                                 24, 0x0000FF, 0x00FF00, 0xFF0000 ,0);
-    temp = SDL_CreateRGBSurface(SDL_SWSURFACE, sr_screenWidth, sr_screenHeight,
-                                24, 0x0000FF, 0x00FF00, 0xFF0000, 0);
+    // Allocate pixel buffer
+    auto pixels = std::make_shared<std::vector<unsigned char>>(width * height * channels);
 
-    // make upside down screenshot (make sure it comes from the screen)
+    RenderReadPixels(0, 0, width, height, rGLConst::RGB, rGLConst::UnsignedByte, pixels->data());
 
-    glReadPixels(0,0,sr_screenWidth, sr_screenHeight, GL_RGB,
-                 GL_UNSIGNED_BYTE, image->pixels);
-
-    // turn image around
-    for (idx = 0; idx < sr_screenHeight; idx++)
-    {
-        memcpy(reinterpret_cast<char *>(temp->pixels) + temp->pitch * idx,
-               reinterpret_cast<char *>(image->pixels)
-               + image->pitch*(sr_screenHeight - idx-1),
-               3*sr_screenWidth); // Optionally, use the pitch of either surface here
-    }
-
+    // Video output: must be synchronous (streaming)
     if (s_videoout)
     {
-        for (idx = 0; idx < sr_screenHeight; idx++)
+        // Flip and write synchronously for video streaming
+        for (int y = 0; y < height; y++)
         {
-            Ignore( write(s_videooutDest, reinterpret_cast<char *>(temp->pixels) + temp->pitch * idx, sr_screenWidth * 3) );
+            // Write rows from bottom to top (flipped)
+            Ignore(write(s_videooutDest,
+                         pixels->data() + (height - 1 - y) * width * channels,
+                         width * channels));
         }
     }
 
-    if (sr_screenshotIsPlanned) {
-        // save screenshot in unused slot
-        bool done = false;
-        while ( !done )
-        {
-            // generate filename
-            tString fileName(sr_screenshotName);
-            if(number)
-            {
-                fileName << '_' << number;
-            }
-            if (png_screenshot)
-                fileName << ".png";
-            else
-                fileName << ".bmp";
+    // Screenshot saving: async
+    if (sr_screenshotIsPlanned)
+    {
+        tString baseName = sr_screenshotName;
+        bool usePng = png_screenshot;
 
-            // test if file exists
-            std::ifstream s;
-            if ( tDirectories::Screenshot().Open( s, fileName ) )
-            {
-                // yes! try next number
-                number++;
-                continue;
-            }
-
-            // save image
-#ifdef PNG_SCREENSHOT
-            if (png_screenshot)
-                SDL_SavePNG(image, tDirectories::Screenshot().GetWritePath( fileName ));
-            else
-#endif
-                SDL_SaveBMP(temp, tDirectories::Screenshot().GetWritePath( fileName ) );
-            done = true;
-        }
+        // Schedule background save
+        tLambdaRunner::ScheduleBackground([pixels, width, height, channels, baseName, usePng]() {
+            SaveScreenshotAsync(pixels, width, height, channels, baseName, usePng);
+        });
     }
-
-    // cleanup
-    SDL_FreeSurface(image);
-    SDL_FreeSurface(temp);
-#endif
 }
+#endif
 
 class PerformanceCounter
 {
@@ -437,7 +334,6 @@ private:
 static rFastForwardCommandLineAnalyzer analyzer;
 
 rSysDep::rSwapOptimize rSysDep::swapOptimize_ = rSysDep::rSwap_Auto;
-rSysDep::rFramedropTolerance rSysDep::framedropTolerance_ = rSysDep::rSwap_Normal;
 
 // random benchmarks. Median of three runs.
 // rSwap_Latency          : 382.841
@@ -574,7 +470,6 @@ swap
 static bool sr_needClear = true;
 
 static REAL sr_swapDelayFactor = .5f;
-static tConfItem< REAL > sr_swapDelayFactorCI("SWAP_LATENCY_DELAY_FACTOR", sr_swapDelayFactor );
 
 
 // measures time wasted on waiting for swaps
@@ -661,11 +556,8 @@ public:
         // do the actual buffer swap.
         if( reallyDoIt )
         {
-#if SDL_VERSION_ATLEAST(2,0,0)
-            SDL_GL_SwapWindow(sr_screen);
-#else
-            SDL_GL_SwapBuffers();
-#endif
+            if (renderer)
+                renderer->SwapBuffers();
 
 #ifdef DEBUG_SWAP_X
             {
@@ -702,14 +594,14 @@ public:
             // another extra finish if we're planning to to add delays.
             // we only want to measure the time spent waiting for vsync,
             // not the time waiting for rendering to finish.
-            glFinish();
+            RenderFinish();
         }
 
         Swap(swap);
 
         // flush
         double start = Time();
-        glFinish();
+        RenderFinish();
         REAL ret = Time() - start;
 
         AdvanceClear();
@@ -722,7 +614,7 @@ public:
     {
         REAL ret;
 
-        if( rGLFence::Available() )
+        if( rFence::Available() )
         {
             // oddly enough, on NVidia cards, the Swap() already
             // eats up the idle time; for the return value to
@@ -732,7 +624,7 @@ public:
 
             Swap(swap);
 
-            static rGLFence & fence = sr_GetFence();
+            static rFence & fence = sr_GetFence();
 
             // finish last frame's fence
             fence.Finish();
@@ -749,7 +641,7 @@ public:
             double start = Time();
 
             // flush
-            glFinish();
+            RenderFinish();
             ret = Time() - start;
 
             Swap(swap);
@@ -781,7 +673,7 @@ public:
             break;
         case rSysDep::rSwap_ThroughputFlush:
             Swap(swap);
-            glFlush();
+            RenderFlush();
             AdvanceClear();
             break;
         case rSysDep::rSwap_Throughput:
@@ -838,24 +730,6 @@ public:
     }
 protected:
     // one frame every so many seconds is tolarated
-    static REAL FrameDropTolerance()
-    {
-        switch (rSysDep::framedropTolerance_)
-        {
-        case rSysDep::rSwap_Lenient:
-            return 20;
-            break;
-        case rSysDep::rSwap_Normal:
-            return 60;
-            break;
-        case rSysDep::rSwap_Strict:
-            return 600;
-            break;
-        default:
-            return 60*60*24;
-            break;
-        }
-    }
 
     // call after swapping
     void StopSwap( REAL timeSpentWaiting, rSysDep::rSwapOptimize opt )
@@ -906,7 +780,7 @@ protected:
                 // drops.
                 static double lastDrop = now-1;
                 REAL weight = (now - lastDrop)/3.0f;
-                weight = weight * exp(-3*weight/FrameDropTolerance());
+                weight = weight * exp(-3*weight/60.0f);
                 lastDrop = now;
                 if( weight > 1 )
                 {
@@ -978,12 +852,11 @@ protected:
         REAL newDelay = waitTimes_.GetMin() * sr_swapDelayFactor;
 
         // clear artificial delay if the current swap mode says so
-        if( opt == rSysDep::rSwap_Latency &&
-            rSysDep::framedropTolerance_ != rSysDep::rSwap_Draconic )
+        if( opt == rSysDep::rSwap_Latency )
         {
             // let delay factor recover so that there will be about at
             // most one dropped frame every so many
-            REAL recovery=2*timeSpent/FrameDropTolerance();
+            REAL recovery=2*timeSpent/60.0f;
             sr_swapDelayFactor = 1 - (1-sr_swapDelayFactor)*(1-(1-sr_swapDelayFactor)*delayFactorPenalty*recovery);
         }
         else
@@ -1005,9 +878,8 @@ protected:
         }
         delay_ = smoothDelay_;
 
-        // clear artificial delay if the current swap mode says so
-        if( opt != rSysDep::rSwap_Latency ||
-            rSysDep::framedropTolerance_ == rSysDep::rSwap_Draconic )
+        // clear artificial delay if not in latency mode
+        if( opt != rSysDep::rSwap_Latency )
         {
             delay_ = 0;
         }
@@ -1086,16 +958,17 @@ static bool sr_netSyncThreadGoOn = true;
 static rSysDep::rNetIdler * sr_netIdler = NULL;
 int sr_NetSyncThread(void *lockVoid)
 {
-    SDL_mutex *lock = (SDL_mutex *)lockVoid;
+    // SDL3: SDL_mutex → SDL_Mutex, SDL_mutexP → SDL_LockMutex, SDL_mutexV → SDL_UnlockMutex
+    SDL_Mutex *lock = (SDL_Mutex *)lockVoid;
 
-    SDL_mutexP(lock);
+    SDL_LockMutex(lock);
 
     while ( sr_netSyncThreadGoOn )
     {
-        SDL_mutexV(lock);
+        SDL_UnlockMutex(lock);
         // wait for network data
         bool toDo = sr_netIdler->Wait();
-        SDL_mutexP(lock);
+        SDL_LockMutex(lock);
 
         if ( toDo )
         {
@@ -1111,18 +984,20 @@ int sr_NetSyncThread(void *lockVoid)
         }
     }
 
-    SDL_mutexV(lock);
+    SDL_UnlockMutex(lock);
 
     return 0;
 }
 
 static SDL_Thread * sr_netSyncThread = NULL;
-static SDL_mutex * sr_netLock = NULL;
+static SDL_Mutex * sr_netLock = NULL;
 void rSysDep::StartNetSyncThread( rNetIdler * idler )
 {
     sr_netIdler = idler;
 
+#ifdef HAVE_LIBRUBY
     return; // BUG This thread is crashing ruby
+#endif
 
     // can't use thrading trouble while recording
     if ( tRecorder::IsRunning() )
@@ -1136,16 +1011,12 @@ void rSysDep::StartNetSyncThread( rNetIdler * idler )
         sr_netLock = SDL_CreateMutex();
 
     // start thread
-#if SDL_VERSION_ATLEAST(2,0,0)
     sr_netSyncThread = SDL_CreateThread( sr_NetSyncThread, "net_sync", sr_netLock );
-#else
-    sr_netSyncThread = SDL_CreateThread( sr_NetSyncThread, sr_netLock );
-#endif
     if ( !sr_netSyncThread )
         return;
 
     // lock mutex, the thread should only do work while the main thread is waiting for the refresh
-    SDL_mutexP( sr_netLock );
+    SDL_LockMutex( sr_netLock );
 }
 
 void rSysDep::StopNetSyncThread()
@@ -1153,7 +1024,7 @@ void rSysDep::StopNetSyncThread()
     // stop and delete thread
     if ( sr_netSyncThread )
     {
-        SDL_mutexV(  sr_netLock );
+        SDL_UnlockMutex(  sr_netLock );
         sr_netSyncThreadGoOn = false;
         SDL_WaitThread( sr_netSyncThread, NULL );
         sr_netSyncThread = NULL;
@@ -1179,197 +1050,19 @@ int NextPowerOfTwo( int in )
     return x;
 }
 
-bool sr_MotionBlurCore( REAL alpha, rTextureRenderTarget & blurTarget )
-{
-    sr_CheckGLError();
-
-    if ( alpha < 0 )
-        alpha = 0;
-
-    {
-        if ( blurTarget.IsTarget() )
-        {
-            blurTarget.Pop();
-
-            blurTarget.Select();
-
-            glDrawBuffer( GL_FRONT );
-
-            sr_CheckGLError();
-
-            // determine the texture coordinates of the lower right corner
-            REAL maxu = REAL(sr_screenWidth)/blurTarget.GetWidth();
-            REAL maxv = REAL(sr_screenHeight)/blurTarget.GetHeight();
-
-            glEnable(GL_TEXTURE_2D);
-
-            // blend the last frame and the current frame with the specified alpha value
-            glDisable( GL_DEPTH_TEST );
-            glDepthMask(0);
-
-            glMatrixMode( GL_PROJECTION );
-            glLoadIdentity();
-            glMatrixMode( GL_MODELVIEW );
-            glLoadIdentity();
-            glViewport(0,0,sr_screenWidth, sr_screenHeight);
-
-            glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MAG_FILTER,
-                            GL_NEAREST);
-            glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MIN_FILTER,
-                            GL_NEAREST);
-
-            glDisable(GL_ALPHA_TEST);
-            // glDisable(GL_BLEND);
-            glEnable(GL_BLEND);
-            glBlendFunc(GL_ONE_MINUS_SRC_ALPHA, GL_SRC_ALPHA);
-
-            glDisable(GL_LIGHTING);
-
-            glBegin( GL_QUADS );
-            glColor4f( 1,1,1,alpha );
-
-            glTexCoord2f( 0, 0 );
-            glVertex2f( -1, -1 );
-
-            glTexCoord2f( maxu, 0 );
-            glVertex2f( 1, -1 );
-
-            glTexCoord2f( maxu, maxv );
-            glVertex2f( 1, 1 );
-
-            glTexCoord2f( 0, maxv );
-            glVertex2f( -1, 1 );
-            glEnd();
-
-            sr_CheckGLError();
-
-            // clean up
-            glDepthMask(1);
-
-            glDrawBuffer( GL_BACK );
-        }
-
-        blurTarget.Push();
-
-        sr_CheckGLError();
-
-        return false;
-    }
-
-    return true;
-
-#if 0
-    GLenum error = glGetError();
-    if ( error != GL_NO_ERROR )
-        con << "GL error " << error << "\n";
-#endif
-}
-
-// frames from about this far apart get blended together
+// Motion blur was implemented on top of GL1/2-era FBOs via
+// rTextureRenderTarget (accumulation by blending the previous frame back
+// into the current one on a texture-render-target ping-pong). It has no
+// Vulkan equivalent and the underlying GL scaffolding is gone. The kept
+// symbol still owns the MOTION_BLUR_TIME config item (so saved user.cfg
+// files don't start flagging unknown keys) and returns true so callers
+// keep swapping normally.
 static REAL sr_motionBlurTime = .0075;
 static tSettingItem<REAL> c_mb( "MOTION_BLUR_TIME",
                                 sr_motionBlurTime );
 
-// blurs the motion, time is the current time
-bool sr_MotionBlur( double time, std::unique_ptr< rTextureRenderTarget > & blurTarget )
+bool sr_MotionBlur( double /*time*/ )
 {
-    static bool lastActive = false;
-    bool active = false;
-
-    // measure frame rendering time
-    static double lastTime = time;
-    REAL frameTime = time - lastTime;
-
-    if ( currentScreensetting.vSync == ArmageTron_VSync_MotionBlur )
-    {
-        // use hysteresis to autodisable motion blurring if rendering gets
-        // far too slow and reenable it if rendering gets fast enough again
-        static int hyster = 0;
-        static int thresh = 100;
-        active = lastActive;
-
-        if ( frameTime * 2 < sr_motionBlurTime )
-        {
-            if ( ++hyster > thresh )
-            {
-                active = true;
-                hyster = thresh;
-            }
-        }
-        else if ( frameTime > sr_motionBlurTime * 2 )
-        {
-            if ( --hyster < -thresh )
-            {
-                active = false;
-                hyster = -thresh;
-            }
-        }
-        else
-        {
-            if ( hyster < 0 )
-                ++hyster;
-            else
-                --hyster;
-        }
-
-        lastTime = time;
-    }
-
-    // really blur.
-    if ( lastActive )
-    {
-        // determine blur texture size
-        int blurWidth = NextPowerOfTwo( sr_screenWidth );
-        int blurHeight = NextPowerOfTwo( sr_screenHeight );
-
-        // destroy existing blur texture if it is too small
-        if ( blurTarget.get() && ( blurTarget->GetWidth() < blurWidth || blurTarget->GetHeight() < blurHeight ) )
-        {
-            blurTarget.reset();
-        }
-
-        // create blur texture
-        if ( !blurTarget.get() )
-        {
-            try
-            {
-                blurTarget.reset( tNEW( rTextureRenderTarget )( blurWidth, blurHeight ) );
-            }
-            catch( rExceptionGLEW const & e )
-            {
-                // unsupported. Disable motion blur.
-                currentScreensetting.vSync = ArmageTron_VSync_Off;
-                lastActive = false;
-
-                con << tOutput("$screen_vsync_motionblur_unsupported");
-
-                return true;
-            }
-        }
-
-        // really blur
-        bool ret = sr_MotionBlurCore( 1 - frameTime / sr_motionBlurTime, *blurTarget );
-
-        // store active value for the next frame
-        lastActive = active;
-
-        // if the next frame won't be blurred, deactivate rendering to the texture
-        if ( !active )
-        {
-            blurTarget->Pop();
-        }
-
-        return ret;
-    }
-
-    lastActive = active;
-
-    // no motion blur happened when we got here
-    if ( blurTarget.get() && blurTarget->IsTarget() )
-    {
-        blurTarget->Pop();
-    }
-
     return true;
 }
 
@@ -1400,8 +1093,6 @@ void sr_LimitFPS()
 }
 
 void rSysDep::SwapGL(){
-    static std::unique_ptr< rTextureRenderTarget > blurTarget;
-
     if ( s_benchmark )
     {
         static PerformanceCounter counter;
@@ -1497,6 +1188,12 @@ void rSysDep::SwapGL(){
     rPerFrameTaskRuby::DoPerFrameTasks();
 #endif
 
+    // Execute HUD phase for geometry submitted by per-frame tasks (console,
+    // cockpit, text fields). The main render callback already executed its own
+    // HUD phase, but ExecutePhase clears buckets after rendering, so this
+    // only renders what per-frame tasks submitted. No-op if nothing was queued.
+    rRenderQueue::Instance().ExecutePhase(rRenderPhase::HUD);
+
     // unlock the mutex while waiting for the swap operation to finish
     // SDL_mutexV(  sr_netLock );
     // sr_LockSDL();
@@ -1508,9 +1205,10 @@ void rSysDep::SwapGL(){
     else if (s_videoout)
         make_screenshot();
 
-    // actiate motion blur (does not use the game state, so it's OK to call here )
-    bool shouldSwap = sr_MotionBlur( time, blurTarget );
-    sr_SwapTime().Finish( shouldSwap );
+    // Motion blur is a legacy GL1/2 effect that no longer functions under
+    // the Vulkan renderer (see sr_MotionBlur above). Always swap.
+    (void)sr_MotionBlur( time );
+    sr_SwapTime().Finish( true );
 
     // sr_UnlockSDL();
     // lock mutex again
@@ -1554,7 +1252,8 @@ void rSysDep::SwapGL(){
 #endif // dedicated
 
 #ifndef DEDICATED
-static SDL_mutex *mut;
+// SDL3: SDL_mutex → SDL_Mutex
+static SDL_Mutex *mut;
 
 static void stuff_init(){
     mut=SDL_CreateMutex();
@@ -1563,32 +1262,30 @@ static void stuff_init(){
 static tInitExit stuff_ie(&stuff_init);
 #endif
 
+#ifndef DEDICATED
 void sr_LockSDL(){
     //std::cerr << "locking...";
-#ifndef DEDICATED
 #ifndef WIN32
     //SDL_mutexP(mut);
-#endif
 #endif
     //std::cerr << " locked!\n";
 }
 
 void sr_UnlockSDL(){
     //std::cerr << "unlocking...";
-#ifndef DEDICATED
 #ifndef WIN32
     //SDL_mutexV(mut);
 #endif
-#endif
     //std::cerr << " unlocked!\n";
 }
+#endif // DEDICATED
 
 #ifndef DEDICATED
 void  rSysDep::ClearGL(){
     if (sr_glOut && sr_needClear )
     {
-        glClearColor(0.0,0.0,0.0,1.0);
-        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+        RenderClearColor(0.0,0.0,0.0,1.0);
+        RenderClear(true, true);
     }
     sr_needClear = true;
 }

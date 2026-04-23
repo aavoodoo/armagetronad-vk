@@ -32,8 +32,9 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 #include "tArray.h"
 #include "tLinkedList.h"
 #include <math.h>
-#include "rGL.h"
-#include "rDisplayList.h"
+#include <memory>
+
+class rModelMesh;
 
 class Vec3{
 public:
@@ -46,8 +47,6 @@ public:
     Vec3 operator*(REAL y){return Vec3(x[0]*y,x[1]*y,x[2]*y);}
     void operator+=(const Vec3 &y){x[0]+=y.x[0];x[1]+=y.x[1];x[2]+=y.x[2];}
 
-    void RenderVertex();
-    void RenderNormal();
 };
 
 class rModelFace{
@@ -59,7 +58,8 @@ public:
 
 class rModel
 {
-    rDisplayList displayList_;
+    std::unique_ptr<rModelMesh> mesh_;  //!< VBO-based mesh
+    bool meshBuilt_;                     //!< Whether mesh has been built
 
     tArray<Vec3> vertices;
     tArray<Vec3> texVert;
@@ -71,14 +71,25 @@ class rModel
     explicit rModel(const char *fileName);
     rModel(rModel const &);
     ~rModel();
+
+    //! Build VBO mesh from loaded data
+    void BuildMesh();
+
+    //! Render using VBO mesh
+    void RenderVBO();
+
 public:
     //! returns a model from the cache
     static rModel * GetModel(const char * filename);
 
     //! clears the model cache
     static void ClearCache();
-    
+
     void Render();
+
+    //! Get the underlying mesh (for instanced rendering cache key).
+    //! Builds the mesh if not already built.
+    rModelMesh& GetMesh();
 };
 
 #endif

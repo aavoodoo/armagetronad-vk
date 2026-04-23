@@ -28,14 +28,13 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 #include "eWall.h"
 #include "math.h"
 #include "rTexture.h"
-#include "rDisplayList.h"
-#include "eTimer.h"
 #include "rScreen.h"
 #include "eAdvWall.h"
 #include "eCamera.h"
 #include "tConfiguration.h"
 #include "eRectangle.h"
 #include "rRender.h"
+#include "../tron/gWall.h"
 
 #include <vector>
 
@@ -120,7 +119,6 @@ static tSettingItem<bool> se_RimWrapYConf
 ("RIM_WALL_WRAP_Y",se_RimWrapY);
 
 #ifndef DEDICATED
-static rDisplayList se_rimDisplayList;
 
 extern bool sg_MoviePack();
 
@@ -139,27 +137,27 @@ static rFileTexture se_RimWallWrap(rTextureGroups::TEX_WALL,"textures/rim_wall.p
 void eWallRim::RenderAll( eCamera * camera )
 {
 #ifndef DEDICATED
-    // call or fill display list
-    if ( se_rimDisplayList.Call() )
-    {
-        return;
-    }
-    rDisplayListFiller filler( se_rimDisplayList );
+    RenderEnableState(rCapability::DepthTest);
+    RenderDisableState(rCapability::CullFace);
 
-    glEnable(GL_DEPTH_TEST);
-    glDisable(GL_CULL_FACE);
-    
     if ( !sg_MoviePack() )
     {
         ( se_RimWrapY ? se_RimWallWrap : se_RimWallNoWrap).Select();
     }
 
+    // Collect all rim wall geometry into batch accumulators
+    gWallRim_BeginBatch();
+
     for(int i=se_rimWalls.Len()-1;i>=0;i--){
-        se_rimWalls(i)->RenderReal( rDisplayList::IsRecording() ? 0 : camera );
+        se_rimWalls(i)->RenderReal( camera );
     }
-    RenderEnd();
-    
-    glEnable(GL_CULL_FACE);
+
+    // Submit and render all accumulated geometry
+    rITexture* defaultTex = sg_MoviePack() ? nullptr
+        : &( se_RimWrapY ? se_RimWallWrap : se_RimWallNoWrap );
+    gWallRim_FlushBatch(defaultTex);
+
+    RenderEnableState(rCapability::CullFace);
 #endif
 }
 
@@ -171,7 +169,8 @@ void eWallRim::RenderAll( eCamera * camera )
 void eWallRim::DestroyDisplayList( int inhibitGeneration )
 {
 #ifndef DEDICATED
-    se_rimDisplayList.Clear( inhibitGeneration );
+    (void)inhibitGeneration;
+    // No cached state to invalidate — rim walls submit to render queue each frame
 #endif
 }
 
@@ -208,6 +207,10 @@ REAL eWallRim::Clip( const eCoord & in, eCoord & out, REAL offset )
 
 const eRectangle & eWallRim::GetBounds( void )
 {
+    // NOTE: se_rimWallBounds is accessed from the camera/render path (read) and
+    // updated from the game loop via UpdateBounds() (write). Both calls happen
+    // on the same thread (ArmagetronAD has a single game/render thread), so no
+    // synchronization is needed. If threading is added later, add a mutex here.
     return se_rimWallBounds;
 }
 

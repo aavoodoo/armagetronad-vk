@@ -25,13 +25,41 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 
 */
 
-#include <boost/lexical_cast.hpp>
+#include <charconv>
+#include <string>
 
 #include "vCore.h"
 
 namespace vValue {
 namespace Expr {
 namespace Core {
+
+// Helper visitor for converting Variant to int
+struct ToIntVisitor {
+    int operator()(int i) const { return i; }
+    int operator()(float f) const { return static_cast<int>(f); }
+    int operator()(const std::string& s) const {
+        int result = 0;
+        auto [ptr, ec] = std::from_chars(s.data(), s.data() + s.size(), result);
+        if (ec == std::errc()) {
+            return result;
+        }
+        return 0;
+    }
+};
+
+// Helper visitor for converting Variant to float
+struct ToFloatVisitor {
+    float operator()(int i) const { return static_cast<float>(i); }
+    float operator()(float f) const { return f; }
+    float operator()(const std::string& s) const {
+        try {
+            return std::stof(s);
+        } catch (...) {
+            return 0.0f;
+        }
+    }
+};
 
 //! @param precision the number of digits after the decimal to be used when outputting a string
 //! @param minsize   the minimum width when outputting a string
@@ -78,26 +106,14 @@ template<> Variant Base::Get<Variant>() const { return GetValue(); }
 //! This should be overwritten in a derived class if it's sensible to convert the value to an integer
 //! @returns 0
 int Base::GetInt(void) const {
-    try {
-        return boost::lexical_cast<int>(GetValue());
-    }
-    catch(boost::bad_lexical_cast &)
-    {
-        return 0;
-    }
+    return std::visit(ToIntVisitor{}, GetValue());
 }
 template<> int     Base::Get<int    >() const { return GetInt(); }
 
 //! This should be overwritten in a derived class if it's sensible to convert the value to a floating- point number
 //! @returns a stream conversion of the value
 float Base::GetFloat(void) const {
-    try {
-        return boost::lexical_cast<float>(GetValue());
-    }
-    catch(boost::bad_lexical_cast &)
-    {
-        return 0.0;
-    }
+    return std::visit(ToFloatVisitor{}, GetValue());
 }
 template<> float   Base::Get<float  >() const { return GetFloat(); }
 
@@ -105,9 +121,12 @@ template<> float   Base::Get<float  >() const { return GetFloat(); }
 //! @returns GetValue streamed to a tString
 tString Base::GetString(Base const *other) const {
     Variant v = GetValue();
-    if (std::string *iptr = boost::get<std::string>(&v))
-            return *iptr;
-    return Output(v, other);
+    if (auto* sptr = std::get_if<std::string>(&v))
+            return *sptr;
+    // Use std::visit to extract the actual value for formatting
+    return std::visit([this, other](auto&& arg) {
+        return Output(arg, other);
+    }, v);
 }
 template<> tString Base::Get<tString>() const { return GetString(); }
 

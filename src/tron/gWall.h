@@ -34,15 +34,19 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 #include "eAdvWall.h"
 #include "nNetObject.h"
 #include "gExplosion.h"
-#include "rDisplayList.h"
 //#include "nObserver.h"
 class gExplosion;
 class gCycle;
 class gCycleMovement;
 class gNetPlayerWall;
 class eTempEdge;
+class rWallGeometryCollector;
 
 namespace Game { class PlayerWallSync; }
+
+//! Clear and flush rim wall batch geometry accumulators
+void gWallRim_BeginBatch();
+void gWallRim_FlushBatch(class rITexture* defaultTexture);
 
 class gWallRim:public eWallRim{
 public:
@@ -241,9 +245,9 @@ public:
     };
 
     // virtual void Render(const eCamera *cam);
-    void RenderList(bool list, gWallRenderMode );
-    virtual void RenderNormal(const eCoord &x1,const eCoord &x2,REAL ta,REAL te,REAL r,REAL g,REAL b,REAL a, gWallRenderMode mode );
-    virtual void RenderBegin(const eCoord &x1,const eCoord &x2,REAL ta,REAL te,REAL ra,REAL rb,REAL r,REAL g,REAL b,REAL a, gWallRenderMode mode );
+    void RenderList(bool list, gWallRenderMode, rWallGeometryCollector* collector );
+    virtual void RenderNormal(const eCoord &x1,const eCoord &x2,REAL ta,REAL te,REAL r,REAL g,REAL b,REAL a, gWallRenderMode mode, rWallGeometryCollector* collector );
+    virtual void RenderBegin(const eCoord &x1,const eCoord &x2,REAL ta,REAL te,REAL ra,REAL rb,REAL r,REAL g,REAL b,REAL a, gWallRenderMode mode, rWallGeometryCollector* collector );
 #endif
 
     virtual bool ActionOnQuit();
@@ -264,13 +268,14 @@ public:
 
     void Check() const;
 
-    bool CanHaveDisplayList()
+    //! checks whether wall is eligible for VBO caching
+    bool CanBeCached()
     {
-        return displayListInhibition_ == 0;
+        return cacheInhibition_ == 0;
     }
 
-    //! clears the display list (possibility)
-    void ClearDisplayList( int inhibitThis = 2, int inhibitCycle = 0 );
+    //! invalidates VBO cache eligibility (inhibits caching for a number of frames)
+    void InvalidateCache( int inhibitThis = 2, int inhibitCycle = 0 );
 
     // even better new stuff: protocol buffers. The functions are non-virtual; they
     // get called over the descriptor:
@@ -287,10 +292,16 @@ private:
 
     tArray<gPlayerWallCoord> coords_;
 
-    int displayListInhibition_;
+    int cacheInhibition_;  //!< inhibits VBO caching for this many frames
 };
 
 extern tList<gNetPlayerWall> sg_netPlayerWalls;
 extern tList<gNetPlayerWall> sg_netPlayerWallsGridded;
+
+#ifndef DEDICATED
+//! Set flag indicating new wall renderer is active
+//! When active, InvalidateCache() for begin segments is suppressed
+void gWall_SetNewRendererActive(bool active);
+#endif
 
 #endif

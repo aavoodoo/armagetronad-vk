@@ -36,19 +36,19 @@ public:
 
     eFloor();
     virtual ~eFloor();
-    virtual void glFloorColor(REAL alpha, REAL intens)=0;
+    virtual void SetFloorColor(REAL alpha, REAL intens)=0;
     virtual void FloorColor(REAL& r, REAL& g, REAL &b)=0;
-    virtual void glFloorTexture()=0;
-    virtual void glFloorTexture_a()=0;
-    virtual void glFloorTexture_b()=0;
+    virtual void SelectFloorTexture()=0;
+    virtual void SelectFloorTextureA()=0;
+    virtual void SelectFloorTextureB()=0;
     virtual REAL GridSize()=0;
     virtual bool BlackSky()=0;
 };
 
-void se_glFloorColor(REAL alpha = 1, REAL intens = 1);
-void se_glFloorTexture();
-void se_glFloorTexture_a();
-void se_glFloorTexture_b();
+void se_SetFloorColor(REAL alpha = 1, REAL intens = 1);
+void se_SelectFloorTexture();
+void se_SelectFloorTextureA();
+void se_SelectFloorTextureB();
 
 REAL se_GridSize();
 bool se_BlackSky();

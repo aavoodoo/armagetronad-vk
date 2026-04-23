@@ -1,3 +1,6 @@
+#include "aa_config.h"
+
+#ifdef HAVE_LIBSDL_MIXER
 
 #include "eChannelSDLMixer.h"
 
@@ -223,4 +226,6 @@ void eChannel::LoopSound(eWavData& sound) {
     }
 #endif
 }
+
+#endif // HAVE_LIBSDL_MIXER
 

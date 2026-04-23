@@ -29,6 +29,10 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 #include "gCycle.h"
 #include "nConfig.h"
 #include "rModel.h"
+#include "rModelMesh.h"
+#ifndef DEDICATED
+#include "rCycleRenderer.h"
+#endif
 //#include "eTess.h"
 #include "eGrid.h"
 #include "rTexture.h"
@@ -68,6 +72,13 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 #ifndef DEDICATED
 #define DONTDOIT
 #include "rRender.h"
+#include "rMatrixStack.h"
+#include "rVertex.h"
+#include "rRenderQueue.h"
+#include "rRenderConfig.h"
+#include "rRendererState.h"
+#include "rStaticMesh.h"
+#include "rWallGeometryCollector.h"
 #endif
 
 // TODO: get rid of this
@@ -102,6 +113,13 @@ static bool sg_predictWalls=true;
 static tSettingItem< bool > sg_predictWallsConf( "PREDICT_WALLS", sg_predictWalls );
 #endif
 
+#ifndef DEDICATED
+// New optimized wall renderer with separated static/streaming buffers
+// Eliminates cache thrashing from begin segments and reduces vertex bandwidth
+static bool sg_useNewWallRenderer = true;
+static tSettingItem<bool> sg_useNewWallRendererConf("USE_NEW_WALL_RENDERER", sg_useNewWallRenderer);
+#endif
+
 //  *****************************************************************
 
 static nNetObjectDescriptor< gCycle, Game::CycleSync > cycle_init( 320 );
@@ -112,8 +130,6 @@ static nNetObjectDescriptor< gCycle, Game::CycleSync > cycle_init( 320 );
 
 //tCONTROLLED_PTR(ePlayerNetID)   lastEnemyInfluence;  	// the last enemy wall we encountered
 //REAL							lastTime;				// the time it was drawn at
-bool headlights=0;
-extern bool cycleprograminited;
 
 static float sg_cycleSyncSmoothTime = .1f;
 static tSettingItem<float> conf_smoothTime ("CYCLE_SMOOTH_TIME", sg_cycleSyncSmoothTime);
@@ -146,12 +162,12 @@ void gCycle::PrivateSettings()
     c_per  =&c_er;
 }
 
-// sound speed divisor
-static REAL sg_speedCycleSound=15;
+// sound speed divisor (non-static for access from engine sound code)
+REAL sg_speedCycleSound=15;
 static nSettingItem<REAL> c_ss("CYCLE_SOUND_SPEED",
                                sg_speedCycleSound);
 
-static REAL sg_speedCycleSoundMach=0.1f;
+REAL sg_speedCycleSoundMach=0.1f;
 static tSettingItem<REAL> c_ssm("CYCLE_SOUND_MACH",
                                sg_speedCycleSoundMach);
 
@@ -264,18 +280,37 @@ void gTextureCycle::ProcessImage(SDL_Surface *im)
 {
 #ifndef DEDICATED
     // blend transparent texture parts with cycle color
-    tVERIFY(im->format->BytesPerPixel == 4);
-    GLubyte R=int(color_.r_*255);
-    GLubyte G=int(color_.g_*255);
-    GLubyte B=int(color_.b_*255);
+    tVERIFY(AA_GetSurfaceBytesPerPixel(im) == 4);
+    uint8_t R=int(color_.r_*255);
+    uint8_t G=int(color_.g_*255);
+    uint8_t B=int(color_.b_*255);
 
-    GLubyte *pixels =reinterpret_cast<GLubyte *>(im->pixels);
+    uint8_t *pixels =reinterpret_cast<uint8_t *>(im->pixels);
+
+    // Determine byte offsets based on surface format
+    // If Rmask == 0x000000ff, format is RGBA (R in lowest byte)
+    // Otherwise, format is likely BGRA (B in lowest byte)
+    int rOffset, gOffset, bOffset;
+    if (AA_GetSurfaceRmask(im) == 0x000000ff)
+    {
+        // RGBA format
+        rOffset = 0;
+        gOffset = 1;
+        bOffset = 2;
+    }
+    else
+    {
+        // BGRA format (common on little-endian systems)
+        rOffset = 2;
+        gOffset = 1;
+        bOffset = 0;
+    }
 
     for(int i=im->w*im->h-1;i>=0;i--){
-        GLubyte alpha=pixels[4*i+3];
-        pixels[4*i  ] = (alpha * pixels[4*i  ] + (255-alpha)*R) >> 8;
-        pixels[4*i+1] = (alpha * pixels[4*i+1] + (255-alpha)*G) >> 8;
-        pixels[4*i+2] = (alpha * pixels[4*i+2] + (255-alpha)*B) >> 8;
+        uint8_t alpha=pixels[4*i+3];
+        pixels[4*i+rOffset] = (alpha * pixels[4*i+rOffset] + (255-alpha)*R) >> 8;
+        pixels[4*i+gOffset] = (alpha * pixels[4*i+gOffset] + (255-alpha)*G) >> 8;
+        pixels[4*i+bOffset] = (alpha * pixels[4*i+bOffset] + (255-alpha)*B) >> 8;
         pixels[4*i+3] = 255;
     }
 #endif
@@ -285,18 +320,27 @@ void gTextureCycle::OnSelect(bool enforce){
 #ifndef DEDICATED
     rISurfaceTexture::OnSelect(enforce);
 
-    if(rTextureGroups::TextureMode[rTextureGroups::TEX_OBJ]<0){
+    // BUGFIX: Always set material for cycle colors, not just when texture mode < 0
+    // The old condition was: if(rTextureGroups::TextureMode[rTextureGroups::TEX_OBJ]<0)
+    // But with GL3 renderer, texture mode is GL_NEAREST_MIPMAP_NEAREST (positive value),
+    // so materials were never being set, causing white cycles.
+    {
         REAL R=color_.r_,G=color_.g_,B=color_.b_;
         if(wheel){
             R*=.7;
             G*=.7;
             B*=.7;
         }
-        glColor3f(R,G,B);
-        GLfloat color[4]={R,G,B,1};
+        // Set vertex color and material properties to player/team color
+        // Note: Do NOT enable GL_COLOR_MATERIAL here - the rendering code calls
+        // Color(1,1,1) after Select(), which would override the vertex color.
+        // Instead, rely on material diffuse being set correctly (used by GL3 shader
+        // when uColorMaterial is false).
+        Color(R,G,B);
+        REAL color[4]={R,G,B,1};
 
-        glMaterialfv(GL_FRONT_AND_BACK,GL_SPECULAR,color);
-        glMaterialfv(GL_FRONT_AND_BACK,GL_DIFFUSE,color);
+        RenderMaterial(rMaterialFace::FrontAndBack, rMaterialProperty::Specular, color);
+        RenderMaterial(rMaterialFace::FrontAndBack, rMaterialProperty::Diffuse, color);
     }
 #endif
 }
@@ -2229,28 +2273,29 @@ struct gCycleVisuals
 // renders a cycle even after it died
 class gCycleWallRenderer: public eReferencableGameObject
 {
+    friend class gCycle;  // allow gCycle::~gCycle() to null cycle_
 public:
     gCycleWallRenderer( gCycle * cycle )
     : eReferencableGameObject( cycle->Grid(), cycle->Position(), cycle->Direction(), cycle->CurrentFace(), true )
     , cycle_( cycle )
     {
+        cycle->wallRenderer_ = this;
         AddToList();
     }
 
-#if 0 // not required
     virtual ~gCycleWallRenderer()
     {
+        // Clear back-pointer so gCycle::~gCycle() doesn't try to null us again.
+        if ( cycle_ )
+            cycle_->wallRenderer_ = nullptr;
+        // cycle_ is a raw pointer — no Release() call, avoids pure-virtual crash
+        // when gCycle's vtable has already been reset during its destructor chain.
     }
 
-    virtual void OnRemoveFromGame()
-    {
-        eReferencableGameObject::OnRemoveFromGame();
-    }
-#endif
 private:
     virtual void Render( eCamera const * camera )
     {
-        cycle_->displayList_.RenderAll( camera, cycle_ );
+        cycle_->wallsCache_.RenderAll( camera, cycle_ );
     }
 
     virtual bool Timestep( REAL currentTime )
@@ -2262,10 +2307,11 @@ private:
 
         Move( cycle_->Position(), lastTime, currentTime );
 
-        return !cycle_->Alive() && !cycle_->displayList_.Walls();
+        return !cycle_->Alive() && !cycle_->wallsCache_.Walls();
     }
 
-    tJUST_CONTROLLED_PTR< gCycle > cycle_;
+    gCycle* cycle_;  // raw pointer — no AddRef/Release to avoid pure-virtual crash
+                     // when gCycle is mid-destructor; nulled by gCycle::~gCycle()
 };
 #endif
 
@@ -2505,6 +2551,16 @@ gCycle::~gCycle(){
     mixer.RemoveContinuous(CYCLE_MOTOR, this);
 
     tDESTROY(engine);
+
+#ifndef DEDICATED
+    // Null out the wall renderer's raw back-pointer before we're gone,
+    // so gCycleWallRenderer::~gCycleWallRenderer() doesn't use us.
+    if ( wallRenderer_ )
+    {
+        wallRenderer_->cycle_ = nullptr;
+        wallRenderer_ = nullptr;
+    }
+#endif
 
     this->RemoveFromGame();
 
@@ -4003,7 +4059,7 @@ public:
             cp[i] = (1 - factor) * cp[i] + factor * target.cp[i];
         }
     }
-    void toGl() const { glColor3f(cp[0], cp[1], cp[2]); }
+    void toGl() const { Color(cp[0], cp[1], cp[2]); }
 
     static const Colour white;
     static const Colour black;
@@ -4031,7 +4087,7 @@ private:
     REAL delay;
     Colour color;
 protected:
-    bool drawTriangle(eCoord loc, int winding, REAL lag, int inc);
+    bool drawTriangle(eCoord loc, int winding, REAL lag, int inc, std::vector<rVertex20>& verts, uint8_t r, uint8_t g, uint8_t b, uint8_t a);
 public:
     LagOMeterRenderer(gCycle* cycle) :
             directions(cycle->Grid()),
@@ -4043,37 +4099,43 @@ public:
     void render(REAL lag);
 };
 
-//! returns whether the sprial intersects its counterpart
-bool LagOMeterRenderer::drawTriangle(eCoord loc, int winding, REAL lag, int inc) {
+bool LagOMeterRenderer::drawTriangle(eCoord loc, int winding, REAL lag, int inc,
+                                      std::vector<rVertex20>& verts, uint8_t r, uint8_t g, uint8_t b, uint8_t a) {
     eCoord outer = loc + directions.get(winding) * lag;
     if (outer.y * inc > 0.01f) {
         eCoord oldOuter = loc + directions.get(winding - inc) * lag;
         eCoord d = outer - oldOuter;
         outer = oldOuter + d * (-oldOuter.y / d.y);
-        glVertex2f(outer.x, outer.y);
+        verts.push_back(rVertex20(outer.x, outer.y, 0, r, g, b, a, 0, 0));
         return true;
     } else {
-        glVertex2f(outer.x, outer.y);
+        verts.push_back(rVertex20(outer.x, outer.y, 0, r, g, b, a, 0, 0));
         if (lag > delay) {
-            if (drawTriangle(loc + directions.get(winding + inc) * delay, winding + inc, lag - delay, inc)) return true;
+            if (drawTriangle(loc + directions.get(winding + inc) * delay, winding + inc, lag - delay, inc, verts, r, g, b, a)) return true;
         } else {
             outer = loc + directions.get(winding + inc) * lag;
-            glVertex2f(outer.x, outer.y);
+            verts.push_back(rVertex20(outer.x, outer.y, 0, r, g, b, a, 0, 0));
         }
-        glVertex2f(loc.x, loc.y);
+        verts.push_back(rVertex20(loc.x, loc.y, 0, r, g, b, a, 0, 0));
         return false;
     }
 }
 
 void LagOMeterRenderer::render(REAL lag) {
-    color.toGl();
-    BeginLineStrip();
-    drawTriangle(eCoord(0,0), directions.ahead(), lag, 1);
-    RenderEnd();
+    uint8_t cr = static_cast<uint8_t>(color.cp[0] * 255.0f);
+    uint8_t cg = static_cast<uint8_t>(color.cp[1] * 255.0f);
+    uint8_t cb = static_cast<uint8_t>(color.cp[2] * 255.0f);
+    uint8_t ca = 255;
 
-    BeginLineStrip();
-    drawTriangle(eCoord(0,0), directions.ahead(), lag, -1);
-    RenderEnd();
+    std::vector<rVertex20> strip1, strip2;
+    drawTriangle(eCoord(0,0), directions.ahead(), lag, 1, strip1, cr, cg, cb, ca);
+    drawTriangle(eCoord(0,0), directions.ahead(), lag, -1, strip2, cr, cg, cb, ca);
+
+    rRenderStateKey state = rRenderStateKey::Colored(rBlendMode::Opaque);
+    if (!strip1.empty())
+        rRenderQueue::Instance().SubmitLineStrip(rRenderPhase::OpaqueDynamic, state, strip1.data(), strip1.size());
+    if (!strip2.empty())
+        rRenderQueue::Instance().SubmitLineStrip(rRenderPhase::OpaqueDynamic, state, strip2.data(), strip2.size());
 }
 
 
@@ -4093,21 +4155,21 @@ public:
         eCoord inner = midle * .5f;
         eCoord outer = midle + directions.get(directions.ahead() + 2 * i) * .05f;
 
-        BeginLineStrip();
-        //Colour::black.toGl();
-        color.toGl();
-        glVertex2f(inner.x, inner.y);
+        uint8_t cr = static_cast<uint8_t>(color.cp[0] * 255.0f);
+        uint8_t cg = static_cast<uint8_t>(color.cp[1] * 255.0f);
+        uint8_t cb = static_cast<uint8_t>(color.cp[2] * 255.0f);
 
-
-        glVertex2f(midle.x, midle.y);
-
-        Colour::black.toGl();
-        glVertex2f(outer.x, outer.y);
-        RenderEnd();
+        rVertex20 strip[3] = {
+            rVertex20(inner.x, inner.y, 0, cr, cg, cb, 255, 0, 0),
+            rVertex20(midle.x, midle.y, 0, cr, cg, cb, 255, 0, 0),
+            rVertex20(outer.x, outer.y, 0, 0, 0, 0, 255, 0, 0)  // black
+        };
+        rRenderStateKey state = rRenderStateKey::Colored(rBlendMode::Opaque);
+        rRenderQueue::Instance().SubmitLineStrip(rRenderPhase::OpaqueDynamic, state, strip, 3);
     }
     void render() {
         //return; // disable, for now
-        glShadeModel(GL_SMOOTH);
+        // Note: RenderShadeModel removed - always smooth shading in GL3 renderer
         line(-1);
         line(0);
         line(1);
@@ -4137,24 +4199,56 @@ static void dir_eWall_select()
     }
 }
 
-gCycleWallsDisplayListManager::gCycleWallsDisplayListManager()
+gCycleWallsRenderCache::gCycleWallsRenderCache()
     : wallList_(0)
-    , wallsWithDisplayList_(0)
-    , wallsWithDisplayListMinDistance_(0)
-    , wallsInDisplayList_(0)
+    , cachedWalls_(0)
+    , cachedWallsMinDistance_(0)
+    , cachedWallCount_(0)
+    , lastStableThreshold_(0)
+    , useNewRenderer_(sg_useNewWallRenderer)
 {
+    if (useNewRenderer_)
+    {
+        geometryCollector_ = std::make_unique<rWallGeometryCollector>();
+    }
 }
 
-gCycleWallsDisplayListManager::~gCycleWallsDisplayListManager()
+gCycleWallsRenderCache::~gCycleWallsRenderCache()
 {
     while(wallList_)
         wallList_->Remove();
-    while(wallsWithDisplayList_)
-        wallsWithDisplayList_->Remove();
+    while(cachedWalls_)
+        cachedWalls_->Remove();
 }
 
+void gCycleWallsRenderCache::Clear( int /*inhibit*/ )
+{
+    if ( staticMesh_ )
+    {
+        staticMesh_->Invalidate();
+    }
+    if ( geometryCollector_ )
+    {
+        geometryCollector_->InvalidateStaticBuffer();
+    }
+}
 
-bool gCycleWallsDisplayListManager::CannotHaveList( REAL distance, gCycle const * cycle )
+void gCycleWallsRenderCache::InvalidateStreaming()
+{
+    // Streaming buffer is always cleared each frame, no action needed
+}
+
+void gCycleWallsRenderCache::InvalidateStatic()
+{
+    if ( geometryCollector_ )
+    {
+        geometryCollector_->InvalidateStaticBuffer();
+    }
+    // Also clear legacy cache
+    Clear(0);
+}
+
+bool gCycleWallsRenderCache::CannotCache( REAL distance, gCycle const * cycle )
 {
     return
             ( !cycle->Alive() && gCycle::WallsStayUpDelay() >= 0 && se_GameTime()-cycle->DeathTime()-gCycle::WallsStayUpDelay() > 0 ) 
@@ -4164,11 +4258,11 @@ bool gCycleWallsDisplayListManager::CannotHaveList( REAL distance, gCycle const 
             ( cycle->ThisWallsLength() > 0 && cycle->GetDistance() - cycle->ThisWallsLength() > distance );
 }
 
-void gCycleWallsDisplayListManager::RenderAllWithDisplayList( eCamera const * camera, gCycle * cycle )
+void gCycleWallsRenderCache::RenderCachedWalls( eCamera const * camera, gCycle * cycle )
 {
     dir_eWall_select();
 
-    glDisable(GL_CULL_FACE);
+    RenderDisableState(rCapability::CullFace);
     
     gNetPlayerWall * run = 0;
     // transfer walls with display list into their list
@@ -4178,7 +4272,7 @@ void gCycleWallsDisplayListManager::RenderAllWithDisplayList( eCamera const * ca
     while( run )
     {
         gNetPlayerWall * next = run->Next();
-        if ( run->CanHaveDisplayList() )
+        if ( run->CanBeCached() )
         {
             wallsWithPossibleDisplayList++;
         }
@@ -4194,134 +4288,276 @@ void gCycleWallsDisplayListManager::RenderAllWithDisplayList( eCamera const * ca
         run = next;
     }
 
-    // clear display list if needed
+    // clear display list/static mesh if needed
     bool tailExpired=false;
-    if ( CannotHaveList( wallsWithDisplayListMinDistance_, cycle ) )
+    if ( CannotCache( cachedWallsMinDistance_, cycle ) )
     {
         tailExpired=true;
-        displayList_.Clear(0);
+        Clear(0);
     }
-    // check if enough new walls are present to warrant altering the display list
+    // check if enough new walls are present to warrant altering the cache
     else if ( wallsWithPossibleDisplayList >= 3 ||
-         wallsWithPossibleDisplayList * 5 > wallsInDisplayList_ )
+         wallsWithPossibleDisplayList * 5 > cachedWallCount_ )
     {
-        // yes? Ok, rebuild the list in this case, too
-        displayList_.Clear(0);
+        // yes? Ok, rebuild the cache in this case, too
+        Clear(0);
     }
 
-    // call display list
-    if ( displayList_.Call() )
+    // Modern VBO path: check if static mesh is built and valid
+    if ( staticMesh_ && staticMesh_->IsBuilt() )
     {
+        sr_SetTextureEnabled(true);
+        staticMesh_->Render();
         return;
     }
 
-    // remove and render walls without display list
-    run = wallsWithDisplayList_;
+    // remove walls that no longer belong in the cached set
+    run = cachedWalls_;
     while( run )
     {
         gNetPlayerWall * next = run->Next();
-        if ( !run->CanHaveDisplayList() || ( tailExpired && wallsWithDisplayListMinDistance_ >= run->BegPos() ) )
+        if ( !run->CanBeCached() || ( tailExpired && cachedWallsMinDistance_ >= run->BegPos() ) )
         {
             run->Insert( wallList_ );
         }
         run = next;
     }
 
+    // move walls that can be cached into the cached set
     if ( wallsWithPossibleDisplayList > 0 )
     {
         run = wallList_;
         while( run )
         {
             gNetPlayerWall * next = run->Next();
-            if ( run->CanHaveDisplayList() )
+            if ( run->CanBeCached() )
             {
-                run->Insert( wallsWithDisplayList_ );
-            
-                // clear the wall's own display list, it will no longer be needed
-                run->ClearDisplayList(0, -1);
+                run->Insert( cachedWalls_ );
+
+                // clear the wall's own inhibition, it's now in the cached set
+                run->InvalidateCache(0, -1);
             }
-        
+
             run = next;
         }
     }
 
-    if ( !wallsWithDisplayList_ )
+    if ( !cachedWalls_ )
     {
         return;
     }
 
-    // fill display list
-    rDisplayListFiller filler( displayList_ );
-
-    if ( rDisplayList::IsRecording() )
+    // VBO path: collect geometry into static mesh
+    if ( !staticMesh_ )
     {
-        wallsWithDisplayListMinDistance_ = 1E+30;
-        wallsInDisplayList_ = 0;
-
-        // bookkeeping of walls in the display list
-        run = wallsWithDisplayList_;
-        while( run )
-        {
-            gNetPlayerWall * next = run->Next();
-            if ( run->BegPos() < wallsWithDisplayListMinDistance_ )
-            {
-                wallsWithDisplayListMinDistance_ = run->BegPos();
-            }
-            wallsInDisplayList_++;
-            run = next;
-        }
+        staticMesh_ = std::make_unique<rStaticMesh>();
     }
 
-    // render walls with display list
-    RenderAll( camera, cycle, wallsWithDisplayList_ );
+    // Bookkeeping
+    cachedWallsMinDistance_ = 1E+30;
+    cachedWallCount_ = 0;
+    run = cachedWalls_;
+    while( run )
+    {
+        gNetPlayerWall * next = run->Next();
+        if ( run->BegPos() < cachedWallsMinDistance_ )
+        {
+            cachedWallsMinDistance_ = run->BegPos();
+        }
+        cachedWallCount_++;
+        run = next;
+    }
+
+    // Legacy static-mesh caching bridged immediate-mode GL calls into an
+    // rStaticMesh via rGeometryCollector. Both have been removed along with
+    // the GL3 renderer, so just fall through to direct rendering. This path
+    // is only reachable when USE_NEW_WALL_RENDERER is disabled.
+    sr_SetTextureEnabled(true);
+    RenderAll( camera, cycle, cachedWalls_ );
 }
 
-void gCycleWallsDisplayListManager::RenderAll( eCamera const * camera, gCycle * cycle, gNetPlayerWall * list )
+void gCycleWallsRenderCache::RenderAll( eCamera const * camera, gCycle * cycle, gNetPlayerWall * list )
 {
     if( !list )
     {
         return;
     }
 
-    // first, render all lines
-    sr_DepthOffset(true);
-    if ( rTextureGroups::TextureMode[rTextureGroups::TEX_WALL] != 0 )
-        glDisable(GL_TEXTURE_2D);
-    
+    // Create a temporary geometry collector for this render pass
+    // This eliminates the need for immediate mode rendering
+    auto collector = std::make_unique<rWallGeometryCollector>();
+
+    collector->BeginFrame();
+
+    // Collect geometry from all walls (both lines and quads)
     gNetPlayerWall * run = list;
     while( run )
     {
         gNetPlayerWall * next = run->Next();
-        run->RenderList( true, gNetPlayerWall::gWallRenderMode_Lines );
+        run->RenderList( true, static_cast<gNetPlayerWall::gWallRenderMode>(
+            gNetPlayerWall::gWallRenderMode_Lines | gNetPlayerWall::gWallRenderMode_Quads),
+            collector.get() );
         run = next;
     }
 
-    RenderEnd();
-    sr_DepthOffset(false);
+    // Upload collected geometry to GPU
+    collector->EndFrame();
+
+    // Set render context for player walls so the uber shader's emissive
+    // hook for cycle walls fires (context 7). Without this the context is
+    // whatever the last caller set — typically Game3D generic — and walls
+    // don't contribute to the bloom emissive attachment.
+    rRenderContext prevCtx = sr_GetRenderContext();
+    sr_SetRenderContext(rRenderContext::Game3D_PlayerWalls);
+
+    // Render lines pass
+    sr_DepthOffset(true);
     if ( rTextureGroups::TextureMode[rTextureGroups::TEX_WALL] != 0 )
-        glEnable(GL_TEXTURE_2D);
-    
-    run = list;
-    while( run )
-    {
-        gNetPlayerWall * next = run->Next();
-        run->RenderList( true, gNetPlayerWall::gWallRenderMode_Quads );
-        run = next;
-    }
+        RenderDisableState(rCapability::Texture2D);
 
-    RenderEnd();
+    collector->Render(true, false);  // Render only lines
+
+    sr_DepthOffset(false);
+
+    // Render quads pass
+    if ( rTextureGroups::TextureMode[rTextureGroups::TEX_WALL] != 0 )
+        RenderEnableState(rCapability::Texture2D);
+
+    collector->Render(false, true);  // Render only quads
+
+    sr_SetRenderContext(prevCtx);
 }
 
-void gCycleWallsDisplayListManager::RenderAll( eCamera const * camera, gCycle * cycle )
+void gCycleWallsRenderCache::RenderAll( eCamera const * camera, gCycle * cycle )
 {
-    // render everything you can with a display list
-    RenderAllWithDisplayList( camera, cycle );
+    // Route to new or legacy renderer based on configuration
+    if ( useNewRenderer_ && geometryCollector_ )
+    {
+        RenderAllNew( camera, cycle );
+        return;
+    }
+
+    // Legacy path: render everything you can with VBO cache
+    RenderCachedWalls( camera, cycle );
 
     // then, render the rest
     RenderAll( camera, cycle, wallList_ );
 }
 
+// SEGLEN and gBEG_LEN are defined in gWall.cpp, declare them here
+extern REAL gBEG_LEN;
+#define SEGLEN 2.5
+
+void gCycleWallsRenderCache::RenderAllNew( eCamera const * camera, gCycle * cycle )
+{
+    if ( !cycle || !geometryCollector_ )
+    {
+        return;
+    }
+
+    // Set flag to indicate new renderer is active
+    // This suppresses InvalidateCache for begin segments in gWall.cpp
+    gWall_SetNewRendererActive(true);
+
+    dir_eWall_select();
+    RenderDisableState(rCapability::CullFace);
+
+    // Calculate stable threshold: segments below this are fully stable
+    REAL currentDistance = cycle->GetDistance();
+    REAL stableThreshold = rWallGeometryCollector::CalculateStableThreshold(
+        currentDistance, SEGLEN, gBEG_LEN);
+
+    // Check for wall expiration invalidating static cache
+    if ( CannotCache( cachedWallsMinDistance_, cycle ) )
+    {
+        geometryCollector_->InvalidateStaticBuffer();
+    }
+
+    // Begin frame collection
+    geometryCollector_->BeginFrame();
+
+    // Also include walls that were previously cached
+    // (In new renderer we manage all walls uniformly)
+    gNetPlayerWall* run = cachedWalls_;
+    while( run )
+    {
+        gNetPlayerWall * next = run->Next();
+        // Move back to main list for uniform processing
+        run->Insert( wallList_ );
+        run = next;
+    }
+
+    // Now collect geometry from all walls
+    // The walls will add themselves to static or streaming buffers
+    // based on whether they contain begin segments
+    run = wallList_;
+    while( run )
+    {
+        gNetPlayerWall * next = run->Next();
+
+        // Check for expired walls
+        if ( cycle->ThisWallsLength() > 0 &&
+             cycle->GetDistance() - cycle->MaxWallsLength() > run->EndPos() )
+        {
+            run->Remove();
+        }
+        else
+        {
+            // Collect this wall's geometry
+            // Note: The wall rendering now happens via geometry collection
+            // rather than immediate mode rendering
+            run->RenderList( true, static_cast<gNetPlayerWall::gWallRenderMode>(
+                gNetPlayerWall::gWallRenderMode_Lines | gNetPlayerWall::gWallRenderMode_Quads),
+                geometryCollector_.get() );
+        }
+
+        run = next;
+    }
+
+    // End frame and upload to GPU
+    geometryCollector_->EndFrame();
+
+    // Set render context for player walls so the uber shader's emissive
+    // hook for cycle walls fires (context 7). Without this the context is
+    // whatever the last caller set — typically Game3D generic — and walls
+    // don't contribute to the bloom emissive attachment.
+    rRenderContext prevCtx = sr_GetRenderContext();
+    sr_SetRenderContext(rRenderContext::Game3D_PlayerWalls);
+
+    // Render collected geometry
+    // First lines pass
+    sr_DepthOffset(true);
+    if ( rTextureGroups::TextureMode[rTextureGroups::TEX_WALL] != 0 )
+        RenderDisableState(rCapability::Texture2D);
+
+    geometryCollector_->Render(true, false);  // lines only
+
+    sr_DepthOffset(false);
+    if ( rTextureGroups::TextureMode[rTextureGroups::TEX_WALL] != 0 )
+        RenderEnableState(rCapability::Texture2D);
+
+    // Then quads pass
+    geometryCollector_->Render(false, true);  // quads only
+
+    sr_SetRenderContext(prevCtx);
+
+    // Update bookkeeping
+    lastStableThreshold_ = stableThreshold;
+
+    // Clear new renderer flag
+    gWall_SetNewRendererActive(false);
+}
+
 void gCycle::Render(const eCamera *cam){
+    // RAII guard: ensures matrix stack is restored on ANY exit path (early return,
+    // exception, or normal flow). Eliminates cross-cycle matrix contamination.
+    ModelMatrix();
+    rMatrixGuard outerGuard;
+
+    // Set render context for cycles (save/restore to avoid leaking state)
+    rRenderContext prevCtx = sr_GetRenderContext();
+    sr_SetRenderContext(rRenderContext::Game3D_Cycles);
+
     /*
     // for use when there's rendering problems on one specific occasion
     static int counter = 0;
@@ -4342,97 +4578,51 @@ void gCycle::Render(const eCamera *cam){
         blinking = pulse & 1;
     }
 
-#ifdef USE_HEADLIGHT
-#ifdef LINUX
-    typedef void (*glProgramStringARB_Func)(GLenum, GLenum, GLsizei, const void*);
-    glProgramStringARB_Func glProgramStringARB_ptr = 0;
-
-    typedef void (*glProgramLocalParameter4fARB_Func)(GLenum target, GLuint index, GLfloat x, GLfloat y, GLfloat z, GLfloat w);
-    glProgramLocalParameter4fARB_Func glProgramLocalParameter4fARB_ptr = 0;
-
-    glProgramStringARB_ptr = (glProgramStringARB_Func) SDL_GL_GetProcAddress("glProgramStringARB");
-    glProgramLocalParameter4fARB_ptr = (glProgramLocalParameter4fARB_Func) SDL_GL_GetProcAddress("glProgramLocalParameter4fARB");
-#endif
-#endif    
     if (!std::isfinite(z) || !std::isfinite(pos.x) ||!std::isfinite(pos.y)||!std::isfinite(dir.x)||!std::isfinite(dir.y)
             || !std::isfinite(skew))
         st_Breakpoint();
     if (Alive()){
         //con << "Drawing cycle at " << pos << '\n';
 
-#ifdef DEBUG
-        /*     {
-        	   gDestination *l = destinationList;
-        	   glDisable(GL_LIGHTING);
-        	   glColor3f(1,1,1);
-        	   while(l){
-        	   if (l == currentDestination)
-        	   glColor3f(0,1,0);
-
-        	   glBegin(GL_LINES);
-        	   glVertex3f(l->position.x, l->position.y, 0);
-        	   glVertex3f(l->position.x, l->position.y, 100);
-        	   glEnd();
-
-        	   if (l == currentDestination)
-        	   glColor3f(0,1,1);
-
-        	   l=l->next;
-        	   }
-        	   } */
-#endif
-
-        GLfloat color[4]={1,1,1,1};
-        static GLfloat lposa[4] = { 320, 240, 200,0};
-        static GLfloat lposb[4] = { -240, -100, 200,0};
-        static GLfloat lighta[4] = { 1, .7, .7, 1 };
-        static GLfloat lightb[4] = { .7, .7, 1, 1 };
-
-        glMaterialfv(GL_FRONT_AND_BACK,GL_SPECULAR,color);
-        glMaterialfv(GL_FRONT_AND_BACK,GL_DIFFUSE,color);
-
-        glLightfv(GL_LIGHT0, GL_DIFFUSE, lighta);
-        glLightfv(GL_LIGHT0, GL_SPECULAR, lighta);
-        glLightfv(GL_LIGHT0, GL_POSITION, lposa);
-        glLightfv(GL_LIGHT1, GL_DIFFUSE, lightb);
-        glLightfv(GL_LIGHT1, GL_SPECULAR, lightb);
-        glLightfv(GL_LIGHT1, GL_POSITION, lposb);
+        // Set up standard cycle lighting (two lights: red/blue)
+        rSetupCycleLighting();
+        rSetupCycleMaterial();
 
 
         ModelMatrix();
-        glPushMatrix();
+        PushMatrix();
         eCoord p = PredictPosition();
-        glTranslatef(p.x,p.y,0);
-        glScalef(.5f,.5f,.5f);
+        TranslateMatrix(p.x,p.y,0);
+        ScaleMatrix(.5f,.5f,.5f);
 
 
         eCoord ske(1,skew);
         ske=ske*(1/sqrt(ske.NormSquared()));
 
-        GLfloat m[4][4]={{dir.x,dir.y,0,0},
-                         {-dir.y,dir.x,0,0},
-                         {0,0,1,0},
-                         {0,0,0,1}};
-        glMultMatrixf(&m[0][0]);
+        REAL m[4][4]={{dir.x,dir.y,0,0},
+                      {-dir.y,dir.x,0,0},
+                      {0,0,1,0},
+                      {0,0,0,1}};
+        MultMatrix(m);
 
-        glPushMatrix();
-        //glTranslatef(-1.84,0,0);
+        PushMatrix();
+        //TranslateMatrix(-1.84,0,0);
         if (!mp)
-            glTranslatef(-1.5,0,0);
+            TranslateMatrix(-1.5,0,0);
 
-        glPushMatrix();
+        PushMatrix();
 
-        GLfloat sk[4][4]={{1,0,0,0},
-                          {0,ske.x,ske.y,0},
-                          {0,-ske.y,ske.x,0},
-                          {0,0,0,1}};
+        REAL sk[4][4]={{1,0,0,0},
+                       {0,ske.x,ske.y,0},
+                       {0,-ske.y,ske.x,0},
+                       {0,0,0,1}};
 
-        glMultMatrixf(&sk[0][0]);
+        MultMatrix(sk);
 
 
-        glEnable(GL_LIGHT0);
-        glEnable(GL_LIGHT1);
-        glEnable(GL_LIGHTING);
+        RenderEnableState(rCapability::Light0);
+        RenderEnableState(rCapability::Light1);
+        RenderEnableState(rCapability::Lighting);
 
 
 
@@ -4444,57 +4634,261 @@ void gCycle::Render(const eCamera *cam){
             ModelMatrix();
             if ( !blinking )
             {
-                glPushMatrix();
-                customTexture->Select();
-                glColor3f(1,1,1);
-                customModel->Render();
-                glPopMatrix();
+                if (sr_useBatchedCycles && customModel && customTexture)
+                {
+                    // Instanced path for moviepack ASE model (single mesh, no wheels)
+                    // Prime cache on first use
+                    static bool s_mpCachePrimed = false;
+                    if (!s_mpCachePrimed)
+                    {
+                        PushMatrix();
+                        customTexture->Select();
+                        Color(1,1,1);
+                        customModel->Render();
+                        PopMatrix();
+                        s_mpCachePrimed = true;
+                    }
+
+                    // Build model matrix: the stack already has translate(p)*scale(0.5)*rotate(dir)*skew(ske)
+                    // For moviepack, there's no translate(-1.5,0,0) offset
+                    float s = 0.5f;
+                    float dx = dir.x, dy = dir.y;
+                    float sx = ske.x, sy = ske.y;
+
+                    rCycleInstance ci{};
+                    // col0
+                    ci.instance.modelMatrix[0]  = s * dx * sx;
+                    ci.instance.modelMatrix[1]  = s * dy * sx;
+                    ci.instance.modelMatrix[2]  = 0;
+                    ci.instance.modelMatrix[3]  = 0;
+                    // col1
+                    ci.instance.modelMatrix[4]  = s * (-dy * sx);
+                    ci.instance.modelMatrix[5]  = s * (dx * sx);
+                    ci.instance.modelMatrix[6]  = s * (-sy);
+                    ci.instance.modelMatrix[7]  = 0;
+                    // col2
+                    ci.instance.modelMatrix[8]  = s * (-dy * sy);
+                    ci.instance.modelMatrix[9]  = s * (dx * sy);
+                    ci.instance.modelMatrix[10] = s * sx;
+                    ci.instance.modelMatrix[11] = 0;
+                    // col3: position (no -1.5 offset for moviepack)
+                    ci.instance.modelMatrix[12] = p.x;
+                    ci.instance.modelMatrix[13] = p.y;
+                    ci.instance.modelMatrix[14] = 0;
+                    ci.instance.modelMatrix[15] = 1;
+
+                    ci.instance.color[0] = color_.r_;
+                    ci.instance.color[1] = color_.g_;
+                    ci.instance.color[2] = color_.b_;
+                    ci.instance.color[3] = 1.0f;
+                    customTexture->Select();
+                    ci.geometryKey = customModel->GetMesh().GetVertices().data();
+                    ci.textureId = RenderGetBoundTexture2D();
+                    rSubmitCycleInstance(ci);
+                }
+                else
+                {
+                    PushMatrix();
+                    customTexture->Select();
+                    Color(1,1,1);
+                    customModel->Render();
+                    PopMatrix();
+                }
             }
 
-            glPopMatrix();
-            glTranslatef(-1.5,0,0);
+            PopMatrix();
+            TranslateMatrix(-1.5,0,0);
         }
         else{
-            glEnable(GL_TEXTURE_2D);
+            RenderEnableState(rCapability::Texture2D);
 
             ModelMatrix();
 
-            if ( !blinking )
+            // Shadow: draw BEFORE body so the cycle covers it via depth test.
+            // Both share the same modelview (cycle world position).
             {
-                bodyTex->Select();
-                body->Render();
+                REAL h = 0;
+                sr_DepthOffset(true);
+                RenderEnableState(rCapability::CullFace);
+                if(!blinking && sr_floorDetail>rFLOOR_GRID && rTextureGroups::TextureMode[rTextureGroups::TEX_FLOOR]>0 && sr_alphaBlend){
+                    cycle_shad.Select();
+                    unsigned int texId = RenderGetBoundTexture2D();
+                    rVertex20 sv0(-.6f,  .4f, h, 0, 0, 0, 255, 0.0f, 1.0f);
+                    rVertex20 sv1(-.6f, -.4f, h, 0, 0, 0, 255, 1.0f, 1.0f);
+                    rVertex20 sv2(2.1f, -.4f, h, 0, 0, 0, 255, 1.0f, 0.0f);
+                    rVertex20 sv3(2.1f,  .4f, h, 0, 0, 0, 255, 0.0f, 0.0f);
+                    rRenderStateKey state = rRenderStateKey::Textured(texId, rBlendMode::Alpha);
+                    rRenderQueue::Instance().SubmitQuad(rRenderPhase::OpaqueDynamic, state, sv0, sv1, sv2, sv3);
+                }
+                RenderDisableState(rCapability::CullFace);
+                sr_DepthOffset(false);
+            }
 
-                wheelTex->Select();
-                
-                glPushMatrix();
-                glTranslatef(0,0,.73);
-                
-                GLfloat mr[4][4]={{rotationRearWheel.x,0,rotationRearWheel.y,0},
-                                  {0,1,0,0},
-                                  {-rotationRearWheel.y,0,rotationRearWheel.x,0},
-                                  {0,0,0,1}};
-                
-                
-                glMultMatrixf(&mr[0][0]);
-                
-                rear->Render();
-                glPopMatrix();
+            if ( !blinking && body && bodyTex && rear && front && wheelTex )
+            {
+                // Prime the model mesh cache by rendering once via legacy path.
+                // The instanced path needs cached rVertexLit32 data from DrawModelMesh.
+                static bool s_cachePrimed = false;
+                if (sr_useBatchedCycles && !s_cachePrimed)
+                {
+                    // Render all three parts once to populate the cache, then
+                    // immediately switch to instanced for subsequent frames.
+                    bodyTex->Select(); body->Render();
+                    wheelTex->Select();
+                    PushMatrix(); TranslateMatrix(0,0,.73);
+                    REAL mr0[4][4]={{rotationRearWheel.x,0,rotationRearWheel.y,0},{0,1,0,0},{-rotationRearWheel.y,0,rotationRearWheel.x,0},{0,0,0,1}};
+                    MultMatrix(mr0); rear->Render(); PopMatrix();
+                    PushMatrix(); TranslateMatrix(1.84,0,.43);
+                    REAL mf0[4][4]={{rotationFrontWheel.x,0,rotationFrontWheel.y,0},{0,1,0,0},{-rotationFrontWheel.y,0,rotationFrontWheel.x,0},{0,0,0,1}};
+                    MultMatrix(mf0); front->Render(); PopMatrix();
+                    s_cachePrimed = true;
+                }
 
-                glPushMatrix();
-                glTranslatef(1.84,0,.43);
+                if (sr_useBatchedCycles)
+                {
+                    // Instanced path: compute model matrices and submit instances.
+                    // The current modelview stack has: translate(p) * scale(0.5) * rotate(dir) * translate(-1.5,0,0) * skew(ske)
+                    // We need the MODEL matrix only (not the view matrix).
+                    // Build it from the raw transform parameters.
+                    float s = 0.5f;
+                    float dx = dir.x, dy = dir.y;
+                    float sx = ske.x, sy = ske.y;
+                    float tx = mp ? 0.0f : -1.5f;
 
-                GLfloat mf[4][4]={{rotationFrontWheel.x,0,rotationFrontWheel.y,0},
-                                  {0,1,0,0},
-                                  {-rotationFrontWheel.y,0,rotationFrontWheel.x,0},
-                                  {0,0,0,1}};
-                
-                glMultMatrixf(&mf[0][0]);
+                    // M = Translate(p) * Scale(s) * Rotate(dir) * Translate(tx,0,0) * Skew(ske)
+                    // Column-major: M[col*4+row]
+                    // Pre-multiply: T*S*R*Tx*Sk
+                    // R*Tx: translate in rotated frame → adds tx*dir to position
+                    // Then scale and translate to world position.
+                    float offX = tx * dx;  // rotated translate offset
+                    float offY = tx * dy;
 
-                front->Render();
-                glPopMatrix();
+                    // Base model matrix (body transform), column-major
+                    auto buildBodyMatrix = [&](float modelMat[16]) {
+                        // col0: s * (dx, dy, 0, 0)
+                        modelMat[0]  = s * dx * sx;
+                        modelMat[1]  = s * dy * sx;
+                        modelMat[2]  = 0;
+                        modelMat[3]  = 0;
+                        // col1: s * (-dy*skx + dx*sky, dx*skx + dy*sky, sky, 0) — approximate
+                        // Actually: Rotate(dir) * Skew = [[dx, -dy],[dy, dx]] * [[1,0],[0,skx],[0,-sky]]
+                        // Simplification: skew only affects Y/Z, not X
+                        modelMat[4]  = s * (-dy * sx);
+                        modelMat[5]  = s * (dx * sx);
+                        modelMat[6]  = s * (-sy);
+                        modelMat[7]  = 0;
+                        // col2: skew affects Z axis
+                        modelMat[8]  = s * (-dy * sy);
+                        modelMat[9]  = s * (dx * sy);
+                        modelMat[10] = s * sx;
+                        modelMat[11] = 0;
+                        // col3: position
+                        modelMat[12] = p.x + s * offX;
+                        modelMat[13] = p.y + s * offY;
+                        modelMat[14] = 0;
+                        modelMat[15] = 1;
+                    };
+
+                    float cr = color_.r_, cg = color_.g_, cb = color_.b_;
+
+                    // Body instance
+                    {
+                        rCycleInstance ci{};
+                        buildBodyMatrix(ci.instance.modelMatrix);
+                        ci.instance.color[0] = cr; ci.instance.color[1] = cg;
+                        ci.instance.color[2] = cb; ci.instance.color[3] = 1.0f;
+                        bodyTex->Select();
+                        ci.geometryKey = body->GetMesh().GetVertices().data();
+                        ci.textureId = RenderGetBoundTexture2D();
+                        rSubmitCycleInstance(ci);
+                    }
+
+                    // Rear wheel instance: body * translate(0,0,0.73) * rotateWheel
+                    {
+                        rCycleInstance ci{};
+                        buildBodyMatrix(ci.instance.modelMatrix);
+                        // Apply translate(0,0,0.73) and wheel rotation to the matrix
+                        // Simplified: add 0.73 * col2 to col3 (translate along local Z)
+                        ci.instance.modelMatrix[12] += 0.73f * ci.instance.modelMatrix[8];
+                        ci.instance.modelMatrix[13] += 0.73f * ci.instance.modelMatrix[9];
+                        ci.instance.modelMatrix[14] += 0.73f * ci.instance.modelMatrix[10];
+                        // Wheel rotation around local Y axis (XZ plane rotation)
+                        // Apply to col0 and col2
+                        float rwx = rotationRearWheel.x, rwy = rotationRearWheel.y;
+                        float c0[3] = {ci.instance.modelMatrix[0], ci.instance.modelMatrix[1], ci.instance.modelMatrix[2]};
+                        float c2[3] = {ci.instance.modelMatrix[8], ci.instance.modelMatrix[9], ci.instance.modelMatrix[10]};
+                        for (int i = 0; i < 3; i++) {
+                            ci.instance.modelMatrix[i]   = c0[i] * rwx + c2[i] * rwy;    // new col0
+                            ci.instance.modelMatrix[8+i] = -c0[i] * rwy + c2[i] * rwx;   // new col2
+                        }
+                        ci.instance.color[0] = cr; ci.instance.color[1] = cg;
+                        ci.instance.color[2] = cb; ci.instance.color[3] = 1.0f;
+                        wheelTex->Select();
+                        ci.geometryKey = rear->GetMesh().GetVertices().data();
+                        ci.textureId = RenderGetBoundTexture2D();
+                        rSubmitCycleInstance(ci);
+                    }
+
+                    // Front wheel instance: body * translate(1.84,0,0.43) * rotateWheel
+                    {
+                        rCycleInstance ci{};
+                        buildBodyMatrix(ci.instance.modelMatrix);
+                        // translate(1.84, 0, 0.43) in local frame
+                        ci.instance.modelMatrix[12] += 1.84f * ci.instance.modelMatrix[0] + 0.43f * ci.instance.modelMatrix[8];
+                        ci.instance.modelMatrix[13] += 1.84f * ci.instance.modelMatrix[1] + 0.43f * ci.instance.modelMatrix[9];
+                        ci.instance.modelMatrix[14] += 1.84f * ci.instance.modelMatrix[2] + 0.43f * ci.instance.modelMatrix[10];
+                        // Front wheel rotation
+                        float fwx = rotationFrontWheel.x, fwy = rotationFrontWheel.y;
+                        float c0[3] = {ci.instance.modelMatrix[0], ci.instance.modelMatrix[1], ci.instance.modelMatrix[2]};
+                        float c2[3] = {ci.instance.modelMatrix[8], ci.instance.modelMatrix[9], ci.instance.modelMatrix[10]};
+                        for (int i = 0; i < 3; i++) {
+                            ci.instance.modelMatrix[i]   = c0[i] * fwx + c2[i] * fwy;
+                            ci.instance.modelMatrix[8+i] = -c0[i] * fwy + c2[i] * fwx;
+                        }
+                        ci.instance.color[0] = cr; ci.instance.color[1] = cg;
+                        ci.instance.color[2] = cb; ci.instance.color[3] = 1.0f;
+                        ci.geometryKey = front->GetMesh().GetVertices().data();
+                        ci.textureId = RenderGetBoundTexture2D();
+                        rSubmitCycleInstance(ci);
+                    }
+                }
+                else
+                {
+                    // Legacy path: individual draws
+                    bodyTex->Select();
+                    body->Render();
+
+                    wheelTex->Select();
+
+                    PushMatrix();
+                    TranslateMatrix(0,0,.73);
+
+                    REAL mr[4][4]={{rotationRearWheel.x,0,rotationRearWheel.y,0},
+                                   {0,1,0,0},
+                                   {-rotationRearWheel.y,0,rotationRearWheel.x,0},
+                                   {0,0,0,1}};
+
+                    MultMatrix(mr);
+
+                    rear->Render();
+                    PopMatrix();
+
+                    PushMatrix();
+                    TranslateMatrix(1.84,0,.43);
+
+                    REAL mf[4][4]={{rotationFrontWheel.x,0,rotationFrontWheel.y,0},
+                                   {0,1,0,0},
+                                   {-rotationFrontWheel.y,0,rotationFrontWheel.x,0},
+                                   {0,0,0,1}};
+
+                    MultMatrix(mf);
+
+                    front->Render();
+                    PopMatrix();
+                }
             }
             
-            glPopMatrix();
+            PopMatrix();
         }
 
 
@@ -4503,19 +4897,19 @@ void gCycle::Render(const eCamera *cam){
         ModelMatrix();
 
         /*
-          glDisable(GL_TEXTURE_GEN_S);
-          glDisable(GL_TEXTURE_GEN_T);
-          glDisable(GL_TEXTURE_GEN_Q);
-          glDisable(GL_TEXTURE_GEN_R);
+          RenderDisableState(0x0C60);
+          RenderDisableState(0x0C61);
+          RenderDisableState(0x0C63);
+          RenderDisableState(0x0C62);
         */
 
-        glDisable(GL_LIGHT0);
-        glDisable(GL_LIGHT1);
-        glDisable(GL_LIGHTING);
+        RenderDisableState(rCapability::Light0);
+        RenderDisableState(rCapability::Light1);
+        RenderDisableState(rCapability::Lighting);
 
-        //glDisable(GL_TEXTURE);
-        glDisable(GL_TEXTURE_2D);
-        glColor3f(1,1,1);
+        //RenderDisableState(GL_TEXTURE);
+        RenderDisableState(rCapability::Texture2D);
+        Color(1,1,1);
 
         {
             bool renderPyramid = false;
@@ -4545,159 +4939,49 @@ void gCycle::Render(const eCamera *cam){
 
             if ( renderPyramid )
             {
-                GLfloat s=sin(lastTime);
-                GLfloat c=cos(lastTime);
+                REAL s=sin(lastTime);
+                REAL c=cos(lastTime);
 
-                GLfloat m[4][4]={{c,s,0,0},
-                                 {-s,c,0,0},
-                                 {0,0,1,0},
-                                 {0,0,1,1}};
+                REAL m[4][4]={{c,s,0,0},
+                              {-s,c,0,0},
+                              {0,0,1,0},
+                              {0,0,1,1}};
 
-                glPushMatrix();
+                PushMatrix();
 
-                glMultMatrixf(&m[0][0]);
-                glScalef(.5,.5,.5);
+                MultMatrix(m);
+                ScaleMatrix(.5,.5,.5);
 
 
-                BeginTriangles();
+                {
+                    uint8_t pr = static_cast<uint8_t>(colorPyramid.r_ * 255.0f);
+                    uint8_t pg = static_cast<uint8_t>(colorPyramid.g_ * 255.0f);
+                    uint8_t pb = static_cast<uint8_t>(colorPyramid.b_ * 255.0f);
+                    uint8_t pa = static_cast<uint8_t>(alpha * 255.0f);
+                    uint8_t dr = static_cast<uint8_t>(colorPyramid.r_ * .7f * 255.0f);
+                    uint8_t dg = static_cast<uint8_t>(colorPyramid.g_ * .7f * 255.0f);
+                    uint8_t db = static_cast<uint8_t>(colorPyramid.b_ * .7f * 255.0f);
+                    rVertex20 tri[6] = {
+                        rVertex20(0, 0, 3, pr, pg, pb, pa, 0, 0),
+                        rVertex20(0, 1, 4.5f, pr, pg, pb, pa, 0, 0),
+                        rVertex20(0, -1, 4.5f, pr, pg, pb, pa, 0, 0),
+                        rVertex20(0, 0, 3, dr, dg, db, pa, 0, 0),
+                        rVertex20(1, 0, 4.5f, dr, dg, db, pa, 0, 0),
+                        rVertex20(-1, 0, 4.5f, dr, dg, db, pa, 0, 0)
+                    };
+                    rRenderStateKey state = rRenderStateKey::Colored(rBlendMode::Alpha);
+                    rRenderQueue::Instance().Submit(rRenderPhase::OpaqueDynamic, state, tri, 6);
+                }
 
-                glColor4f( colorPyramid.r_,colorPyramid.g_,colorPyramid.b_, alpha );
-                glVertex3f(0,0,3);
-                glVertex3f(0,1,4.5);
-                glVertex3f(0,-1,4.5);
-
-                glColor4f( colorPyramid.r_ * .7f,colorPyramid.g_ * .7f,colorPyramid.b_ * .7f, alpha );
-                glVertex3f(0,0,3);
-                glVertex3f(1,0,4.5);
-                glVertex3f(-1,0,4.5);
-
-                RenderEnd();
-
-                glPopMatrix();
+                PopMatrix();
             }
         }
 
-#ifdef USE_HEADLIGHT
-        // Headlight contributed by Jonathan
-        if(headlights) {
-            if(!cycleprograminited) { // set to false on every sr_InitDisplay, without it I lost my program when I switched to windowed
-                const char *program =
-                    "!!ARBfp1.0\
-                    \
-                    PARAM normal = program.local[0];\
-                    ATTRIB texcoord = fragment.texcoord;\
-                    TEMP final, diffuse, distance;\
-                    \
-                    DP3 distance, texcoord, texcoord;\
-                    RSQ diffuse, distance.w;\
-                    RCP distance, distance.w;\
-                    MUL diffuse, texcoord, diffuse;\
-                    DP3 diffuse, diffuse, normal;\
-                    MUL final, diffuse, distance;\
-                    MOV result.color.w, fragment.color;\
-                    MUL result.color.xyz, fragment.color, final;\
-                    \
-                    END";
-#ifdef LINUX
-                glProgramStringARB_ptr(GL_FRAGMENT_PROGRAM_ARB, GL_PROGRAM_FORMAT_ASCII_ARB, strlen(program), program);
-#else
-                glProgramStringARB(GL_FRAGMENT_PROGRAM_ARB, GL_PROGRAM_FORMAT_ASCII_ARB, strlen(program), program);
-#endif
-                cycleprograminited = true;
-            }
-#ifdef LINUX
-            glProgramLocalParameter4fARB_ptr(GL_FRAGMENT_PROGRAM_ARB, 0, 0, 0, verletSpeed_ * verletSpeed_, 0);
-#else			
-            glProgramLocalParameter4fARB(GL_FRAGMENT_PROGRAM_ARB, 0, 0, 0, verletSpeed_ * verletSpeed_, 0);
-#endif
-            glPushAttrib(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT); // blend func and depth mask. Efficient or not, glPushAttrib/glPopAttrib is a quick way to manage state.
-            glEnable(GL_FRAGMENT_PROGRAM_ARB); // doesn't check if it exists...
-
-            const unsigned sensors = 32; // actually one more
-            const double mul = 0.25 * M_PI / sensors;
-            const double add = -0.125 * M_PI;
-
-            double size = gArena::SizeMultiplier() * 500 * M_SQRT2; // is M_SQRT2 in your math.h?
-            GLfloat array[sensors+2][5];
-
-            array[0][0] = 0;
-            array[0][1] = 0;
-            array[0][2] = p.x;
-            array[0][3] = p.y;
-            array[0][4] = 0.125;
-
-            for(unsigned i=0; i<=sensors; i++) {
-                gSensor sensor(this, p, dir.Turn(cos(i * mul + add), sin(i * mul + add)));
-                sensor.detect(size);
-                array[i][5] = sensor.before_hit.x - p.x;
-                array[i][6] = sensor.before_hit.y - p.y;
-                array[i][7] = sensor.before_hit.x;
-                array[i][8] = sensor.before_hit.y;
-                array[i][9] = 0.125;
-            }
-
-            glPushMatrix();
-            glLoadIdentity();
-
-            glMatrixMode(GL_TEXTURE);
-            glPushMatrix();
-            glTranslatef(0, 0, 1);
-
-            glBlendFunc(GL_ONE, GL_ONE);
-            glDepthMask(GL_FALSE);
-
-            glColor3fv(reinterpret_cast<GLfloat *>(&color_)); // 8-)
-            glEnableClientState(GL_VERTEX_ARRAY);
-            glEnableClientState(GL_TEXTURE_COORD_ARRAY);
-
-            glInterleavedArrays(GL_T2F_V3F, 0, array);
-            glDrawArrays(GL_TRIANGLE_FAN, 0, sensors+2);
-
-            glDisableClientState(GL_VERTEX_ARRAY);
-            glDisableClientState(GL_TEXTURE_COORD_ARRAY);
-
-            glDisable(GL_FRAGMENT_PROGRAM_ARB);
-
-            glPopMatrix();
-            glMatrixMode(GL_MODELVIEW);
-
-            glPopMatrix();
-            glPopAttrib();
-        }
-#endif // USE_HEADLIGHT
         // Name
         RenderName( cam );
 
 
-        // shadow:
-
         sr_DepthOffset(true);
-
-
-        REAL h=0;//se_cameraZ*.005+.03;
-
-        glEnable(GL_CULL_FACE);
-
-        if(!blinking && sr_floorDetail>rFLOOR_GRID && rTextureGroups::TextureMode[rTextureGroups::TEX_FLOOR]>0 && sr_alphaBlend){
-            glColor3f(0,0,0);
-            cycle_shad.Select();
-            BeginQuads();
-            glTexCoord2f(0,1);
-            glVertex3f(-.6,.4,h);
-
-            glTexCoord2f(1,1);
-            glVertex3f(-.6,-.4,h);
-
-            glTexCoord2f(1,0);
-            glVertex3f(2.1,-.4,h);
-
-            glTexCoord2f(0,0);
-            glVertex3f(2.1,.4,h);
-
-            RenderEnd();
-        }
-
-        glDisable(GL_CULL_FACE);
 
         // sr_laggometer;
 
@@ -4706,74 +4990,76 @@ void gCycle::Render(const eCamera *cam){
 
         REAL l=Lag();
 
-        glPopMatrix();
+        PopMatrix();
 
-        h = cam ? cam->CameraZ()*.005+.03 : 0;
+        REAL h = cam ? cam->CameraZ()*.005+.03 : 0;
 
 #ifdef ENABLE_OLD_LAG_O_METER
         if(sg_laggometerUseOld) {
             if (sn_GetNetState() != nSTANDALONE && sr_laggometer && f*l>.5) {
                 //&& owner!=::sn_myNetID){
-                glPushMatrix();
+                PushMatrix();
 
-                glColor3f(1,1,1);
-                //glDisable(GL_TEXTURE);
-                glDisable(GL_TEXTURE_2D);
+                Color(1,1,1);
+                //RenderDisableState(GL_TEXTURE);
+                RenderDisableState(rCapability::Texture2D);
 
-                glTranslatef(0,0,h);
-                //glScalef(.5*f,.5*f,.5*f);
+                TranslateMatrix(0,0,h);
+                //ScaleMatrix(.5*f,.5*f,.5*f);
 
                 // compensate for the .5 scaling further up
                 f *= 2 * sg_laggometerScale;
 
-                glScalef(f,f,f);
+                ScaleMatrix(f,f,f);
 
                 // move the sr_laggometer ahead a bit
                 if (!sr_predictObjects || sn_GetNetState()==nSERVER)
-                    glTranslatef(l,0,0);
+                    TranslateMatrix(l,0,0);
 
 
-                BeginLineLoop();
-
-
-                glVertex2f(-l,-l);
-                glVertex2f(0,0);
-                glVertex2f(-l,l);
-                REAL delay = GetTurnDelay();
-                if(l> 2*delay){
-                    glVertex2f(-2*l+delay,delay);
-                    glVertex2f(-2*l+2*delay,0);
-                    glVertex2f(-2*l+delay,-delay);
+                {
+                    std::vector<rVertex20> loopVerts;
+                    loopVerts.push_back(rVertex20(-l, -l, 0, 255, 255, 255, 255, 0, 0));
+                    loopVerts.push_back(rVertex20(0, 0, 0, 255, 255, 255, 255, 0, 0));
+                    loopVerts.push_back(rVertex20(-l, l, 0, 255, 255, 255, 255, 0, 0));
+                    REAL delay = GetTurnDelay();
+                    if(l> 2*delay){
+                        loopVerts.push_back(rVertex20(-2*l+delay, delay, 0, 255, 255, 255, 255, 0, 0));
+                        loopVerts.push_back(rVertex20(-2*l+2*delay, 0, 0, 255, 255, 255, 255, 0, 0));
+                        loopVerts.push_back(rVertex20(-2*l+delay, -delay, 0, 255, 255, 255, 255, 0, 0));
+                    }
+                    else if (l>delay){
+                        loopVerts.push_back(rVertex20(-2*l+delay, delay, 0, 255, 255, 255, 255, 0, 0));
+                        loopVerts.push_back(rVertex20(-l, 2*delay-l, 0, 255, 255, 255, 255, 0, 0));
+                        loopVerts.push_back(rVertex20(-l, -(2*delay-l), 0, 255, 255, 255, 255, 0, 0));
+                        loopVerts.push_back(rVertex20(-2*l+delay, -delay, 0, 255, 255, 255, 255, 0, 0));
+                    }
+                    // Close the loop
+                    loopVerts.push_back(loopVerts[0]);
+                    rRenderStateKey state = rRenderStateKey::Colored(rBlendMode::Opaque);
+                    rRenderQueue::Instance().SubmitLineStrip(rRenderPhase::OpaqueDynamic, state, loopVerts.data(), loopVerts.size());
                 }
-                else if (l>delay){
-                    glVertex2f(-2*l+delay,delay);
-                    glVertex2f(-l,2*delay-l);
-                    glVertex2f(-l,-(2*delay-l));
-                    glVertex2f(-2*l+delay,-delay);
-                }
-
-                RenderEnd();
-                glPopMatrix();
+                PopMatrix();
             }
         } else
 #endif
         {
-            glPushMatrix();
+            PushMatrix();
 
-            //glDisable(GL_TEXTURE);
-            glDisable(GL_TEXTURE_2D);
+            //RenderDisableState(GL_TEXTURE);
+            RenderDisableState(rCapability::Texture2D);
 
-            glTranslatef(0,0,h);
-            //glScalef(.5*f,.5*f,.5*f);
+            TranslateMatrix(0,0,h);
+            //ScaleMatrix(.5*f,.5*f,.5*f);
 
             // compensate for the .5 scaling further up
             f *= 2 * sg_laggometerScale;
 
-            glScalef(f,f,f);
+            ScaleMatrix(f,f,f);
 
             // move the sr_laggometer back a bit
             if (sr_predictObjects || sn_GetNetState()==nSERVER) {
-                glTranslatef(-l,0,0);
+                TranslateMatrix(-l,0,0);
             }
 
             if (f*l>sg_laggometerThreshold) {
@@ -4784,13 +5070,15 @@ void gCycle::Render(const eCamera *cam){
                 gLaggometer::AxesIndicator(this).render();
             }
 
-            glPopMatrix();
+            PopMatrix();
         }
         sr_DepthOffset(false);
 
-        glPopMatrix();
+        PopMatrix();
 
     }
+    sr_SetRenderContext(prevCtx);
+    // outerGuard destructor pops matrix automatically
 }
 
 void gCycle::Render2D(tCoord scale) const {
@@ -4799,23 +5087,35 @@ void gCycle::Render2D(tCoord scale) const {
         alpha -= 2 * (se_GameTime() - DeathTime());
         if(alpha <= 0) return;
     }
-    glColor4f(color_.r_, color_.g_, color_.b_, alpha);
     eCoord pos = PredictPosition(), dir = Direction();
-    // tCoord p = pos;
-    glPushMatrix();
-    GLfloat m[16] = {
-                        scale.x * dir.x, scale.y * dir.y, 0, 0,
-                        -scale.x * dir.y, scale.y * dir.x, 0, 0,
-                        0, 0, 1, 0,
-                        pos.x, pos.y, 0, 1
-                    };
-    glMultMatrixf(m);
-    glBegin(GL_TRIANGLES);
-    glVertex2f(.5, 0);
-    glVertex2f(-.5, .5);
-    glVertex2f(-.5, -.5);
-    glEnd();
-    glPopMatrix();
+
+    uint8_t cr = static_cast<uint8_t>(color_.r_ * 255.0f);
+    uint8_t cg = static_cast<uint8_t>(color_.g_ * 255.0f);
+    uint8_t cb = static_cast<uint8_t>(color_.b_ * 255.0f);
+    uint8_t ca = static_cast<uint8_t>(alpha * 255.0f);
+
+    // Use the map's matrix stack: push cycle transform, submit raw vertices,
+    // execute immediately while scissor is active for proper clipping
+    PushMatrix();
+    float m[16] = {
+        scale.x * dir.x, scale.y * dir.y, 0, 0,
+        -scale.x * dir.y, scale.y * dir.x, 0, 0,
+        0, 0, 1, 0,
+        pos.x, pos.y, 0, 1
+    };
+    MultMatrix(m);
+
+    rVertex20 tri[3] = {
+        rVertex20(.5f, 0, 0, cr, cg, cb, ca, 0, 0),
+        rVertex20(-.5f, .5f, 0, cr, cg, cb, ca, 0, 0),
+        rVertex20(-.5f, -.5f, 0, cr, cg, cb, ca, 0, 0)
+    };
+    rRenderStateKey state = rRenderStateKey::HUD(0, rBlendMode::Alpha);
+    rRenderQueue::Instance().Submit(rRenderPhase::Sky, state, tri, 3);
+    rRenderQueue::Instance().ExecutePhase(rRenderPhase::Sky);
+    ModelMatrix();
+
+    PopMatrix();
 }
 
 static REAL fadeOutNameAfter = 5.0f;	/* 0: never show, < 0 always show */
@@ -4837,35 +5137,33 @@ void gCycle::RenderName( const eCamera* cam ) {
     if ( !this->Player() )
         return;
 
-    float modelviewMatrix[16], projectionMatrix[16];
-    float x, y, z, w;
     float xp, yp, wp;
     float alpha = fadeOutNameOpacity;
 
-    if (fadeOutNameAfter == 0) return; /* XXX put that in ::Render() */
-    if ( !cam->RenderingMain() ) return; // no name in mirrored image
-    if ( !showOwnName && cam->Player() == this->player ) return; // don't show own name
+    if (fadeOutNameAfter == 0) return;
+    if ( !cam->RenderingMain() ) return;
+    if ( !showOwnName && cam->Player() == this->player ) return;
 
-    glPushMatrix();
-    /* position sign above center of cycle */
-    glTranslatef(0.8, 0, 2.0);
-    glGetFloatv(GL_MODELVIEW_MATRIX, modelviewMatrix);
-    glGetFloatv(GL_PROJECTION_MATRIX, projectionMatrix);
-    glPopMatrix();
+    // Compute name screen position using the original matrix approach.
+    // Push/translate/read/pop is safe here because it only adds one level.
+    PushMatrix();
+    TranslateMatrix(0.8, 0, 2.0);
+    float modelviewMatrix[16], projectionMatrix[16];
+    RenderGetModelviewMatrix(modelviewMatrix);
+    RenderGetProjectionMatrix(projectionMatrix);
+    PopMatrix();
 
-    /* get coordinates of sign */
-    x = modelviewMatrix[12];
-    y = modelviewMatrix[13];
-    z = modelviewMatrix[14];
-    w = modelviewMatrix[15];
+    float x = modelviewMatrix[12];
+    float y = modelviewMatrix[13];
+    float z = modelviewMatrix[14];
+    float w = modelviewMatrix[15];
 
-    /* multiply by projection matrix */
-    xp = projectionMatrix[0] * x + projectionMatrix[4] * y +
-         projectionMatrix[8] * z + projectionMatrix[12] * w;
-    yp = projectionMatrix[1] * x + projectionMatrix[5] * y +
-         projectionMatrix[9] * z + projectionMatrix[13] * w;
-    wp = projectionMatrix[3] * x + projectionMatrix[7] * y +
-         projectionMatrix[11] * z + projectionMatrix[15] * w;
+    xp = projectionMatrix[0]*x + projectionMatrix[4]*y +
+         projectionMatrix[8]*z + projectionMatrix[12]*w;
+    yp = projectionMatrix[1]*x + projectionMatrix[5]*y +
+         projectionMatrix[9]*z + projectionMatrix[13]*w;
+    wp = projectionMatrix[3]*x + projectionMatrix[7]*y +
+         projectionMatrix[11]*z + projectionMatrix[15]*w;
 
     if (wp <= 0) {
         /* behind camera */
@@ -4900,15 +5198,6 @@ void gCycle::RenderName( const eCamera* cam ) {
         }
     }
 
-    ModelMatrix();
-    glPushMatrix();
-    glLoadIdentity();
-
-    ProjMatrix();
-    glPushMatrix();
-    glLoadIdentity();
-
-    glTranslatef(xp, yp, 0.);
     if(doname) {
         rTextField::SetBlendColor(tColor(1,1,1,alpha));
         tColoredString name;
@@ -4916,44 +5205,35 @@ void gCycle::RenderName( const eCamera* cam ) {
             name << *this->player;
         else
             name << this->player->GetName();
-        DisplayText(0, 0, rCHEIGHT_NORMAL, name, sr_fontCycleLabel, 0, 0);
+        DisplayText(xp, yp, rCHEIGHT_NORMAL, name, sr_fontCycleLabel, 0, 0);
         rTextField::SetDefaultColor(tColor(1,1,1));
     }
+
+    // Cycle cockpit needs identity matrices + translate for overlay rendering
+    ModelMatrix();
+    PushMatrix();
+    IdentityMatrix();
+
+    ProjMatrix();
+    PushMatrix();
+    IdentityMatrix();
+
+    TranslateMatrix(xp, yp, 0.);
+
     static cCockpit cycleCockpit(cCockpit::VIEWPORT_CYCLE);
     cycleCockpit.SetCycle(*this);
     cycleCockpit.Render();
 
     ProjMatrix();
-    glPopMatrix();
+    PopMatrix();
 
     ModelMatrix();
-    glPopMatrix();
+    PopMatrix();
 }
 
 
 bool gCycle::RenderCockpitFixedBefore(bool){
-    /*
-      if (alive)
-      return true;
-      else{
-      REAL rd=se_GameTime()-deathTime;
-      if (rd<1)
-         return true;
-      else{
-         REAL d=1.25-rd;
-         d*=8;
-         if (d<0) d=0;
-         glColor3f(d,d/2,d/4);
-         glDisable(GL_TEXTURE_2D);
-         glDisable(GL_TEXTURE);
-         glDisable(GL_DEPTH_TEST);
-         glRectf(-1,-1,1,1);
-         glColor4f(1,1,1,rd*(2-rd/2));
-         DisplayText(0,0,.05,.15,"You have been deleted.");
-         return false;
-      }
-      }
-    */
+    // Legacy death screen rendering removed (was already commented out)
     return true;
 }
 

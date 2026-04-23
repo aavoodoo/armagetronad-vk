@@ -1,7 +1,7 @@
 #ifndef ArmageTron_ZoneInfluence_H
 #define ArmageTron_ZoneInfluence_H
 
-#include <boost/shared_ptr.hpp>
+#include <memory>
 #include <vector>
 #include "defs.h"
 #include "eCoord.h"

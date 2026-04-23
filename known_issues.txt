@@ -1,0 +1,183 @@
+Known Issues & Remaining Work — 2026-04-23
+============================================
+
+BUGS
+----
+
+BUG 3 — Multi-viewport first-round flickering
+  Status: Open
+  Symptom: First round in multi-viewport mode flickers, then stabilizes.
+  Cause: FBO creation overhead (8 GPU allocations on first multi-viewport frame).
+  Fix: Pre-create viewport FBOs before the first frame.
+
+BUG 5 — Cycle name/cockpit rendering in multi-viewport on macOS
+  Status: Open
+  Symptom: On macOS with 3-attachment FBOs (emissive variant), fonts/text are
+  invisible. With 2-attachment FBOs (plain variant), fonts work but z-fighting
+  returns.
+  Cause: Unknown — the emissive fragment shader variant breaks font/text rendering
+  through some mechanism specific to Metal/MoltenVK. Needs Metal GPU frame capture.
+  Single viewport: fixed. iPad: works with 2-attachment FBOs.
+
+BUG 11 — Cockpit widget positioning on widescreen
+  Status: Matches original GL behavior (by design)
+  The square viewport + Readjust(4/3 / aspect) system is identical to the original
+  OpenGL code. On 16:9, top widgets (clock, FPS) may be off-screen — this is the
+  same as the original game. Cockpit XMLs designed for 4:3 don't fully fill 16:9.
+  Future: Add top-anchored widget positioning mode so cockpit XMLs can adapt to
+  any aspect ratio.
+
+BUG 12 — Shutdown validation warnings (2 remaining)
+  Status: Mostly fixed (down from 10+ to 2)
+  Two vkDestroySampler warnings from post-process system internal descriptor set
+  ordering. Benign — GPU is idle, no data corruption. Fixing requires restructuring
+  the PP Destroy() flow to separate descriptor pool from sampler destruction.
+
+BUG 13 — Instanced cycle shadow not rendered
+  Status: Open (minor visual)
+  When USE_BATCHED_CYCLES is enabled (default), the cycle shadow quad is not
+  rendered because the instanced path skips the legacy shadow draw code.
+  Fix: Submit shadow quads separately (they're simple textured quads, not models).
+
+FEATURES
+--------
+
+FR4 — Touch button overlay
+  Status: Feature parity between iOS and Android
+  Done: R2 camera cycling (SWITCH_VIEW), R1 chat guard (aa_IsChatAvailable),
+  keyboard viewport offset, chat/console input repositioning, double-tap for
+  menu (L1) and console (R1), dropdown menus, gyro input, active mode tracking
+  with visual feedback, keyboard show/hide management.
+  Android JNI bridges added: nativeIsChatAvailable, nativeTriggerAction,
+  nativeTriggerPlayerAction, nativeGetNumViewports, nativeGetViewportInfo.
+  Remaining: Viewport-aware button layout on Android (iOS done, Android fixed layout).
+  L1 score action does nothing when score is 0.
+
+FR8 — DPI-aware menu scaling
+  Status: Done
+  1.56x scaling on iPhone (1500pt reference diagonal). Server browser text and
+  spacing scaled via sr_TouchUIScale(). iPad Mini gets mild boost (~1.13x).
+
+FR9 — Icon system for touch buttons (deferred)
+  Current: Buttons display plain text labels (L1, R1, L2, R2).
+  Planned: Icon dictionary system supporting:
+    - Font glyphs: font file path + Unicode codepoint, rendered via existing
+      rFontSTB SDF/MSDF atlas system
+    - Image icons: PNG file path (regular, SDF, MSDF, or MTSDF), rendered via
+      existing SDFTextured/Textured state keys
+  Dictionary format (config file):
+    ICON <name> glyph <font_path> <codepoint>
+    ICON <name> image <image_path> <sdf_mode>
+  Moviepack-overridable. Extensible. Renders through the game's Vulkan pipeline.
+
+FR10 — Thread pool for async work
+  Status: Not started
+  Goal: Reduce jerkiness with many AI players by offloading non-frame-critical
+  work to background threads. Needs priority/deadline management.
+
+MOVIEPACKS
+----------
+
+FR3 — Moviepack showcase packages
+  Packs in moviepacks/:
+    - customProceduralTexture.aamvp.zip — animated kishimisu floor pattern
+    - customBloom.aamvp.zip — bloom PP on cycles/walls/zones
+    - customCelShading.aamvp.zip — cel-shading PP on cycles/walls only (masked)
+    - customMSDFTexture.aamvp.zip — MSDF textured rim walls with 3-color compositing
+  PP moviepack override path: sg_PPGetReadPath tries moviepack/ first.
+  customCelShading uses SCENE_EMISSIVE as mask.
+
+  Moviepack settings management:
+    - Activation resets to defaults then applies pack's settings.cfg
+    - User settings saved/restored on None switch and app restart
+    - Title fallback: missing title.jpg falls back to textures/title.jpg
+    - Preview + title images in menu (aspect-correct, bottom-aligned)
+    - Alphabetically sorted, no fade-in
+
+RENDERER CODE REVIEW
+--------------------
+
+Pass 1 + Pass 2 completed. Full review document at review_document.md.
+
+Fixes applied:
+  P0-1: Fence deadlock on swapchain recreation (vkResetFences after acquire)
+  P0-2: Vertex buffer use-after-free (deferred cleanup after fence wait)
+  P0-3: FBO deletion timing (deferred per-frame)
+  P0-4: Sampler destruction while in-flight (pendingDeleteSamplers_)
+  P0-5: maxLod mipmap clobber (uses tex.mipLevels)
+  P0-6: Batching consolidation (ExecutePhase removed from walls/lines, centralized flush)
+  P1-1: Lighting UBO dirty flag
+  P1-7: SDF state key full comparison
+  P1-9: mvpDirty_ atomic<bool>
+  P1-10: PP effects cleared on swapchain resize
+  P1-11: TexImage2D reuse rgbaData (no double RGBA conversion)
+  P1-12: RenderbufferStorage return code checks
+  Pass 2: EnsureBufferCapacity helper (3 DrawLitTriangles bugs fixed)
+  Pass 2: VK_DESTROY macro (rVulkanHelpers.h, 20+ sites cleaned)
+  Pass 2: lightModelview_ unused member removed
+  Pass 2: GetPreviewTexture/GetTitleTexture deduplicated (LoadTextureFromZip)
+  Pass 2: rWallGeometryBufferGL3 renamed to rWallGeometryBufferPacked
+  Pass 2: Bucket eviction every 600 frames in BeginFrame
+
+Performance: 200-336 FPS with 16 AI (was 47-90 pre-review). 4-7x improvement.
+Dead code removed: ~1,200 lines (rSVGPath, rMSDFShader.h, duplicates).
+
+RENDERER ROBUSTNESS (2026-04-23)
+---------------------------------
+
+Phase 1: RAII Matrix Guard — rMatrixGuard for push/pop, eliminated flash bug
+Phase 2: RAII Vulkan Handles — VkHandle<T,Fn> template in rVulkanRAII.h
+Phase 3: Deferred Destruction Queue — DeferredQueue<T> template
+Phase 4: DrawBatch Consolidation — BuildPushConstants + LookupTextureDescriptor helpers
+Phase 5: Slim rRenderer Interface — 27 dead virtuals, 20 dead wrappers removed (~547 lines)
+         Entire dead FBO system removed (GenFramebuffer/DeleteFramebuffer/etc.)
+Phase 6: Pipeline Variant Reduction — 76 → 60 pre-warmed pipelines, key normalization
+
+BUG 7 — Fixed (4 root causes):
+  1. Model-space batching: rStaticMesh immediate flush
+  2. Wall UV normalization pops: persistent min/max bounds (never shrink)
+  3. Vertex buffer sync race: per-frame HOST_COHERENT buffers (one per MAX_FRAMES_IN_FLIGHT)
+  4. Screen tearing: Auto present mode defaults to FIFO (VSync) instead of IMMEDIATE
+
+BUG 10 — Fixed: floor fan → 2×2 quad grid (eliminates mipmap derivative singularity)
+
+Infinite plane: enabled for Apple GPUs (sr_infinityPlane=true), sr_highRim no longer
+  blocks it. Floor extends 100× arena bounds to horizon.
+
+Instanced cycle rendering (USE_BATCHED_CYCLES, enabled by default):
+  - Standard 3-part models: 3 draw calls total instead of 3×N (48→3 for 16 AI)
+  - Moviepack ASE models: 1 draw call per unique model/texture combo
+  - uber_instanced.vert: per-instance model matrix (mat4) + team color (vec4)
+  - Pipeline: instanced flag, second vertex binding (RATE_INSTANCE, 80 bytes)
+  - Cache priming: first frame renders legacy to populate modelMeshCache_
+  - Limitation: cycle shadows skipped in instanced path (BUG 13)
+
+Shutdown cleanup ordering:
+  - Vertex buffers destroyed before command pool (eliminates buffer-in-use warnings)
+  - Textures/samplers destroyed before descriptor pool
+  - Viewport FBOs destroyed after descriptor pool
+  - PP descriptor pools destroyed early via DestroyDescriptorPools()
+
+Remaining P2 items (low priority):
+  - P2-3: Redundant macOS PP force-enable logic
+  - P2-5/6: Clip space remap and Y-flip documentation comments
+  - P2-16: rVulkanRender.cpp decomposition (3,372 lines, deferred)
+  - Duplicate state cache (rRenderState vs vkRenderer internal) consolidation
+
+NOTES
+-----
+
+- Batching limitation: rStaticMesh (cycle bodies) must flush immediately because
+  vertices are in model space and need the per-cycle transform at draw time.
+  Only wall geometry (world-space vertices) benefits from batched flushing.
+  With instanced rendering enabled, cycle models bypass this limitation entirely.
+- Guard PushMatrix/PopMatrix added around gCycle::Render() to prevent cross-cycle
+  matrix stack contamination. No actual stack underflow detected in testing.
+- RemoveDirectoryRecursive on iOS uses NSFileManager (rScreenIOS.mm).
+- Moviepack settings saved to Documents/moviepack_saved_settings.cfg.
+- MSDF moviepack shader uses msdfgen-recommended screenPxRange calculation
+  with fwidth(texCoord) for safe derivatives (not fwidth(d) which causes NaN
+  on MSDF median discontinuities).
+- Wall rendering: persistent UV bounds prevent texture matrix pops. Line vertex
+  caching avoids per-frame heap allocation. Fingerprint-based skip-conversion
+  was attempted but reverted (boundary segments always change, causing stale data).

@@ -33,6 +33,7 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 #include "cockpit/cMap.h"
 #include "cockpit/cCamview.h"
 #include "cockpit/cRectangle.h"
+#include "cockpit/cTouchButton.h"
 #include "nConfig.h"
 
 #ifndef DEDICATED
@@ -47,6 +48,8 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 #include "rRender.h"
 #include "rFont.h"
 #include "rScreen.h"
+#include "rHUDRenderer.h"
+#include "rRendererState.h"
 #include "eSensor.h"
 #include <iostream>
 #include "eSoundMixer.h"
@@ -167,6 +170,7 @@ void cCockpit::ClearWidgets(void) {
     //m_Widgets_perplayer.clear();
     //m_Widgets_cycles.clear();
     m_EventHandlers.clear();
+    m_TouchButtons.clear();
 }
 
 void cCockpit::SetPlayer(ePlayer *player) {
@@ -538,6 +542,12 @@ cWidget::Base_ptr cCockpit::ProcessWidgetType(node cur) {
     }
     if(cur.IsOfType("Rectangle"))
         return cWidget::Base_ptr(new cWidget::Rectangle());
+    if(cur.IsOfType("TouchButton")) {
+        cWidget::TouchButton *w = new cWidget::TouchButton();
+        w->Process(cur);  // read root-level action= and player= attributes
+        m_TouchButtons.push_back(w);
+        return cWidget::Base_ptr(w);
+    }
     return cWidget::Base_ptr();
 }
 
@@ -592,105 +602,6 @@ void cCockpit::ProcessWidgetCore(node cur, cWidget::Base &widget) {
 }
 
 
-//void cCockpit::RenderPlayer(float factor) {
-//    if(m_FocusPlayer != 0 && m_ViewportPlayer != 0) {
-//        Color(1,1,1);
-//        if(m_Player->cam) {
-//
-//            if (m_FocusCycle && ( !m_Player->netPlayer || !m_Player->netPlayer->IsChatting()) && se_GameTime()>-2){
-//                //h->Speed()>maxmeterspeed?maxmeterspeed+=10:1;
-//
-//                for(widget_list_t::const_iterator i=m_Widgets.begin(); i!=m_Widgets.end(); ++i)
-//                {
-//                    int cam = (*i)->GetCam();
-//                    switch(m_Player->cam->GetCamMode()) {
-//                    case CAMERA_IN:
-//                    case CAMERA_SMART_IN:
-//                        if(!(cam & in)) continue;
-//                        break;
-//                    case CAMERA_CUSTOM:
-//                        if(!(cam & custom)) continue;
-//                        break;
-//                    case CAMERA_FREE:
-//                        if(!(cam & free)) continue;
-//                        break;
-//                    case CAMERA_FOLLOW:
-//                        if(!(cam & follow)) continue;
-//                        break;
-//                    case CAMERA_SMART:
-//                        if(!(cam & smart)) continue;
-//                        break;
-//                    case CAMERA_SERVER_CUSTOM:
-//                        if(!(cam & server_custom)) continue;
-//                        break;
-//                    case CAMERA_MER:
-//                        if(!(cam & mer)) continue;
-//                        break;
-//                    case CAMERA_COUNT:
-//                        continue; //not handled, no sense?!
-//                    }
-//                    if ((*i)->Active()) {
-//                        if(cWidget::WithCoordinates *coordWidget = dynamic_cast<cWidget::WithCoordinates *>(&(*(*i)))) {
-//                            coordWidget->SetFactor(factor);
-//                        }
-//                        (*i)->Render();
-//                    }
-//                }
-//                //  bool displayfastest = true;// put into global, set via menusytem... subby to do.make sr_DISPLAYFASTESTout
-//
-//            }
-//        }
-//    }
-//
-//}
-//void cCockpit::RenderRootwindow() {
-//    if( m_Player == 0 ) return;
-//    if(m_ViewportPlayer == 0) return;
-//
-//    sr_ResetRenderState(true);
-//    glViewport (GLsizei(0),
-//                GLsizei(0),
-//                GLsizei(sr_screenWidth),
-//                GLsizei(sr_screenWidth));
-//
-//    //BeginLineLoop();
-//    //Color(1.,1.,1.,1.);
-//    //Vertex(-.1,-.1);
-//    //Vertex( .1,-.1);
-//    //Vertex( .1, .1);
-//    //Vertex(-.1, .1);
-//    //RenderEnd();
-//    for(widget_list_t::const_iterator i=m_Widgets.begin(); i!=m_Widgets.end(); ++i) {
-//        if((*i)->Active()) {
-//            (*i)->Render();
-//        }
-//    }
-//}
-//
-//void cCockpit::RenderCycle(gCycle const &cycle) {
-//    m_ViewportPlayer = m_FocusPlayer = cycle.Player();
-//    if(m_FocusPlayer != 0) {
-//        m_FocusCycle = dynamic_cast<gCycle *>(m_FocusPlayer->Object());
-//    } else {
-//        m_FocusCycle = 0;
-//    }
-//    //if( m_Player == 0 ) return;
-//    if(m_ViewportPlayer == 0) return;
-//
-//    bool gl_depth_test = glIsEnabled(GL_DEPTH_TEST);
-//    glDisable(GL_DEPTH_TEST);
-//
-//    for(widget_list_t::const_iterator i=m_Widgets.begin(); i!=m_Widgets.end(); ++i) {
-//        if((*i)->Active()) {
-//            (*i)->Render();
-//        }
-//    }
-//
-//    if(gl_depth_test) {
-//        glEnable(GL_DEPTH_TEST);
-//    }
-//}
-
 void cCockpit::SetCycle(gCycle const &cycle) {
     m_ViewportPlayer = m_FocusPlayer = cycle.Player();
     if(m_FocusPlayer != 0) {
@@ -701,9 +612,18 @@ void cCockpit::SetCycle(gCycle const &cycle) {
 }
 
 void cCockpit::Render() {
+    // Set HUD render context to disable animated shader effects (save/restore to avoid leak)
+    rRenderContext prevCtx = sr_GetRenderContext();
+    sr_SetRenderContext(rRenderContext::HUD);
+
     switch(m_Type) {
     case VIEWPORT_ALL:
         if(m_FocusPlayer != 0 && m_ViewportPlayer != 0) {
+            // Disable depth so cockpit widgets always render on top of 3D geometry.
+            // ExecutePhase re-enables depth after each phase, so we must disable here
+            // to protect widgets rendered between phase flushes.
+            RenderDisableState(rCapability::DepthTest);
+            RenderDepthMask(false);
             Color(1,1,1);
             if(m_Player->cam) {
 
@@ -751,10 +671,7 @@ void cCockpit::Render() {
         break;
     case VIEWPORT_TOP:
         sr_ResetRenderState(true);
-        glViewport (GLsizei(0),
-                    GLsizei(0),
-                    GLsizei(sr_screenWidth),
-                    GLsizei(sr_screenWidth));
+        RenderViewport(0, 0, sr_screenWidth, sr_screenWidth);
 
         for(widget_list_t::const_iterator i=m_Widgets.begin(); i!=m_Widgets.end(); ++i) {
             if((*i)->Active()) {
@@ -763,10 +680,13 @@ void cCockpit::Render() {
         }
         break;
     case VIEWPORT_CYCLE: {
-            if(m_ViewportPlayer == 0) return;
+            if(m_ViewportPlayer == 0) {
+                sr_SetRenderContext(prevCtx);
+                return;
+            }
 
-            bool gl_depth_test = glIsEnabled(GL_DEPTH_TEST);
-            glDisable(GL_DEPTH_TEST);
+            bool depth_test_was_enabled = RenderIsEnabled(rCapability::DepthTest);
+            RenderDisableState(rCapability::DepthTest);
 
             for(widget_list_t::const_iterator i=m_Widgets.begin(); i!=m_Widgets.end(); ++i) {
                 if((*i)->Active()) {
@@ -774,11 +694,12 @@ void cCockpit::Render() {
                 }
             }
 
-            if(gl_depth_test) {
-                glEnable(GL_DEPTH_TEST);
+            if(depth_test_was_enabled) {
+                RenderEnableState(rCapability::DepthTest);
             }
         } break;
     }
+    sr_SetRenderContext(prevCtx);
 }
 
 void cCockpit::BeforeRoundProcess() {
@@ -823,10 +744,19 @@ static void display_cockpit_lucifer() {
         // select the corrected viewport
         port->EqualAspectBottom().Select();
 
+        // Ensure depth is off for cockpit rendering. ExecutePhase re-enables
+        // depth after each phase flush, so we must re-disable per viewport.
+        RenderDisableState(rCapability::DepthTest);
+        RenderDepthMask(false);
+
         cCockpit *player_cockpit;
         if(!(player_cockpit = dynamic_cast<cCockpit *>(player->cockpit.get()))) {
             player_cockpit = new cCockpit(cCockpit::VIEWPORT_ALL);
             player->cockpit = player_cockpit;
+        }
+        // Readjust every frame so widget positions update on window resize.
+        // Readjust(void) skips VIEWPORT_ALL types, so compute the factor here.
+        {
             float factor = 4./3. / (static_cast<float>(sr_screenWidth)/static_cast<float>(sr_screenHeight));
             player_cockpit->Readjust(factor * dims.y / dims.x);
         }
@@ -897,7 +827,6 @@ void cCockpit::Readjust(void) {
     if(m_Type != VIEWPORT_TOP) return;
     if (sr_screenWidth == 0) return;
     float factor = 4./3. / (static_cast<float>(sr_screenWidth)/static_cast<float>(sr_screenHeight));
-    //float factor = 2.;
     Readjust(factor);
 }
 void cCockpit::Readjust(float factor) {
@@ -923,4 +852,63 @@ ePlayerNetID *cCockpit::GetCurrentOrFocusedPlayer() {
         return m_FocusPlayer;
     }
 }
+
+// Maps finger ID → the button currently held by that finger
+static std::map<int64_t, cWidget::TouchButton*> s_activeFingers;
+
+bool cCockpit::ProcessTouch(float x, float y, uint32_t type, int64_t fingerId) {
+    // Convert from [0,1] touch space to [-1,1] HUD space
+    float hx = x * 2.0f - 1.0f;
+    float hy = 1.0f - y * 2.0f;
+
+    if (type == SDL_EVENT_FINGER_DOWN) {
+        FOREACH_COCKPIT(cockpit) {
+            for (cWidget::TouchButton* btn : (*cockpit)->m_TouchButtons) {
+                if (btn->activeFinger_ == -1 && btn->HitTest(hx, hy)) {
+                    btn->activeFinger_ = fingerId;
+                    s_activeFingers[fingerId] = btn;
+                    btn->Activate(true);
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    // FINGER_UP / FINGER_MOTION: look up the active button for this finger
+    auto it = s_activeFingers.find(fingerId);
+    if (it == s_activeFingers.end()) return false;
+
+    cWidget::TouchButton* btn = it->second;
+
+    if (type == SDL_EVENT_FINGER_UP) {
+        btn->activeFinger_ = -1;
+        btn->Activate(false);
+        s_activeFingers.erase(it);
+        return true;
+    }
+
+    if (type == SDL_EVENT_FINGER_MOTION) {
+        if (!btn->HitTest(hx, hy)) {
+            // Finger dragged outside — release
+            btn->activeFinger_ = -1;
+            btn->Activate(false);
+            s_activeFingers.erase(it);
+        }
+        return true;
+    }
+
+    return false;
+}
+
 #endif
+
+// Free-function wrapper so uInput.cpp can call into the cockpit without
+// a circular #include dependency (uInput.h ↔ cCockpit.h).
+bool cCockpit_ProcessTouch(float x, float y, uint32_t type, int64_t fingerId) {
+#ifndef DEDICATED
+    return cCockpit::ProcessTouch(x, y, type, fingerId);
+#else
+    return false;
+#endif
+}

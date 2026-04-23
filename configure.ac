@@ -57,7 +57,6 @@ AC_SUBST(version)
 
 AC_ARG_VAR(SDL_CONFIG,[Configuration script of SDL to use, defaults to sdl-config])
 AC_ARG_VAR(SDL2_CONFIG,[Configuration script of SDL to use, defaults to sdl2-config])
-AC_ARG_VAR(FREETYPE_CONFIG,[Configuration script of freetype to use, defaults to freetype-config])
 
 source_date_epoch=SOURCE_DATE_EPOCH
 test ${source_date_epoch} = SOURCE_DATE_EPOCH && source_date_epoch=${SOURCE_DATE_EPOCH:-`date +%s`}
@@ -96,9 +95,6 @@ default_enable_uninstall=yes
 enable_automakedefaults_actual_default=no
 have_lzma=false
 
-FTGL_CFLAGS=
-FTGL_LIBS=
-
 AC_ARG_WITH(maxclients, AC_HELP_STRING([--with-maxclients],[sets the hardcoded limit for the number of connected clients (default: 16 for clients and 32 for dedicated servers)]),
 [ 
     AC_DEFINE_UNQUOTED(MAXCLIENTS,${withval},maximal number of clients)
@@ -117,27 +113,38 @@ AC_ARG_ENABLE(dedicated,
        *) AC_MSG_ERROR(bad value ${enableval} for --enable-dedicated) ;;
      esac],[build_dedicated=false])
 
+AC_ARG_ENABLE(sdl3,
+     AC_HELP_STRING([--enable-sdl3],
+		[enables SDL3 support (default=enabled)]),
+     [case "${enableval}" in
+       yes) use_sdl3=true
+	   	;;
+       no)  use_sdl3=false
+	    ;;
+       *) AC_MSG_ERROR(bad value ${enableval} for --enable-sdl3) ;;
+     esac],[use_sdl3=true])
+
 AC_ARG_ENABLE(sdl2,
      AC_HELP_STRING([--enable-sdl2],
-		[enables sdl2 support (default=enabled)]),
+		[enables SDL2 support (default=disabled, SDL3 is now required)]),
      [case "${enableval}" in
        yes) use_sdl2=true
 	   	;;
        no)  use_sdl2=false
 	    ;;
        *) AC_MSG_ERROR(bad value ${enableval} for --enable-sdl2) ;;
-     esac],[use_sdl2=true])
+     esac],[use_sdl2=false])
 
 AC_ARG_ENABLE(sdl1,
      AC_HELP_STRING([--enable-sdl1],
-		[enables sdl1.X support (default=enabled)]),
+		[enables sdl1.X support (default=disabled, SDL3 is now required)]),
      [case "${enableval}" in
        yes) use_sdl1=true
 	   	;;
        no)  use_sdl1=false
 	    ;;
        *) AC_MSG_ERROR(bad value ${enableval} for --enable-sdl1) ;;
-     esac],[use_sdl1=true])
+     esac],[use_sdl1=false])
 
 
 dnl AC_ARG_ENABLE(glout,
@@ -281,8 +288,6 @@ if test -n "$ARMAGETRONAD_OS_X_TOOLKIT"; then
 	if test "x$build_regular" = "xtrue"; then
 		LDFLAGS="-F${ARMAGETRONAD_OS_X_TOOLKIT}/Frameworks -rpath ${ARMAGETRONAD_OS_X_TOOLKIT}/Frameworks $LDFLAGS"
 		CPPFLAGS="-I${ARMAGETRONAD_OS_X_TOOLKIT}/${os_x_arch}/include/AllFrameworks $CPPFLAGS"
-		FTGL_CFLAGS="-I${ARMAGETRONAD_OS_X_TOOLKIT}/${os_x_arch}/include/freetype2"
-		FTGL_LIBS="-lftgl -lfreetype -lbz2"
 	fi
 	
 	CXXFLAGS="-arch ${os_x_arch} $CXXFLAGS"
@@ -561,7 +566,7 @@ if test $CODELEVEL -ge 1; then
     AX_CXXFLAGS_GCC_OPTION(-Wno-strict-overflow)
 
     if test $DEBUGLEVEL -lt 1; then
-        dnl false positive warnings for this on boost
+        dnl suppress false positive warnings in optimized builds
         AX_CXXFLAGS_GCC_OPTION(-Wno-error=maybe-uninitialized)
     fi
     
@@ -673,9 +678,6 @@ if test ${HAVE_BASH} = no; then
    AC_MSG_ERROR([GNU Bourne-Again SHell (bash) is currently required for compilation.])
 fi
 
-dnl Boost
-AX_BOOST_BASE([1.33.1])
-
 dnl Ruby
 
 AC_ARG_WITH(ruby,
@@ -684,16 +686,6 @@ AC_ARG_WITH(ruby,
     if test ! -z "${withval}"; then
         RUBY="${withval}"
     fi
-)
-
-dnl glew
-
-have_glew=true
-
-AC_ARG_WITH(glew,
-    AC_HELP_STRING([--with-glew],
-        [Use GLEW and the OpenGL extensions it provides]),
-        test "${withval}" == "yes" || have_glew=false
 )
 
 dnl
@@ -814,7 +806,8 @@ case "$target" in
         MATHLIB=""
         SYS_GL_LIB=""
         SYS_GLU_LIB=""
-        test x$build_regular = xfalse || LIBS="$LIBS -framework OpenGL -framework CoreFoundation -framework CoreServices"
+        test x$build_regular = xfalse || LIBS="$LIBS -framework OpenGL"
+        LIBS="$LIBS -framework CoreFoundation -framework CoreServices"
         CXXFLAGS="${CXXFLAGS} -DGL_SILENCE_DEPRECATION"
         unset OBJC
         macosx=true
@@ -886,6 +879,21 @@ dnl load conan settings if they exist
 test -r $(dirname $0)/conan/conanautotoolstoolchain.sh && source $(dirname $0)/conan/conanautotoolstoolchain.sh
 
 dnl *************************************************
+dnl         pkg-config search path
+dnl *************************************************
+dnl
+dnl The LunarG Vulkan SDK and any from-source builds of protobuf install
+dnl their .pc files at /usr/local/lib/pkgconfig, which pkg-config does not
+dnl search by default on macOS.  Prepend it here, once, before any
+dnl PKG_CHECK_MODULES call so that both protobuf and vulkan/shaderc are
+dnl found regardless of build target (client or dedicated server).
+
+if test -d /usr/local/lib/pkgconfig; then
+    PKG_CONFIG_PATH="/usr/local/lib/pkgconfig${PKG_CONFIG_PATH:+:${PKG_CONFIG_PATH}}"
+    export PKG_CONFIG_PATH
+fi
+
+dnl *************************************************
 dnl         libxml2
 dnl *************************************************
 
@@ -923,20 +931,15 @@ dnl         Threading
 dnl *************************************************
 AC_LANG([C++])
 
-AX_BOOST_SYSTEM()
-AX_BOOST_THREAD()
-
-dnl if boost-thread is unavailable, make do with pthread
-if test "x$BOOST_THREAD_LIB" = x; then
+dnl Use pthread for threading (C++11 std::thread wraps pthread on POSIX systems)
 ACX_PTHREAD([
 LIBS="${PTHREAD_LIBS} ${LIBS}"
 CXXFLAGS="${CXXFLAGS} ${PTHREAD_CFLAGS}"
 CC="${PTHREAD_CC}"
 AC_DEFINE(HAVE_PTHREAD,1,[Define if you have POSIX threads libraries and header files.])
 ],
-AC_MSG_ERROR([You need boost::thread or pthread to compile ${progtitle}.])
+AC_MSG_ERROR([POSIX threads (pthread) are required to compile ${progtitle}.])
 )
-fi
 
 dnl *************************************************
 dnl         Misc
@@ -973,15 +976,7 @@ PKG_CHECK_MODULES(PROTOBUF, protobuf >= 2.4.0,,
 )
 
 
-# just adding all flags would work, but on macOS with brew, there are
-# a ton of duplicate flags that would slow the compilation output down.
-# Only add each option once.
-for flag in ${PROTOBUF_CFLAGS}; do
-	if [[[ "${CXXFLAGS}" != *"${flag}"* ]]]; then
-		# echo ${flag}
-		CPPFLAGS="${flag} ${CPPFLAGS}"
-	fi
-done
+CPPFLAGS="${CPPFLAGS} ${PROTOBUF_CFLAGS}"
 
 AC_LANG([C++])
 
@@ -1042,7 +1037,45 @@ dnl *************************************************
 
 #use_sdl1=true
 
-if test x$use_sdl2 = xtrue ; then
+dnl SDL3 is now required
+if test "x$use_sdl3" = "xtrue"; then
+    AC_MSG_CHECKING(whether SDL3 is installed)
+    if pkg-config sdl3 --exists 2>/dev/null; then
+        dnl Use --static flags so that libSDL3.a (when available) gets all
+        dnl the required macOS framework transitive dependencies.  These
+        dnl extra -Wl,-framework,... flags are harmless when linking against
+        dnl the dylib (already embedded in it) but mandatory for .a linkage.
+        SDLLIBS="`pkg-config --static sdl3 --libs`"
+        SDL3_CFLAGS="`pkg-config sdl3 --cflags`"
+        AC_MSG_RESULT(yes)
+
+        CPPFLAGS="$CPPFLAGS $SDL3_CFLAGS"
+
+        dnl Temporarily add SDL3 libs for the link test, then restore LIBS.
+        dnl The static resolver at the bottom of configure.ac will handle the
+        dnl final .a path substitution when building the real binary.
+        sa_save_LIBS="$LIBS"
+        LIBS="${SDLLIBS} $LIBS"
+        AC_CHECK_FUNC(SDL_Init,
+            [
+                AC_DEFINE(HAVE_LIBSDL,,[Define if you have the library SDL])
+                AC_DEFINE(HAVE_SDL3, 1, [Define if using SDL3])
+                use_sdl3=true
+                use_sdl2=false
+                use_sdl1=false
+            ],
+            [
+                AC_MSG_ERROR([SDL3 library found but not working. SDL3 is required to compile ${progtitle}.])
+            ]
+        ,)
+        LIBS="$sa_save_LIBS"
+    else
+        AC_MSG_RESULT(no)
+        AC_MSG_ERROR([SDL3 library not found. SDL3 is required to compile ${progtitle}. Install SDL3 and ensure pkg-config can find it.])
+    fi
+fi
+
+if test x$use_sdl3 != xtrue && test x$use_sdl2 = xtrue ; then
     AC_MSG_CHECKING(whether SDL2 is installed)
     if SDLLIBS=`${SDL2_CONFIG} --libs`; then
     	AC_MSG_RESULT(yes)
@@ -1060,7 +1093,7 @@ if test x$use_sdl2 = xtrue ; then
     ,)
 fi
 
-if test x$use_sdl2 = xtrue ; then
+if test x$use_sdl3 = xtrue || test x$use_sdl2 = xtrue ; then
    use_sdl1=false
 fi
 
@@ -1085,28 +1118,34 @@ dnl *************************************************
 dnl         Sound
 dnl *************************************************
 
-if test x$enable_sound = xyes && test x$use_sdl2 = xtrue ; then
-	dnl first do the regular sdl define
- 	AC_DEFINE(HAVE_SDL_FOR_SOUND, 1,  [Define if you have SDL_sound, which is part of the core SDL])
+dnl SDL_mixer replaced with miniaudio
+dnl if test x$enable_sound = xyes && test x$use_sdl2 = xtrue ; then
+dnl 	dnl first do the regular sdl define
+dnl  	AC_DEFINE(HAVE_SDL_FOR_SOUND, 1,  [Define if you have SDL_sound, which is part of the core SDL])
+dnl
+dnl 	dnl now check for sdl_mixer
+dnl  	AC_CHECK_LIB(SDL2_mixer, Mix_OpenAudio,
+dnl 		[AC_DEFINE(HAVE_LIBSDL_MIXER, 1, [Define if you have the SDL2_mixer library (-lSDL2_mixer).])
+dnl 			LIBS="-lSDL2_mixer $LIBS"],
+dnl  		[AC_MSG_ERROR([SDL2_mixer library not found. It is required for now. Sorry.])],
+dnl 		[])
+dnl fi
+dnl
+dnl if test x$enable_sound = xyes && test x$use_sdl1 = xtrue ; then
+dnl 	dnl first do the regular sdl define
+dnl  	AC_DEFINE(HAVE_SDL_FOR_SOUND, 1,  [Define if you have SDL_sound, which is part of the core SDL])
+dnl
+dnl 	dnl now check for sdl_mixer
+dnl  	AC_CHECK_LIB(SDL_mixer, Mix_OpenAudio,
+dnl 		[AC_DEFINE(HAVE_LIBSDL_MIXER, 1, [Define if you have the SDL_mixer library (-lSDL_mixer).])
+dnl 			LIBS="-lSDL_mixer $LIBS"],
+dnl  		[AC_MSG_ERROR([SDL_mixer library not found. It is required for now. Sorry.])],
+dnl 		[])
+dnl fi
 
-	dnl now check for sdl_mixer
- 	AC_CHECK_LIB(SDL2_mixer, Mix_OpenAudio,
-		[AC_DEFINE(HAVE_LIBSDL_MIXER, 1, [Define if you have the SDL2_mixer library (-lSDL2_mixer).])
-			LIBS="-lSDL2_mixer $LIBS"],
- 		[AC_MSG_ERROR([SDL2_mixer library not found. It is required for now. Sorry.])],
-		[])
-fi
-
-if test x$enable_sound = xyes && test x$use_sdl1 = xtrue ; then
-	dnl first do the regular sdl define
- 	AC_DEFINE(HAVE_SDL_FOR_SOUND, 1,  [Define if you have SDL_sound, which is part of the core SDL])
-
-	dnl now check for sdl_mixer
- 	AC_CHECK_LIB(SDL_mixer, Mix_OpenAudio,
-		[AC_DEFINE(HAVE_LIBSDL_MIXER, 1, [Define if you have the SDL_mixer library (-lSDL_mixer).])
-			LIBS="-lSDL_mixer $LIBS"],
- 		[AC_MSG_ERROR([SDL_mixer library not found. It is required for now. Sorry.])],
-		[])
+dnl Use miniaudio for audio instead of SDL_mixer
+if test x$enable_sound = xyes ; then
+	AC_DEFINE(HAVE_MINIAUDIO, 1, [Define if using miniaudio for audio.])
 fi
 
 dnl *************************************************
@@ -1173,122 +1212,56 @@ Read the file documentation/installation.txt.]))
 fi
 
 dnl *************************************************
-dnl         GLEW
+dnl         GLM (OpenGL Mathematics library)
 dnl *************************************************
 
-if test ${have_glew} = true; then
-  AC_CHECK_LIB(GLEW,glewInit,,
-  AC_MSG_WARN([OpenGL Extension Wrangler (GLEW) library not found. No fancy effects for you.])
-  have_glew=false
-  )
-fi
-
-if test ${have_glew} = true; then
-  AC_CHECK_HEADERS([GL/glew.h],,
-  AC_MSG_WARN([OpenGL Extension Wrangler (GLEW) headers not found. No fancy effects for you.])
-  have_glew=false
-  )
-fi
+AC_CHECK_HEADERS([glm/glm.hpp],,
+AC_MSG_ERROR([
+GLM (OpenGL Mathematics) header library not found.
+You need GLM to compile ${progtitle}.
+Install it with: apt install libglm-dev (Debian/Ubuntu)
+                 dnf install glm-devel (Fedora)
+                 brew install glm (macOS)]))
 
 dnl *************************************************
-dnl         libpng
+dnl         Vulkan + shaderc
 dnl *************************************************
+dnl
+dnl The Vulkan renderer requires libvulkan (core Vulkan loader) and
+dnl libshaderc_shared (runtime GLSL->SPIR-V compiler, used to compile
+dnl moviepack shaders on demand).
+dnl
+PKG_CHECK_MODULES([VULKAN], [vulkan],
+    [CPPFLAGS="${CPPFLAGS} ${VULKAN_CFLAGS}"
+     vulkan_libdir=$(${PKG_CONFIG} --variable=libdir vulkan 2>/dev/null)
+     if test -n "${vulkan_libdir}"; then
+         vulkan_libdir=$(cd "${vulkan_libdir}" 2>/dev/null && pwd)
+         test -n "${vulkan_libdir}" && LDFLAGS="${LDFLAGS} -Wl,-rpath,${vulkan_libdir}"
+     fi],
+    [AC_MSG_ERROR([Vulkan library not found. Install the LunarG Vulkan SDK (macOS) or libvulkan-dev (Linux).])])
 
-PKG_CHECK_MODULES(LIBPNG, [libpng])
-CXXFLAGS="${CXXFLAGS} ${LIBPNG_CFLAGS}"
-LIBS="${LIBS} ${LIBPNG_LIBS}"
+PKG_CHECK_MODULES([SHADERC], [shaderc],
+    [CPPFLAGS="${CPPFLAGS} ${SHADERC_CFLAGS}"],
+    [AC_MSG_ERROR([shaderc library not found. Install the LunarG Vulkan SDK (macOS) or libshaderc-dev (Linux).])])
 
-AC_CHECK_FUNC(png_sig_cmp,
-,
-AC_MSG_ERROR([You need libpng to compile ${progtitle}.]))
+AC_CHECK_HEADERS([vulkan/vulkan.h],,
+    [AC_MSG_ERROR([Vulkan headers not found. Check your Vulkan SDK installation.])])
 
-
-dnl *************************************************
-dnl         FTGL
-dnl *************************************************
-
-AC_LANG([C++])
-
-test -z "$FREETYPE_CONFIG" && FREETYPE_CONFIG=freetype-config
-
-if test -z "$ARMAGETRONAD_OS_X_TOOLKIT"; then
-	FTGL_CFLAGS="`pkg-config ftgl --cflags`"
-	FTGL_LIBS="`pkg-config ftgl --libs`"
-fi
-
-FTGL_ERROR="You need the library ftgl in at least version 2.1.3~rc5 to compile Armagetron. Read the file documentation/installation.txt."
-
-AC_CHECK_LIB(ftgl,ftglRenderGlyph,
-CPPFLAGS="$CPPFLAGS $FTGL_CFLAGS"
-LIBS="$LIBS $FTGL_LIBS"
-,
-AC_MSG_ERROR([$FTGL_ERROR]),
-$FTGL_LIBS
-)
-
-USE_FTGL=yes
-
-if test -z "$ARMAGETRONAD_OS_X_TOOLKIT"; then
-
-	# `pkg-config ftgl --cflags` doesn't reliably give the include path to FTGL itself, we are on our own finding the includes in some cases.
-	# look for FTGL headers in default system header locations and the prefixes of the libraries that do have a -config script
-	FTGL_HEADERS="/usr/include/FTGL /usr/local/include/FTGL `$FREETYPE_CONFIG --prefix`/include/FTGL `$SDL_CONFIG --prefix`/include/FTGL ${prefix}/include/FTGL "
-
-	AC_ARG_WITH(ftgl,
-	    AC_HELP_STRING([--with-ftgl],
-	        [use FTGL for rendering (default=enabled, which is currently required), the argument is the location of the FTGL headers]),
-	    if test "${withval}" = yes -o "${withval}" = no; then
-	        USE_FTGL="${withval}"
-	    else
-	        FTGL_HEADERS=${withval}
-	    fi
-	)
-
-	# candidates are collected, walk through them
-	if test -z "`echo $FTGL_CFLAGS | grep FTGL`"; then
-	    found=false
-	    AC_MSG_CHECKING(for location of FTGL includes)
-	    for candidate in ${FTGL_HEADERS}; do
-	        if test -r ${candidate}/FTGL.h || test -r ${candidate}/ftgl.h; then
-	            AC_MSG_RESULT(${candidate})
-	                CPPFLAGS="$CPPFLAGS -I${candidate}"
-	                found=true
-	                break
-	            fi
-	    done
-
-	    if test ${found} = false; then
-	        AC_MSG_RESULT([not found])
-	        AC_MSG_ERROR([FTGL headers not found on your system. Please pass the correct location via --with-ftgl=<path to FTGL include directory>.])
-	    fi
-	fi
-fi
+AC_CHECK_HEADERS([shaderc/shaderc.hpp],,
+    [AC_MSG_ERROR([shaderc C++ headers not found. Check your Vulkan SDK installation.])])
 
 dnl *************************************************
-dnl         freetype
+dnl         libpng (replaced by stb_image_write)
 dnl *************************************************
 
-dnl FTGL has this one in its dependencies and libraries it passes via pkg-config, but
-dnl they're in the wrong order for static linking. That's why we add freetype once again.
+dnl PKG_CHECK_MODULES(LIBPNG, [libpng])
+dnl CXXFLAGS="${CXXFLAGS} ${LIBPNG_CFLAGS}"
+dnl LIBS="${LIBS} ${LIBPNG_LIBS}"
 
-AC_CHECK_LIB(freetype,FT_Init_FreeType,
-CPPFLAGS="$CPPFLAGS `$FREETYPE_CONFIG --cflags`"
-LIBS="$LIBS `$FREETYPE_CONFIG --libs`"
-,
-AC_MSG_ERROR([You need the library freetype to compile Armagetron. Read the file documentation/installation.txt.])
-)
+dnl AC_CHECK_FUNC(png_sig_cmp,
+dnl ,
+dnl AC_MSG_ERROR([You need libpng to compile ${progtitle}.]))
 
-dnl FTGL again. Check for the headers. First, try the individual header.
-dnl Use modified pedantic CXXFLAGS for that. If the headers are deprecated,
-dnl the test will fail.
-CXXFLAGS_SAVE="$CXXFLAGS"
-CXXFLAGS="$CXXFLAGS -Werror -pedantic"
-AC_MSG_CHECKING([whether FTGLPixmapFont.h is deprecated])
-AC_TRY_COMPILE([#include <FTGLPixmapFont.h>],return 0,[AC_MSG_RESULT([no, not checking <ftgl.h>.])],
-[AC_MSG_RESULT([yes])
-AC_CHECK_HEADERS([FTGL/ftgl.h ftgl.h], [break])]
-)
-CXXFLAGS="$CXXFLAGS_SAVE"
 
 dnl *************************************************
 dnl         Other Stuff
@@ -1308,47 +1281,17 @@ dnl	libjpeg not found. Expect small graphical errors ( missing moviepack title s
 dnl	)
 dnl )
 
-if test x$use_sdl2 = xtrue; then
-    AC_CHECK_LIB(SDL2_image, IMG_Load,,
-    AC_MSG_ERROR([You need the library SDL2_image to compile ${progtitle}.]
-    ))
-
-    dnl look for the right header for SDL2_image
-    AC_CHECK_HEADERS(SDL_image.h,,
-    [
-    AC_MSG_WARN([SDL_image header not found where it should be ( the SDL include directory ).
-    Trying fallback.])
-    AC_CHECK_HEADERS(SDL2/SDL_image.h,,
-    [AC_MSG_WARN([
-    SDL2_image header not found. The library is there, so something must be unusual
-    in your setup: SDL_image.h does not reside in the same folder as the rest of the SDL
-    inlcudes and not in any SDL subdirectory in the inclue path. If you know the
-    correct path to it, edit src/render/rTexture.cpp and enter it there.])]
-    )
-    ]
-    )
-fi
-
-if test x$use_sdl1 = xtrue; then
-    AC_CHECK_LIB(SDL_image, IMG_Load,,
-    AC_MSG_ERROR([You need the library SDL_image to compile ${progtitle}.]
-    ))
-
-    dnl look for the right header for SDL_image
-    AC_CHECK_HEADERS(SDL_image.h,,
-    [
-    AC_MSG_WARN([SDL_image header not found where it should be ( the SDL include directory ).
-    Trying fallback.])
-    AC_CHECK_HEADERS(SDL/SDL_image.h,,
-    [AC_MSG_WARN([
-    SDL_image header not found. The library is there, so something must be unusual
-    in your setup: SDL_image.h does not reside in the same folder as the rest of the SDL
-    inlcudes and not in any SDL subdirectory in the inclue path. If you know the
-    correct path to it, edit src/render/rTexture.cpp and enter it there.])]
-    )
-    ]
-    )
-fi
+dnl SDL_image is no longer required - image loading uses stb_image instead
+dnl if test x$use_sdl2 = xtrue; then
+dnl     AC_CHECK_LIB(SDL2_image, IMG_Load,,
+dnl     AC_MSG_ERROR([You need the library SDL2_image to compile ${progtitle}.]
+dnl     ))
+dnl fi
+dnl if test x$use_sdl1 = xtrue; then
+dnl     AC_CHECK_LIB(SDL_image, IMG_Load,,
+dnl     AC_MSG_ERROR([You need the library SDL_image to compile ${progtitle}.]
+dnl     ))
+dnl fi
 
 
 ifelse(,,,
@@ -1370,10 +1313,88 @@ export CXXFLAGS
 
 fi dnl (dedicated server)
 
-dnl set protobuf libs only here at the bottom so any custom ones
-dnl get found before the regular ones from any generic /usr libary
-dnl include flags from other libraries
-LIBS="${PROTOBUF_LIBS} ${LIBS}"
+dnl *************************************************
+dnl         Static library resolver
+dnl *************************************************
+dnl
+dnl Prefer .a archives over dylibs for all detected dependency libs.
+dnl Apple's ld has no -Bstatic; the portable approach on macOS is to
+dnl pass the absolute archive path instead of -l<name>.
+dnl
+dnl Special cases:
+dnl   vulkan       — the Vulkan loader MUST stay dynamic; it dlopen()s
+dnl                  the actual ICD driver at runtime.
+dnl   shaderc_shared — the SDK ships an all-in-one static archive as
+dnl                  libshaderc_combined.a; map the name accordingly.
+dnl
+dnl Search dirs are derived from pkg-config (no hardcoded paths).
+dnl Libraries for which no .a is found fall through unchanged as -l flags.
+
+sa_search_dirs=""
+for sa_pc in protobuf shaderc vulkan sdl3; do
+    sa_d=$(${PKG_CONFIG} --variable=libdir ${sa_pc} 2>/dev/null)
+    test -n "${sa_d}" && sa_search_dirs="${sa_d} ${sa_search_dirs}"
+done
+
+dnl Resolve one lib list.  Sets sa_out to the resolved token string.
+dnl  $1 = input lib list (e.g. ${PROTOBUF_LIBS})
+sa_resolve() {
+    sa_in="$1"
+    sa_out=""
+    sa_dirs="${sa_search_dirs}"
+    for sa_tok in ${sa_in}; do
+        case "${sa_tok}" in
+            -L*)
+                sa_dir=$(echo "${sa_tok}" | sed 's/^-L//')
+                sa_dirs="${sa_dir} ${sa_dirs}"
+                sa_out="${sa_out} ${sa_tok}"
+                ;;
+            -lvulkan|-lm)
+                dnl Keep these libraries dynamic:
+                dnl   -lvulkan: dlopen()s the ICD driver at runtime
+                dnl   -lm: contains IFUNC dispatchers requiring runtime glibc symbols
+                sa_out="${sa_out} ${sa_tok}"
+                ;;
+            -l*)
+                sa_name=$(echo "${sa_tok}" | sed 's/^-l//')
+                case "${sa_name}" in
+                    shaderc_shared) sa_alts="shaderc_combined shaderc" ;;
+                    *)              sa_alts="${sa_name}" ;;
+                esac
+                sa_hit=""
+                for sa_alt in ${sa_alts}; do
+                    for sa_d in ${sa_dirs}; do
+                        if test -f "${sa_d}/lib${sa_alt}.a"; then
+                            sa_hit="${sa_d}/lib${sa_alt}.a"
+                            break
+                        fi
+                    done
+                    test -n "${sa_hit}" && break
+                done
+                if test -n "${sa_hit}"; then
+                    sa_out="${sa_out} ${sa_hit}"
+                else
+                    sa_out="${sa_out} ${sa_tok}"
+                fi
+                ;;
+            *)
+                sa_out="${sa_out} ${sa_tok}"
+                ;;
+        esac
+    done
+}
+
+sa_resolve "${VULKAN_LIBS}"
+LIBS="${sa_out} ${LIBS}"
+
+sa_resolve "${SHADERC_LIBS}"
+LIBS="${sa_out} ${LIBS}"
+
+sa_resolve "${SDLLIBS}"
+LIBS="${sa_out} ${LIBS}"
+
+sa_resolve "${PROTOBUF_LIBS}"
+LIBS="${sa_out} ${LIBS}"
 
 dnl Checks for header files.
 AC_HEADER_STDC
@@ -1393,9 +1414,10 @@ AX_CXX_HAVE_ALIGN()
 # if the compiler is GCC -Os produces faulty code (exceptions cause crashes), at least on AMD64. Replace it with -O2.
 test -z "`$CXX --version | grep '(GCC)'`" || CXXFLAGS="`echo $CXXFLAGS | sed -e 's,-Os,-O2,g' `" CFLAGS="`echo $CFLAGS | sed -e 's,-Os,-O2,g' `"
 
-if test "$enable_sound" = "yes"; then
-AC_DEFINE(HAVE_LIBSDL_MIXER, 1, [Use SDL2_mixer])
-fi
+dnl SDL_mixer replaced with miniaudio
+dnl if test "$enable_sound" = "yes"; then
+dnl AC_DEFINE(HAVE_LIBSDL_MIXER, 1, [Use SDL2_mixer])
+dnl fi
 
 # define
 AC_DEFINE_UNQUOTED(TOP_SOURCE_DIR,"${srcdir}", [Define the top source directory])
@@ -1543,10 +1565,6 @@ AC_SUBST(progid)
 # all include directories added via -I so far should be system level inlcudes, divide them from those added by individual makefiles
 # CPPFLAGS="-I- $CPPFLAGS"
 
-# slap on boost defines
-CPPFLAGS="$CPPFLAGS $BOOST_CPPFLAGS"
-LIBS="$LIBS $BOOST_LDFLAGS $BOOST_SYSTEM_LIB $BOOST_THREAD_LIB"
-
 export CFLAGS
 export CPPFLAGS
 export CXXFLAGS
@@ -1683,8 +1701,3 @@ if test "x$OUTSIDE_OF_PREFIX" = "xyes"; then
     echo ""
 fi
 
-# print warnings about missing optional libraries that cause feature reduction
-if test ${have_glew} = false; then
-	echo ""
-    echo "Warning: GLEW library (http://glew.sourceforge.net/) not found or not functional. Advanced graphics effects will be disabled. Ok, we don't have that many of them anyway, so this waring is safe to ignore for now."
-fi

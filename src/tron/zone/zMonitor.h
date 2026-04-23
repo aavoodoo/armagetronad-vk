@@ -1,7 +1,7 @@
 #ifndef ArmageTron_Monitor_H
 #define ArmageTron_Monitor_H
 
-#include <boost/shared_ptr.hpp>
+#include <memory>
 #include <vector>
 #include "defs.h"
 #include "eGameObject.h"

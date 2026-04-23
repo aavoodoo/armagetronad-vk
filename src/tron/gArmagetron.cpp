@@ -26,6 +26,7 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 */
 
 #include "gStuff.h"
+#include "gMoviepack.h"
 #include "tSysTime.h"
 #include "tDirectories.h"
 #include "tLocale.h"
@@ -39,7 +40,11 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 
 #include "rScreen.h"
 #include "rSysdep.h"
+#ifndef DEDICATED
+#include "rFrameLifecycle.h"
+#endif
 #include "uInputQueue.h"
+#include "uInput.h"
 //#include "eTess.h"
 #include "rTexture.h"
 #include "tConfiguration.h"
@@ -68,7 +73,26 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 #ifndef DEDICATED
 #include "rRender.h"
 #include "rSDL.h"
+// SDL_syswm.h - only needed for SDL2, SDL3 includes it via SDL.h
+#ifndef HAVE_SDL3
 #include <SDL_syswm.h>
+#endif
+// On Android and iOS, SDL_main.h redefines main() as SDL_main() so SDL's app delegate can call it
+#ifdef __APPLE__
+#include <TargetConditionals.h>
+#endif
+#if (defined(__ANDROID__) || (defined(__APPLE__) && TARGET_OS_IOS)) && defined(HAVE_SDL3)
+#include <SDL3/SDL_main.h>
+#endif
+#ifdef __ANDROID__
+#include <android/log.h>
+#endif
+#if defined(__ANDROID__) || (defined(__APPLE__) && TARGET_OS_IOS)
+#include <unistd.h>
+#endif
+#if defined(__APPLE__) && TARGET_OS_IOS
+#include "rTouchOverlayIOS.h"
+#endif
 
 static gCommandLineJumpStartAnalyzer sg_jumpStartAnalyzer;
 #endif
@@ -201,10 +225,7 @@ void sg_StartupPlayerMenu()
 
     k.NewChoice( "$first_setup_keys_cursor", "$first_setup_keys_cursor_help", tString("keys_cursor.cfg") );
     k.NewChoice( "$first_setup_keys_wasd", "$first_setup_keys_wasd_help", tString("keys_wasd.cfg") );
-#if SDL_VERSION_ATLEAST(2,0,0)
-#else
-    k.NewChoice( "$first_setup_keys_zqsd", "$first_setup_keys_zqsd_help", tString("keys_zqsd.cfg") );
-#endif
+    // SDL3: keys_zqsd.cfg was SDL1-only, removed
     k.NewChoice( "$first_setup_keys_cursor_single", "$first_setup_keys_cursor_single_help", tString("keys_cursor_single.cfg") );
     k.NewChoice( "$first_setup_keys_x", "$first_setup_keys_x_help", tString("keys_x.cfg") );
 
@@ -284,11 +305,8 @@ void sg_StartupPlayerMenu()
     if( keyboardTemplate.Len() > 1 )
     {
         std::ostringstream fullName;
-#if SDL_VERSION_ATLEAST(2,0,0)
+        // SDL3: Use sdl2 folder for keyboard configs (compatible with SDL3)
         fullName << "sdl2/";
-#else
-        fullName << "sdl1/";
-#endif
         fullName << keyboardTemplate;
 
         std::ifstream s;
@@ -309,8 +327,7 @@ static void welcome(){
     {
         for (int i = 20; i>=0; i--)
         {
-            sr_ClearGL();
-            {
+            rRenderFrame([&]() {
                 rTextField c(-.8,.6, .1, .1);
                 tString s;
                 s << ColorString(1,1,1);
@@ -318,8 +335,7 @@ static void welcome(){
                 s << ColorString(1,0,0);
                 s << "bla bla blubb blaa blaa blubbb blaaa blaaa blubbbb blaaaa blaaaa blubbbbb blaaaaa blaaaaa blubbbbbb blaaaaaa\n";
                 c << s;
-            }
-            sr_SwapGL();
+            });
         }
     }
 #endif
@@ -377,19 +393,19 @@ static void welcome(){
             timeout = tSysTimeFloat() + 6;
 
             uInputProcessGuard inputProcessGuard;
-            while((!su_GetSDLInput(tEvent) || tEvent.type!=SDL_KEYDOWN) &&
+            while((!su_GetSDLInput(tEvent)
+                   || (tEvent.type != SDL_EVENT_KEY_DOWN
+                       && tEvent.type != SDL_EVENT_MOUSE_BUTTON_DOWN
+                       && tEvent.type != SDL_EVENT_FINGER_DOWN)) &&
                     tSysTimeFloat() < timeout)
             {
                 if ( sr_glOut )
                 {
-                    sr_ResetRenderState(true);
-                    rViewport::s_viewportFullscreen.Select();
-
-                    rSysDep::ClearGL();
-
-                    uMenu::GenericBackground();
-
-                    rSysDep::SwapGL();
+                    rRenderFrame([&]() {
+                        sr_ResetRenderState(true);
+                        rViewport::s_viewportFullscreen.Select();
+                        uMenu::GenericBackground();
+                    });
                 }
 
                 tAdvanceFrame();
@@ -408,13 +424,19 @@ static void welcome(){
 
     if ( sr_glOut )
     {
-        rSysDep::ClearGL();
-        //        rFont::s_defaultFont.Select();
-        //        rFont::s_defaultFontSmall.Select();
-        gLogo::Display();
-        rSysDep::ClearGL();
+        rRenderFrame([&]() {
+            //        rFont::s_defaultFont.Select();
+            //        rFont::s_defaultFontSmall.Select();
+            gLogo::Display();
+            // Note: Original code had a second ClearGL() here before SwapGL
+            // This unusual pattern might have been for double-buffering setup
+            // Now handled by rRenderFrame lifecycle
+        });
     }
-    rSysDep::SwapGL();
+    else
+    {
+        rSysDep::SwapGL();
+    }
 
     sr_textOut = textOutBack;
     sg_StartupLanguageMenu();
@@ -487,11 +509,8 @@ static void sg_DelayedActivation()
     Activate( sg_active );
 }
 
-#if SDL_VERSION_ATLEAST(2,0,0)
-int filter(void*, SDL_Event *tEvent){
-#else
-int filter(const SDL_Event *tEvent){
-#endif
+// SDL3: Event filter callback returns bool
+bool filter(void*, SDL_Event *tEvent){
     // recursion avoidance
     static bool recursion = false;
     if ( !recursion )
@@ -517,15 +536,11 @@ int filter(const SDL_Event *tEvent){
         RecursionGuard guard( recursion );
 
         // boss key or OS X quit command
-        if ((tEvent->type==SDL_KEYDOWN && tEvent->key.keysym.sym==SDLK_ESCAPE &&
-                tEvent->key.keysym.mod & KMOD_SHIFT) ||
-                (tEvent->type==SDL_KEYDOWN && tEvent->key.keysym.sym==SDLK_q &&
-#if SDL_VERSION_ATLEAST(2,0,0)
-                 tEvent->key.keysym.mod & KMOD_GUI) ||
-#else
-                 tEvent->key.keysym.mod & KMOD_META) ||
-#endif
-                (tEvent->type==SDL_QUIT)){
+        if ((tEvent->type==SDL_EVENT_KEY_DOWN && tEvent->key.key==SDLK_ESCAPE &&
+                tEvent->key.mod & SDL_KMOD_SHIFT) ||
+                (tEvent->type==SDL_EVENT_KEY_DOWN && tEvent->key.key==SDLK_Q &&
+                 tEvent->key.mod & SDL_KMOD_GUI) ||
+                (tEvent->type==SDL_EVENT_QUIT)){
             // sn_SetNetState(nSTANDALONE);
             // sn_Receive();
 
@@ -537,55 +552,47 @@ int filter(const SDL_Event *tEvent){
             return false;
         }
 
-        if(tEvent->type==SDL_MOUSEMOTION)
-            if(tEvent->motion.x==sr_screenWidth/2 && tEvent->motion.y==sr_screenHeight/2)
-                return 0;
+#if defined(__APPLE__) && TARGET_OS_IOS
+        // iOS background / foreground lifecycle
+        if (tEvent->type == SDL_EVENT_WILL_ENTER_BACKGROUND)
+        {
+            // Save config — OS may kill the app while in background without notice.
+            st_SaveConfig();
+            // Pause Vulkan rendering: vkAcquireNextImageKHR and vkWaitForFences
+            // with UINT64_MAX would block indefinitely when no Metal drawable is
+            // available, causing the OS to terminate the blocked main thread and
+            // display a black screen during the home-screen transition animation.
+            sr_vkSetAppInBackground(true);
+        }
+        if (tEvent->type == SDL_EVENT_DID_ENTER_FOREGROUND)
+        {
+            // Resume rendering and force a swapchain recreation: the Metal surface
+            // dimensions may have changed (e.g. rotation) while in the background.
+            sr_vkSetAppInBackground(false);
+            sr_vkRequestSwapchainRecreation();
+        }
+#endif
+
+        if(tEvent->type==SDL_EVENT_MOUSE_MOTION)
+            if(static_cast<int>(tEvent->motion.x)==sr_screenWidth/2 && static_cast<int>(tEvent->motion.y)==sr_screenHeight/2)
+                return false;
         if (su_mouseGrab &&
-                tEvent->type!=SDL_MOUSEBUTTONDOWN &&
-                tEvent->type!=SDL_MOUSEBUTTONUP &&
-                ((tEvent->motion.x>=sr_screenWidth-10  || tEvent->motion.x<=10) ||
-                 (tEvent->motion.y>=sr_screenHeight-10 || tEvent->motion.y<=10)))
-#if SDL_VERSION_ATLEAST(2,0,0)
-            SDL_WarpMouseInWindow(sr_screen, sr_screenWidth/2, sr_screenHeight/2);
-#else
-            SDL_WarpMouse(sr_screenWidth/2,sr_screenHeight/2);
-#endif
+                tEvent->type!=SDL_EVENT_MOUSE_BUTTON_DOWN &&
+                tEvent->type!=SDL_EVENT_MOUSE_BUTTON_UP &&
+                ((static_cast<int>(tEvent->motion.x)>=sr_screenWidth-10  || static_cast<int>(tEvent->motion.x)<=10) ||
+                 (static_cast<int>(tEvent->motion.y)>=sr_screenHeight-10 || static_cast<int>(tEvent->motion.y)<=10)))
+            SDL_WarpMouseInWindow(sr_screen, static_cast<float>(sr_screenWidth/2), static_cast<float>(sr_screenHeight/2));
 
-        // fetch alt-tab
+        // fetch alt-tab (SDL3 has separate window event types)
 
-#if SDL_VERSION_ATLEAST(2,0,0)
-        if (tEvent->type==SDL_WINDOWEVENT)
+        if (tEvent->type==SDL_EVENT_WINDOW_FOCUS_GAINED || tEvent->type==SDL_EVENT_WINDOW_FOCUS_LOST)
         {
             // Jonathans fullscreen bugfix.
 #ifdef MACOSX
             if(currentScreensetting.fullscreen ^ lastSuccess.fullscreen) return false;
 #endif
-	    if ( tEvent->window.event==SDL_WINDOWEVENT_FOCUS_GAINED || tEvent->window.event==SDL_WINDOWEVENT_FOCUS_LOST )
-            {
-                sg_active = tEvent->window.event == SDL_WINDOWEVENT_FOCUS_GAINED;
-                st_ToDo(sg_DelayedActivation);
-            }
-
             // reload GL stuff if application gets reactivated
-            if ( tEvent->window.event == SDL_WINDOWEVENT_FOCUS_GAINED )
-#else //SDL_VERSION_ATLEAST(2,0,0)
-        if (tEvent->type==SDL_ACTIVEEVENT)
-        {
-            // Jonathans fullscreen bugfix.
-#ifdef MACOSX
-            if(currentScreensetting.fullscreen ^ lastSuccess.fullscreen) return false;
-#endif
-            int flags = SDL_APPINPUTFOCUS;
-            if ( tEvent->active.state & flags )
-            {
-                // con << tSysTimeFloat() << " " << "active: " << (tEvent->active.gain ? "on" : "off") << "\n";
-                sg_active = tEvent->active.gain;
-                st_ToDo(sg_DelayedActivation);
-            }
-
-            // reload GL stuff if application gets reactivated
-            if ( tEvent->active.gain && tEvent->active.state & SDL_APPACTIVE )
-#endif //SDL_VERSION_ATLEAST(2,0,0)
+            if ( tEvent->type == SDL_EVENT_WINDOW_FOCUS_GAINED )
             {
                 // just treat it like a screen mode change, gets the job done
                 st_ToDo(rCallbackBeforeScreenModeChange::Exec);
@@ -595,12 +602,24 @@ int filter(const SDL_Event *tEvent){
         }
 
         if (su_prefetchInput){
-            return su_StoreSDLEvent(*tEvent);
+            // SDL3: TEXT_INPUT and TEXT_EDITING events have a dynamically-allocated
+            // text.text pointer that is linked to the SDL event queue entry. If we
+            // copy the event struct into our own tEvents[] queue, the pointer becomes
+            // dangling when SDL frees its temporary memory on the next SDL_PollEvent
+            // call (SDL_FreeTemporaryMemory is called at the start of SDL_PumpEvents).
+            // Skip these events so they stay in SDL's queue and are returned directly
+            // by SDL_PollEvent, where the pointer is guaranteed to remain valid for
+            // the duration of the call.
+            if (tEvent->type == SDL_EVENT_TEXT_INPUT ||
+                tEvent->type == SDL_EVENT_TEXT_EDITING ||
+                tEvent->type == SDL_EVENT_TEXT_EDITING_CANDIDATES)
+                return true;
+            return su_StoreSDLEvent(*tEvent) != 0;
         }
 
     }
 
-    return 1;
+    return true;
 }
 #endif
 
@@ -625,11 +644,7 @@ void sg_SetIcon()
     rSurface tex( "textures/icon.png" );
 
     if (tex.GetSurface())
-#if SDL_VERSION_ATLEAST(2,0,0)
         SDL_SetWindowIcon(sr_screen, tex.GetSurface());
-#else
-        SDL_WM_SetIcon(tex.GetSurface(),NULL);
-#endif
 #endif
 #endif
 #endif
@@ -707,7 +722,9 @@ int main(int argc,char **argv){
         // analyse command line
         // tERR_MESSAGE( "Analyzing command line." );
         if ( !commandLine.Analyse(argc, argv) )
+        {
             return 0;
+        }
 
 
         {
@@ -752,22 +769,6 @@ int main(int argc,char **argv){
         */
 #endif
 
-#ifdef WIN32
-#if !SDL_VERSION_ATLEAST(2,0,0)
-        // disable DirectX by default; it causes problems with some boards.
-        if (!getenv( "SDL_VIDEODRIVER") ) {
-            if (!sr_useDirectX)
-            {
-                sg_PutEnv( "SDL_VIDEODRIVER=windib" );
-            }
-            else
-            {
-                sg_PutEnv( "SDL_VIDEODRIVER=directx" );
-            }
-        }
-#endif
-#endif
-
         // atexit(ANET_Shutdown);
 
 #ifndef WIN32
@@ -777,20 +778,36 @@ int main(int argc,char **argv){
 #endif
 
 #ifndef DEDICATED
-        Uint32 flags = SDL_INIT_VIDEO;
-#ifdef DEBUG
-        flags |= SDL_INIT_NOPARACHUTE;
-#endif // DEBUG
-        if (SDL_Init(flags) < 0) {
+        // SDL3: SDL_Init returns true on success (opposite of SDL2)
+        // SDL3: SDL_INIT_NOPARACHUTE was removed (always enabled in debug builds)
+#if defined(__ANDROID__) || (defined(__APPLE__) && TARGET_OS_IOS)
+        // Force landscape orientation via SDL3 hint (must be set before SDL_Init).
+        SDL_SetHint(SDL_HINT_ORIENTATIONS, "LandscapeLeft LandscapeRight");
+#endif
+#if defined(__ANDROID__) || (defined(__APPLE__) && TARGET_OS_IOS)
+        // Map touch finger events to mouse events so all existing click/button handlers work.
+        SDL_SetHint(SDL_HINT_MOUSE_TOUCH_EVENTS, "1");
+#endif
+        if (!SDL_Init(SDL_INIT_VIDEO)) {
             tERR_ERROR("Couldn't initialize SDL: " << SDL_GetError());
         }
         atexit(SDL_Quit);
-        // su_KeyInit();
 
+#ifdef __ANDROID__
+        // Set up writable user data directory now that SDL is initialized.
+        tDirectories::InitAndroid();
+#endif
+#if defined(__APPLE__) && TARGET_OS_IOS
+        // Set up iOS bundle + documents paths now that SDL is initialized.
+        tDirectories::InitiOS();
+#endif
+
+        // su_KeyInit();
         su_KeyInit();
 
 #ifndef NOJOYSTICK
-        if (SDL_InitSubSystem(SDL_INIT_JOYSTICK))
+        // SDL3: SDL_InitSubSystem returns true on success (opposite of SDL2)
+        if (!SDL_InitSubSystem(SDL_INIT_JOYSTICK))
             std::cout << "Error initializing joystick subsystem\n";
         else
         {
@@ -820,6 +837,7 @@ int main(int argc,char **argv){
 
         eLadderLogInitializer ladderlog;
         st_LoadConfig();
+        su_EnableTouchDefault();  // set ENABLE_TOUCH default on mobile after config load
 
         // migrate user configuration from previous versions
         if(sn_configurationSavedInVersion != st_programVersion)
@@ -854,12 +872,12 @@ int main(int argc,char **argv){
 
         if ( commandLine.Execute() )
         {
-            gCycle::PrivateSettings();
+                gCycle::PrivateSettings();
 
             {
                 std::ifstream t;
 
-                if ( !tDirectories::Config().Open( t, "settings.cfg" ) )
+                        if ( !tDirectories::Config().Open( t, "settings.cfg" ) )
                 {
                     //		#ifdef WIN32
                     //                    tERR_ERROR( "Data files not found. You have to run Armagetron from its own directory." );
@@ -867,11 +885,11 @@ int main(int argc,char **argv){
                     tERR_ERROR( "Configuration files not found. Check your installation." );
                     //		#endif
                 }
-            }
+                    }
 
             {
                 std::ofstream s;
-                if (! tDirectories::Var().Open( s, "scorelog.txt", std::ios::app ) )
+                        if (! tDirectories::Var().Open( s, "scorelog.txt", std::ios::app ) )
                 {
                     char const * error = "var directory not writable or does not exist. It should reside inside your user data directory and should have been created automatically on first start, but something must have gone wrong."
                     #ifdef WIN32
@@ -883,7 +901,7 @@ int main(int argc,char **argv){
 
                     tERR_ERROR( error );
                 }
-            }
+                    }
 
             {
                 std::ifstream t;
@@ -894,46 +912,38 @@ int main(int argc,char **argv){
                 }
             }
 
+            // Scan for available moviepacks (legacy folder + zip files)
+            gMoviepackManager::Get().ScanMoviepacks();
+
 #ifndef DEDICATED
             sr_glOut=1;
             //std::cout << "checked mp\n";
 
             SDLCleanup sdlCleanup; // call SDL_Quit later
 
-            sr_glRendererInit();
-
-#if SDL_VERSION_ATLEAST(2,0,0)
+                sr_vkRendererInit();
+    
             SDL_SetEventFilter(&filter, 0);
-#else
-            SDL_SetEventFilter(&filter);
-#endif
             //std::cout << "set filter\n";
 
             tConsole::RegisterMessageCallback(&uMenu::Message);
             tConsole::RegisterIdleCallback(&uMenu::IdleInput);
 
 #ifndef NOSOUND
-            SDLSoundCleanup soundInitAndCleanup; // se_SoundInit() now, se_SoundExit() later
-#endif
+                SDLSoundCleanup soundInitAndCleanup; // se_SoundInit() now, se_SoundExit() later
+    #endif
 
-            if (sr_InitDisplay()){
+                if (sr_InitDisplay()){
+
+#if defined(__APPLE__) && TARGET_OS_IOS
+                aa_installTouchOverlay();
+#endif
 
                 sg_SetIcon();
 
                 try
                 {
-#ifdef HAVE_GLEW
-                    // initialize GLEW
-                    {
-                        GLenum err = glewInit();
-                        if (GLEW_OK != err)
-                        {
-                            // Problem: glewInit failed, something is seriously wrong
-                            throw tGenericException( (const char *)glewGetErrorString(err), "GLEW Error" );
-                        }
-                        con << "Status: Using GLEW " << glewGetString(GLEW_VERSION) << "\n";
-                    }
-#endif // HAVE_GLEW
+                    con << "Status: Using Vulkan renderer\n";
 
                     //std::cout << "init disp\n";
 
@@ -982,12 +992,28 @@ int main(int argc,char **argv){
                     tConsole::Message( e.GetName(), e.GetDescription(), 20 );
                 }
 
-                sr_ExitDisplay();
-                sr_RendererCleanup();
-
-                //std::cout << "exit\n";
-
+                // Save config before tearing down the display so we don't stall
+                // with a black screen while writing files.
                 st_SaveConfig();
+
+                // Destroy the Vulkan renderer BEFORE destroying the SDL window.
+                // On iOS/MoltenVK the surface is backed by a CAMetalLayer owned by
+                // the SDL UIWindow; destroying the window first can cause
+                // vkDeviceWaitIdle (called inside the renderer destructor) to stall
+                // on a surface whose Metal layer is no longer active, which leaves a
+                // black frame visible during the iOS exit transition animation.
+                sr_RendererCleanup();
+                sr_ExitDisplay();
+
+#if defined(__APPLE__) && TARGET_OS_IOS
+                // On iOS, terminate the process immediately after the window is gone.
+                // _exit() skips C++ static destructors so detached boost::thread
+                // font-glyph workers cannot race against std::mutex teardown
+                // (which causes "mutex lock failed: Invalid argument").
+                // The OS reclaims all process resources, so this is safe.
+                SDL_QuitSubSystem(SDL_INIT_VIDEO);
+                _exit(0);
+#endif
 
                 //std::cout << "saved\n";
 

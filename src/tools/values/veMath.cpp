@@ -50,18 +50,18 @@ Add::GetValue(void) const {
     const Variant rvalue = m_rvalue->GetValue();
     //return boost::apply_visitor(AddVisitor(), lvalue, rvalue);
     /*
-    	if (boost::get<tString>(&lvalue) || boost::get<tString>(&rvalue))
-    		return boost::lexical_cast<tString>lvalue
-    		     + boost::lexical_cast<tString>rvalue;
+    	if (std::get_if<std::string>(&lvalue) || std::get_if<std::string>(&rvalue))
+    		return static_cast<std::string>lvalue
+    		     + static_cast<std::string>rvalue;
     	else
     */
-    if (boost::get<int>(&lvalue) && boost::get<int>(&rvalue))
-                return boost::get<int>(lvalue) + boost::get<int>(rvalue);
+    if (std::get_if<int>(&lvalue) && std::get_if<int>(&rvalue))
+                return std::get<int>(lvalue) + std::get<int>(rvalue);
     /*
     else
-    if (boost::get<float>(&lvalue) || boost::get<float>(&rvalue))
-    	return boost::lexical_cast<float>(lvalue)
-    	     + boost::lexical_cast<float>(rvalue);
+    if (std::get_if<float>(&lvalue) || std::get_if<float>(&rvalue))
+    	return static_cast<float>(lvalue)
+    	     + static_cast<float>(rvalue);
     else
     	throw(1);*/
     return m_lvalue->GetFloat() + m_rvalue->GetFloat();
@@ -77,16 +77,16 @@ Variant
 Subtract::GetValue(void) const {
     const Variant lvalue = m_lvalue->GetValue();
     const Variant rvalue = m_rvalue->GetValue();
-    if (boost::get<int>(&lvalue) && boost::get<int>(&rvalue))
-                return boost::get<int>(lvalue) - boost::get<int>(rvalue);
+    if (std::get_if<int>(&lvalue) && std::get_if<int>(&rvalue))
+                return std::get<int>(lvalue) - std::get<int>(rvalue);
     return m_lvalue->GetFloat() - m_rvalue->GetFloat();
     /*
-    if (boost::get<float>(&lvalue) || boost::get<float>(&rvalue))
-    	return boost::lexical_cast<float>(lvalue)
-    	     - boost::lexical_cast<float>(rvalue);
+    if (std::get_if<float>(&lvalue) || std::get_if<float>(&rvalue))
+    	return static_cast<float>(lvalue)
+    	     - static_cast<float>(rvalue);
     else
-    if (boost::get<int>(&lvalue) && boost::get<int>(&rvalue))
-    	return boost::get<int>(lvalue) - boost::get<int>(rvalue);
+    if (std::get_if<int>(&lvalue) && std::get_if<int>(&rvalue))
+    	return std::get<int>(lvalue) - std::get<int>(rvalue);
     else
     	throw(1);
     */
@@ -102,8 +102,8 @@ Variant
 Multiply::GetValue(void) const {
     const Variant lvalue = m_lvalue->GetValue();
     const Variant rvalue = m_rvalue->GetValue();
-    if (boost::get<int>(&lvalue) && boost::get<int>(&rvalue))
-                return boost::get<int>(lvalue) * boost::get<int>(rvalue);
+    if (std::get_if<int>(&lvalue) && std::get_if<int>(&rvalue))
+                return std::get<int>(lvalue) * std::get<int>(rvalue);
     return m_lvalue->GetFloat() * m_rvalue->GetFloat();
 }
 

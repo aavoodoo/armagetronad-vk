@@ -29,7 +29,7 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 #ifndef ArmageTron_TRESOURCE_H
 #define ArmageTron_TRESOURCE_H
 
-#include <boost/shared_ptr.hpp>
+#include <memory>
 
 #include "tXmlParser.h"
 

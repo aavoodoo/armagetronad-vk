@@ -35,6 +35,9 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 #include "nNetwork.h"
 
 #include "rSysdep.h"
+#ifndef DEDICATED
+#include "rFrameLifecycle.h"
+#endif
 #include "rScreen.h"
 #include "rConsole.h"
 #include "rRender.h"
@@ -239,10 +242,9 @@ void gServerBrowser::BrowseSpecialMaster( nServerInfoBase * master, char const *
     sr_con.fullscreen=true;
 
 #ifndef DEDICATED
-    rSysDep::SwapGL();
-    rSysDep::ClearGL();
-    rSysDep::SwapGL();
-    rSysDep::ClearGL();
+    // Clear both front and back buffers for clean screen initialization
+    rRenderFrame([](){});
+    rRenderFrame([](){});
 #endif
 
     bool to=sr_textOut;
@@ -302,10 +304,9 @@ void gServerBrowser::BrowseLAN()
     sr_con.fullscreen=true;
 
 #ifndef DEDICATED
-    rSysDep::SwapGL();
-    rSysDep::ClearGL();
-    rSysDep::SwapGL();
-    rSysDep::ClearGL();
+    // Clear both front and back buffers for clean screen initialization
+    rRenderFrame([](){});
+    rRenderFrame([](){});
 #endif
 
     bool to=sr_textOut;
@@ -377,8 +378,9 @@ void gServerMenu::HandleEvent( SDL_Event event )
     
     switch (event.type)
     {
-    case SDL_KEYDOWN:
-        switch (event.key.keysym.sym)
+    // SDL3: SDL_KEYDOWN → SDL_EVENT_KEY_DOWN, keysym.sym → key.key, SDLK_m → SDLK_M
+    case SDL_EVENT_KEY_DOWN:
+        switch (event.key.key)
         {
         case(SDLK_LEFT):
                         sg_sortKey = static_cast<nServerInfo::PrimaryKey>
@@ -392,7 +394,7 @@ void gServerMenu::HandleEvent( SDL_Event event )
             Update();
             return;
             break;
-        case(SDLK_m):
+        case(SDLK_M):
                         FriendsToggle();
             Update();
             return;
@@ -595,9 +597,25 @@ gServerMenu::~gServerMenu()
 }
 
 #ifndef DEDICATED
-static REAL text_height=.05;
+static REAL text_height_browser=.05;
 
-static REAL shrink = .6f;
+static REAL sg_BrowserTextHeight()
+{
+    return text_height_browser * sr_TouchUIScale();
+}
+#define text_height sg_BrowserTextHeight()
+
+// Shrink and displace compact server list entries vertically.
+// On small screens, reduce the shrink to give items more breathing room.
+static REAL sg_BrowserShrink()
+{
+    REAL s = sr_TouchUIScale();
+    // Interpolate: at scale 1.0 (tablet) → shrink 0.6; at scale 1.5+ (phone) → shrink 0.75
+    REAL shrink = 0.6f + 0.3f * (s - 1.0f);
+    if (shrink > 0.85f) shrink = 0.85f;
+    return shrink;
+}
+#define shrink sg_BrowserShrink()
 static REAL displace = .15;
 
 void gServerMenu::Render(REAL y,
@@ -831,10 +849,11 @@ bool gBrowserMenuItem::Event( SDL_Event& event )
 #ifndef DEDICATED
     switch (event.type)
     {
-    case SDL_KEYDOWN:
-        switch (event.key.keysym.sym)
+    // SDL3: SDL_KEYDOWN → SDL_EVENT_KEY_DOWN, keysym.sym → key.key, SDLK_r → SDLK_R
+    case SDL_EVENT_KEY_DOWN:
+        switch (event.key.key)
         {
-        case SDLK_r:
+        case SDLK_R:
             {
                 static double lastRefresh = - 100; //!< the time of the last manual refresh
                 if ( tSysTimeFloat() - lastRefresh > 2.0 )
@@ -860,10 +879,11 @@ bool gServerMenuItem::Event( SDL_Event& event )
 #ifndef DEDICATED
     switch (event.type)
     {
-    case SDL_KEYDOWN:
-        switch (event.key.keysym.sym)
+    // SDL3: SDL_KEYDOWN → SDL_EVENT_KEY_DOWN, keysym.sym → key.key, SDLK_p → SDLK_P
+    case SDL_EVENT_KEY_DOWN:
+        switch (event.key.key)
         {
-        case SDLK_p:
+        case SDLK_P:
             continuePoll = true;
             if ( server && tSysTimeFloat() - lastPing_ > .5f )
             {
@@ -878,7 +898,7 @@ bool gServerMenuItem::Event( SDL_Event& event )
         default:
             break;
         }
-        switch (event.key.keysym.sym)
+        switch (event.key.key)
         {
         case SDLK_KP_PLUS:
         case SDLK_PLUS:
@@ -902,7 +922,7 @@ bool gServerMenuItem::Event( SDL_Event& event )
 
             return true;
             break;
-        case SDLK_b:
+        case SDLK_B:
             if ( server )
             {
                 if (favorite_ ) {
@@ -1100,9 +1120,10 @@ bool gServerFilterMenuItem::Event( SDL_Event& event )
     bool update = false; // do we need to update the server list?
     bool ret = false; // have we handled the event?
 
-    if (event.type==SDL_KEYDOWN)
+    // SDL3: SDL_KEYDOWN → SDL_EVENT_KEY_DOWN, keysym.sym → key.key
+    if (event.type==SDL_EVENT_KEY_DOWN)
     {
-        switch (event.key.keysym.sym)
+        switch (event.key.key)
         {
         case(SDLK_ESCAPE):
             // escape clears the filter

@@ -39,7 +39,11 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 
 #include "tSysTime.h"
 #include "uMenu.h"
+#include <cmath>
 #include "rSysdep.h"
+#ifndef DEDICATED
+#include "rFrameLifecycle.h"
+#endif
 #include "rScreen.h"
 #include "rViewport.h"
 #include "rTexture.h"
@@ -61,6 +65,8 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 #ifndef DEDICATED
 #include "rRender.h"
 #include "rSDL.h"
+#include "rRenderQueue.h"
+#include "rVertex.h"
 #endif
 
 #include <vector>
@@ -75,7 +81,7 @@ bool uMenu::exitToMain=false;
 
 #ifdef SLOPPYLOCALE
 uMenu::uMenu(const char *t="",bool exit_item)
-        :exitFlag(0),spaceBelow(.4),title(t){
+        :exitFlag(0),spaceBelow(.4),title(t),blinkTime_(0){
     if (exit_item) new uMenuItemExit(this);
     center=0;
     menuTop=.7;
@@ -86,7 +92,7 @@ uMenu::uMenu(const char *t="",bool exit_item)
 #endif
 
 uMenu::uMenu(const tOutput &t,bool exit_item)
-        :exitFlag(0),spaceBelow(.4),title(t){
+        :exitFlag(0),spaceBelow(.4),title(t),blinkTime_(0){
     if (exit_item) new uMenuItemExit(this);
     center=0;
     menuTop=.7;
@@ -115,7 +121,13 @@ void uMenu::ReverseItems(){
 //static REAL text_height=rCHEIGHT_NORMAL;
 //static REAL text_width=rCWIDTH_NORMAL;
 
-static REAL text_height=.11;
+static REAL text_height_base=.11;
+
+// Effective text height, scaled for touch-friendly menus on small screens
+static REAL sr_MenuTextHeight()
+{
+    return text_height_base * sr_TouchUIScale();
+}
 
 #ifndef DEDICATED
 static REAL titlefac=1.2;
@@ -123,22 +135,54 @@ static REAL titlefac=1.2;
 int menuentries=0;
 
 REAL uMenu::YPos(int num){
-    return yOffset-text_height*(menuentries-num);
+    return yOffset - sr_MenuTextHeight() * (menuentries-num);
+}
+
+// Convert normalized touch Y [0=top, 1=bottom] to the nearest item index.
+// Inverse of YPos(): YPos(i) = yOffset - th*(menuentries-i)
+int uMenu::TouchYToItem(float touchY) const {
+    float menuY = 1.0f - 2.0f * touchY;   // touch Y+ down → menu Y+ up
+    REAL th = sr_MenuTextHeight();
+    int idx = (int)roundf(menuentries - (yOffset - menuY) / th);
+    if (idx < 0) idx = 0;
+    if (idx >= items.Len()) idx = items.Len() - 1;
+    return idx;
 }
 
 
 #ifndef DEDICATED
 static inline void arrow(REAL x,REAL y,REAL dy,REAL size){
     if (sr_glOut){
-        BeginLineLoop();
-        Vertex(x,y+2*dy*size);
-        Vertex(x+size,y);
-        Vertex(x+.3*size,y);
-        Vertex(x+.3*size,y-2*dy*size);
-        Vertex(x-.3*size,y-2*dy*size);
-        Vertex(x-.3*size,y);
-        Vertex(x-size,y);
-        RenderEnd();
+        // Get current color from renderer (array format)
+        float color[4] = {1.0f, 1.0f, 1.0f, 1.0f};
+        renderer->GetColor(color);
+        uint8_t cr = static_cast<uint8_t>(color[0] * 255.0f);
+        uint8_t cg = static_cast<uint8_t>(color[1] * 255.0f);
+        uint8_t cb = static_cast<uint8_t>(color[2] * 255.0f);
+        uint8_t ca = static_cast<uint8_t>(color[3] * 255.0f);
+
+        // Arrow vertices in order
+        float pts[7][2] = {
+            {static_cast<float>(x), static_cast<float>(y+2*dy*size)},
+            {static_cast<float>(x+size), static_cast<float>(y)},
+            {static_cast<float>(x+.3f*size), static_cast<float>(y)},
+            {static_cast<float>(x+.3f*size), static_cast<float>(y-2*dy*size)},
+            {static_cast<float>(x-.3f*size), static_cast<float>(y-2*dy*size)},
+            {static_cast<float>(x-.3f*size), static_cast<float>(y)},
+            {static_cast<float>(x-size), static_cast<float>(y)}
+        };
+
+        // Convert line loop to individual line segments
+        std::vector<rVertex20> vertices;
+        vertices.reserve(14);  // 7 lines * 2 vertices
+        for (int i = 0; i < 7; ++i) {
+            int j = (i + 1) % 7;
+            vertices.push_back(rVertex20(pts[i][0], pts[i][1], 0.0f, cr, cg, cb, ca, 0.0f, 0.0f));
+            vertices.push_back(rVertex20(pts[j][0], pts[j][1], 0.0f, cr, cg, cb, ca, 0.0f, 0.0f));
+        }
+
+        rRenderStateKey state = rRenderStateKey::Colored(rBlendMode::Alpha);
+        rRenderQueue::Instance().SubmitLines(rRenderPhase::HUD, state, vertices.data(), vertices.size());
     }
 }
 #endif
@@ -207,6 +251,7 @@ void uMenu::OnEnter(){
         ts=tSysTimeFloat()-lastt;
         lastt=tSysTimeFloat();
         if (ts>.2) ts=.2;
+        blinkTime_ += ts;
 
         if(snapScroll)
         {
@@ -252,8 +297,8 @@ void uMenu::OnEnter(){
 
                 switch (tEvent.type)
                 {
-                case SDL_KEYDOWN:
-                    if ( tEvent.key.keysym.sym == SDLK_UNKNOWN )
+                case SDL_EVENT_KEY_DOWN:
+                    if ( tEvent.key.key == SDLK_UNKNOWN )
                     {
                         // don't repeat unknown syms. They come from multi-key compositions and
                         // don't send keyup events when released.
@@ -263,7 +308,12 @@ void uMenu::OnEnter(){
                     memcpy( &tEventRepeat, &tEvent, sizeof( SDL_Event ) );
                     nextrepeat = tSysTimeFloat() + repeatdelay;
                     break;
-                case SDL_KEYUP:
+                case SDL_EVENT_KEY_UP:
+                    if ( ( tEvent.key.key == SDLK_LEFT || tEvent.key.key == SDLK_RIGHT )
+                         && selected >= 0 && selected < items.Len() )
+                    {
+                        items[selected]->LeftRightRelease();
+                    }
                     localRepeat = s_globalRepeat = false;
                     repeatrate = repeatrateStart;
                     break;
@@ -293,10 +343,6 @@ void uMenu::OnEnter(){
 
         // we're about to render, last chance to make changes to the menu
         OnRender();
-
-#ifndef DEDICATED
-        rSysDep::ClearGL();
-#endif
 
         // clamp cursor
         if (selected < 0 )
@@ -342,80 +388,78 @@ void uMenu::OnEnter(){
             yOffset+=menuTop-smallborder-YPos(menuentries-1);
 
 #ifndef DEDICATED
-        sr_ResetRenderState(true);
-        items[selected]->RenderBackground();
+        // Render menu with full frame lifecycle
+        rRenderFrame([&]() {
+            sr_ResetRenderState(true);
+            items[selected]->RenderBackground();
 
-        if (selected >= items.Len()) selected = items.Len()-1;
-        if (items.Len() <= 0)
-            return;
+            if (selected >= items.Len()) selected = items.Len()-1;
+            if (items.Len() <= 0)
+                return;
 
-        if (sr_glOut && !exitFlag && !quickexit){
-            items[selected]->Render(center,YPos(selected),1,true);
+            if (sr_glOut && !exitFlag && !quickexit){
+                REAL blinkAlpha = 0.7f + 0.3f * sinf(blinkTime_ * 6.0f);
+                items[selected]->Render(center,YPos(selected),blinkAlpha,true);
 
-            for (int i=items.Len()-1;i>=0;i--)
-                if (i!=selected){
-                    REAL y=YPos(i);
-                    REAL alpha=1;
-                    const REAL b=.1;
-                    if (y<menuBot+b)
-                        alpha=(y-menuBot)/b;
-                    if (y>menuTop-b)
-                        alpha=(menuTop-y)/b;
-                    if (y>menuBot && y<menuTop)
-                    {
-                        rTextField::SetDefaultColor( tColor(1,1,1,1) );
-                        rTextField::SetBlendColor( tColor(1,1,1,1) );
-                        items[i]->Render(center,y,alpha,false);
+                for (int i=items.Len()-1;i>=0;i--)
+                    if (i!=selected){
+                        REAL y=YPos(i);
+                        REAL alpha=1;
+                        const REAL b=.1;
+                        if (y<menuBot+b)
+                            alpha=(y-menuBot)/b;
+                        if (y>menuTop-b)
+                            alpha=(menuTop-y)/b;
+                        if (y>menuBot && y<menuTop)
+                        {
+                            rTextField::SetDefaultColor( tColor(1,1,1,1) );
+                            rTextField::SetBlendColor( tColor(1,1,1,1) );
+                            items[i]->Render(center,y,alpha,false);
+                        }
                     }
+
+                rTextField::SetDefaultColor( tColor(1,1,1,1) );
+                rTextField::SetBlendColor( tColor(1,1,1,1) );
+
+                Color(.6,.6,1,1);
+                ::DisplayText(0,menuTop+sr_MenuTextHeight()*titlefac
+                              ,sr_MenuTextHeight()*titlefac,
+                              title,sr_fontMenuTitle,0);
+
+                RenderDisableState(rCapability::Texture2D);
+                Color(1,.2,.2,.5);
+                if (YPos(0)<menuBot+smallborder && (int(tSysTimeFloat()))%2)
+                    arrow(.9,menuBot+.1,-1,.05);
+                if (YPos(menuentries-1)>menuTop && (int(tSysTimeFloat())+1)%2)
+                    arrow(.9,menuTop,1,.05);
+
+                REAL helpAlpha = tSysTimeFloat()-lastkey-timeout;
+                if( helpAlpha > 1 )
+                {
+                    helpAlpha = 1;
                 }
 
-            rTextField::SetDefaultColor( tColor(1,1,1,1) );
-            rTextField::SetBlendColor( tColor(1,1,1,1) );
+                disphelp = helpAlpha > 0;
+                if ( items[selected]->DisplayHelp( disphelp, menuBot, helpAlpha ) )
+                {
+                    if (sr_alphaBlend)
+                        Color(1,.8,.8, helpAlpha);
+                    else
+                        Color(helpAlpha,
+                              .8*helpAlpha,
+                              .8*helpAlpha);
 
-            Color(.6,.6,1,1);
-            ::DisplayText(0,menuTop+text_height*titlefac
-                          ,text_height*titlefac,
-                          title,sr_fontMenuTitle,0);
-
-            glDisable(GL_TEXTURE_2D);
-            //glDisable(GL_TEXTURE);
-            Color(1,.2,.2,.5);
-            if (YPos(0)<menuBot+smallborder && (int(tSysTimeFloat()))%2)
-                arrow(.9,menuBot+.1,-1,.05);
-            if (YPos(menuentries-1)>menuTop && (int(tSysTimeFloat())+1)%2)
-                arrow(.9,menuTop,1,.05);
-
-            REAL helpAlpha = tSysTimeFloat()-lastkey-timeout;
-            if( helpAlpha > 1 )
-            {
-                helpAlpha = 1;
+                    rTextField c(-.95f,menuBot-.04f,rCHEIGHT_NORMAL, sr_fontMenu);
+                    c.SetWidth(1.9f-items[selected]->SpaceRight());
+                    c.EnableLineWrap();
+                    c << items[selected]->Help();
+                }
             }
-
-            disphelp = helpAlpha > 0;
-            if ( items[selected]->DisplayHelp( disphelp, menuBot, helpAlpha ) )
-            {
-                if (sr_alphaBlend)
-                    glColor4f(1,.8,.8, helpAlpha );
-                else
-                    Color(helpAlpha,
-                          .8*helpAlpha,
-                          .8*helpAlpha);
-
-                rTextField c(-.95f,menuBot-.04f,rCHEIGHT_NORMAL, sr_fontMenu);
-                c.SetWidth(1.9f-items[selected]->SpaceRight());
-                c.EnableLineWrap();
-                c << items[selected]->Help();
-            }
-        }
-        else
-#endif
-            if ( !sr_glOut )
+            else if ( !sr_glOut )
             {
                 tDelay( 10000 );
             }
-
-#ifndef DEDICATED
-        rSysDep::SwapGL();
+        });
 #endif
     }
 
@@ -432,11 +476,11 @@ void uMenu::HandleEvent( SDL_Event event )
     {
         // int newSelected = -1;
         switch (event.type){
-        case SDL_KEYDOWN:
+        case SDL_EVENT_KEY_DOWN:
         {
             if (!disphelp)
                 lastkey=tSysTimeFloat();
-            switch (event.key.keysym.sym){
+            switch (event.key.key){
 
             case(SDLK_ESCAPE):
                 s_globalRepeat = false;
@@ -505,6 +549,83 @@ void uMenu::HandleEvent( SDL_Event event )
             }
         }
         break;
+
+        // Touch navigation — active when ENABLE_TOUCH > 0
+        //
+        // Two modes determined by where the touch starts:
+        //   Navigation mode (touchStartedOnSelected_=false):
+        //     touch started on a NON-selected item → vertical slide scrolls selection
+        //   Value-change mode (touchStartedOnSelected_=true):
+        //     touch started on the ALREADY-selected item → vertical slide changes value,
+        //     tap calls Enter() (or shows keyboard for text inputs)
+        case SDL_EVENT_FINGER_DOWN:
+            if (su_GetEnableTouch() > 0) {
+                float ty = event.tfinger.y;
+                // Ignore touches well outside the menu's vertical bounding box
+                float menuTopTouch = (1.0f - menuTop) / 2.0f;
+                float menuBotTouch = (1.0f - menuBot) / 2.0f;
+                if (ty < menuTopTouch - 0.05f || ty > menuBotTouch + 0.05f) break;
+
+                int idx = TouchYToItem(ty);
+                touchStartedOnSelected_ = (idx == selected &&
+                                           selected >= 0 && selected < items.Len());
+                touchFingerId_ = event.tfinger.fingerID;
+                touchStartX_   = touchLastX_ = event.tfinger.x;
+                touchStartY_   = touchLastY_ = ty;
+                touchMoved_    = false;
+                // Always update selection on touch down
+                SetSelected(idx);
+            }
+            break;
+
+        case SDL_EVENT_FINGER_MOTION:
+            if (su_GetEnableTouch() > 0 && event.tfinger.fingerID == touchFingerId_) {
+                float dy = event.tfinger.y - touchLastY_;
+
+                if (!touchStartedOnSelected_) {
+                    // Navigation mode: vertical slide scrolls through items.
+                    // TouchYToItem clamps to [0, items.Len()-1] so sliding past the
+                    // top/bottom naturally pins to the first/last item.
+                    int newIdx = TouchYToItem(event.tfinger.y);
+                    if (newIdx != selected) {
+                        touchMoved_ = true;
+                        SetSelected(newIdx);
+                    }
+                } else {
+                    // Value-change mode: vertical slide changes value one step per 0.04 screen.
+                    // Slide up (dy < 0) = previous value; slide down (dy > 0) = next value.
+                    if (fabsf(dy) > 0.04f && selected >= 0 && selected < items.Len()) {
+                        touchMoved_ = true;
+                        items[selected]->LeftRight(dy > 0 ? 1 : -1);
+                        touchLastY_ = event.tfinger.y;  // reset anchor for continuous stepping
+                    }
+                }
+                touchLastX_ = event.tfinger.x;
+                if (touchStartedOnSelected_) {
+                    // touchLastY_ already updated above when a step fired
+                } else {
+                    touchLastY_ = event.tfinger.y;
+                }
+            }
+            break;
+
+        case SDL_EVENT_FINGER_UP:
+            if (su_GetEnableTouch() > 0 && event.tfinger.fingerID == touchFingerId_) {
+                // Tap with no slide: Enter() if on the same item
+                if (!touchMoved_ && selected >= 0 && selected < items.Len()) {
+                    int upIdx = TouchYToItem(event.tfinger.y);
+                    if (upIdx == selected) {
+                        su_inMenu = false;
+                        try { items[selected]->Enter(); }
+                        catch (tException const& e) { tConsole::Message(e.GetName(), e.GetDescription(), 20); }
+                        su_inMenu = true;
+                        s_globalRepeat = false;
+                    }
+                }
+                touchFingerId_ = -1;
+            }
+            break;
+
         default:
             // let the input subsystem handle events for later processing
             su_HandleEvent( event, true );
@@ -615,9 +736,22 @@ void uMenu::GenericBackground(REAL top){
                 }
                 lastTime = time;
 
-                RenderEnd();
-                glColor4f(0, 0, 0, alpha);
-                glRectf(-1,-1,1,top);
+                // Batch render fade overlay quad
+                uint8_t alphaB = static_cast<uint8_t>(alpha * 255.0f);
+                std::vector<rVertex20> fadeVerts;
+                fadeVerts.reserve(6);
+                // Triangle 1: bottom-left, bottom-right, top-right
+                fadeVerts.push_back(rVertex20(-1.0f, -1.0f, 0.0f, 0, 0, 0, alphaB, 0.0f, 0.0f));
+                fadeVerts.push_back(rVertex20(1.0f, -1.0f, 0.0f, 0, 0, 0, alphaB, 0.0f, 0.0f));
+                fadeVerts.push_back(rVertex20(1.0f, top, 0.0f, 0, 0, 0, alphaB, 0.0f, 0.0f));
+                // Triangle 2: bottom-left, top-right, top-left
+                fadeVerts.push_back(rVertex20(-1.0f, -1.0f, 0.0f, 0, 0, 0, alphaB, 0.0f, 0.0f));
+                fadeVerts.push_back(rVertex20(1.0f, top, 0.0f, 0, 0, 0, alphaB, 0.0f, 0.0f));
+                fadeVerts.push_back(rVertex20(-1.0f, top, 0.0f, 0, 0, 0, alphaB, 0.0f, 0.0f));
+
+                rRenderStateKey fadeState = rRenderStateKey::Colored(rBlendMode::Alpha);
+                rRenderQueue::Instance().Submit(rRenderPhase::HUD, fadeState, fadeVerts.data(), fadeVerts.size());
+                rRenderQueue::Instance().ExecutePhase(rRenderPhase::HUD);
             }
         }
         catch ( ... )
@@ -670,10 +804,12 @@ void uMenuItem::SetColor( bool selected, REAL alpha )
 
     if (selected)
     {
-        REAL time=tSysTimeFloat()*10;
-        REAL intensity = 1+.3*sin(time);
-        rTextField::SetDefaultColor( tColor(.8,.3,.3,alpha) );
-        rTextField::SetBlendColor( tColor(intensity,intensity,intensity,alpha) );
+        // Map blinkAlpha [0.4, 1.0] (center 0.7) to intensity [0.7, 1.3] (center 1.0).
+        // This keeps the same visual effect as the old 1+0.3*sin(time*10) but driven
+        // by the menu's blinkTime_ accumulator instead of a competing raw clock.
+        REAL intensity = 1.0f + (alpha - 0.7f);
+        rTextField::SetDefaultColor( tColor(.8f,.3f,.3f,1.0f) );
+        rTextField::SetBlendColor( tColor(intensity,intensity,intensity,1.0f) );
     }
 }
 
@@ -684,7 +820,7 @@ void uMenuItem::DisplayText(REAL x,REAL y,const char *text,
     if (sr_glOut){
         SetColor( selected, alpha );
 
-        REAL th = text_height;
+        REAL th = sr_MenuTextHeight();
         
         REAL availw = 1.9f;
         if (center < 0) availw = (.9f-x);
@@ -705,15 +841,6 @@ void uMenuItem::DisplayText(REAL x,REAL y,const char *text,
 void uMenuItem::DisplayTextSpecial(REAL x,REAL y,const char *text,
                                    bool selected,
                                    REAL alpha,int center){
-    /*
-     if(selected)
-       glColor3f(.9,.3,.3);
-     else
-       glColor3f(.7,.7,1);
-
-     ::DisplayText(x,y,text_width,text_height,text,center);
-     */
-
     DisplayText(x,y,text,selected,alpha,center);
 }
 
@@ -889,80 +1016,72 @@ void uMenuItemString::Render(REAL x,REAL y,
 bool uMenuItemString::Event(SDL_Event &e){
 #ifndef DEDICATED
     bool ret =  false;
-    if (e.type==SDL_KEYDOWN) {
+    if (e.type==SDL_EVENT_KEY_DOWN) {
         ret=true;
-#if SDL_VERSION_ATLEAST(2,0,0)
-        SDL_Keysym &c  = e.key.keysym;
-        SDL_Keymod mod = static_cast<SDL_Keymod>(c.mod);
-#else
-        SDL_keysym &c = e.key.keysym;
-        SDLMod mod    = c.mod;
-#endif
+        // SDL3: keysym structure removed, access key/mod directly
+        SDL_Keymod mod = e.key.mod;
+        SDL_Keycode sym = e.key.key;
         bool moveWordLeft, moveWordRight, deleteWordLeft, deleteWordRight, moveBeginning, moveEnd, killForwards;
         moveWordLeft = moveWordRight = deleteWordLeft = deleteWordRight = moveBeginning = moveEnd = killForwards = false;
 
 #if defined (MACOSX)
         // For moving over/deleting words
-        if (mod & KMOD_ALT) {
-            if (c.sym == SDLK_LEFT) {
+        if (mod & SDL_KMOD_ALT) {
+            if (sym == SDLK_LEFT) {
                 moveWordLeft = true;
             }
-            else if (c.sym == SDLK_RIGHT) {
+            else if (sym == SDLK_RIGHT) {
                 moveWordRight = true;
             }
-            else if (c.sym == SDLK_DELETE) {
+            else if (sym == SDLK_DELETE) {
                 deleteWordRight = true;
             }
-            else if (c.sym == SDLK_BACKSPACE) {
+            else if (sym == SDLK_BACKSPACE) {
                 deleteWordLeft = true;
             }
         }
         // For moving to extremes of the line
-#if SDL_VERSION_ATLEAST(2,0,0)
-        else if (mod & KMOD_GUI) {
-#else
-        else if (mod & KMOD_META) {
-#endif
-            if (c.sym == SDLK_LEFT) {
+        else if (mod & SDL_KMOD_GUI) {
+            if (sym == SDLK_LEFT) {
                 moveBeginning = true;
             }
-            else if (c.sym == SDLK_RIGHT) {
+            else if (sym == SDLK_RIGHT) {
                 moveEnd = true;
             }
         }
         // Linux and Windows
 #else
         // Word operations
-        if (mod & KMOD_CTRL) {
-            if (c.sym == SDLK_LEFT) {
+        if (mod & SDL_KMOD_CTRL) {
+            if (sym == SDLK_LEFT) {
                 moveWordLeft = true;
             }
-            else if (c.sym == SDLK_RIGHT) {
+            else if (sym == SDLK_RIGHT) {
                 moveWordRight = true;
             }
-            else if (c.sym == SDLK_DELETE) {
+            else if (sym == SDLK_DELETE) {
                 deleteWordRight = true;
             }
-            else if (c.sym == SDLK_BACKSPACE) {
+            else if (sym == SDLK_BACKSPACE) {
                 deleteWordLeft = true;
             }
         }
-        else if (c.sym == SDLK_HOME) {
+        else if (sym == SDLK_HOME) {
             moveBeginning = true;
         }
-        else if (c.sym == SDLK_END) {
+        else if (sym == SDLK_END) {
             moveEnd = true;
         }
 #endif
         // "bash" keys
-        if (mod & KMOD_CTRL) {
-            if (c.sym == SDLK_a) {
+        if (mod & SDL_KMOD_CTRL) {
+            if (sym == SDLK_A) {
                 moveBeginning = true;
             }
-            else if (c.sym == SDLK_e) {
+            else if (sym == SDLK_E) {
                 moveEnd = true;
             }
-            else if (c.sym == SDLK_k) {
+            else if (sym == SDLK_K) {
                 killForwards = true;
             }
         }
@@ -989,36 +1108,33 @@ bool uMenuItemString::Event(SDL_Event &e){
         else if (killForwards) {
             content->RemoveSubStr(realCursorPos,content->size()-realCursorPos);
         }
-        else if (c.sym == SDLK_LEFT) {
+        else if (sym == SDLK_LEFT) {
             if (realCursorPos > 0) {
                 while(((*content)[--realCursorPos]&0xc0) == 0x80) ;
             }
         }
-        else if (c.sym == SDLK_RIGHT) {
+        else if (sym == SDLK_RIGHT) {
             if ( realCursorPos < content->size() ) {
                 while(++realCursorPos < content->size() && ((*content)[realCursorPos]&0xc0) == 0x80) ;
             }
         }
-        else if (c.sym == SDLK_DELETE) {
+        else if (sym == SDLK_DELETE) {
             if (realCursorPos < content->size() ) {
                 content->RemoveSubStrUtf8(realCursorPos,1);
             }
         }
-        else if (c.sym == SDLK_BACKSPACE) {
+        else if (sym == SDLK_BACKSPACE) {
             if (realCursorPos > 0) {
                 realCursorPos -= content->RemoveSubStrUtf8(realCursorPos,-1);
             }
         }
-        else if (c.sym == SDLK_KP_ENTER || c.sym == SDLK_RETURN || c.sym == SDLK_UP || c.sym == SDLK_DOWN || c.sym == SDLK_ESCAPE ) {
+        else if (sym == SDLK_KP_ENTER || sym == SDLK_RETURN || sym == SDLK_UP || sym == SDLK_DOWN || sym == SDLK_ESCAPE ) {
             ret = false;
-//            c.sym = SDLK_DOWN;
+//            sym = SDLK_DOWN;
         }
 #ifdef MACOSX_XCODE
-#if SDL_VERSION_ATLEAST(2,0,0)
-        else if (c.sym == SDLK_v && mod & KMOD_GUI) {
-#else
-        else if (c.sym == SDLK_v && mod & KMOD_META) {
-#endif
+        // SDL3: Use SDL_KMOD_GUI for Command key on Mac
+        else if (sym == SDLK_V && mod & SDL_KMOD_GUI) {
             CFDataRef data;
             if (su_OSXPastePasteboardData(data)) {
                 const UInt8 *bytes = CFDataGetBytePtr(data);
@@ -1036,7 +1152,7 @@ bool uMenuItemString::Event(SDL_Event &e){
             }
         }
 #elif !defined(MACOSX)
-        else if (c.sym == SDLK_v && mod & KMOD_CTRL) {
+        else if (sym == SDLK_V && mod & SDL_KMOD_CTRL) {
             char *scrap = 0;
             int scraplen;
             static bool initialized_scrap = false;
@@ -1064,27 +1180,23 @@ bool uMenuItemString::Event(SDL_Event &e){
             }
         }
 #endif
-#if SDL_VERSION_ATLEAST(2,0,0)
         else
         {
             // only the top row of keys counts as unhandled
-            if(c.scancode >= SDL_SCANCODE_F1 && c.scancode <= SDL_SCANCODE_PAUSE)
+            // SDL3: c.scancode → e.key.scancode
+            if(e.key.scancode >= SDL_SCANCODE_F1 && e.key.scancode <= SDL_SCANCODE_PAUSE)
                 ret = false;
         }
     }
-    else if (e.type==SDL_TEXTINPUT) {
+    // SDL3: SDL_TEXTINPUT → SDL_EVENT_TEXT_INPUT
+    else if (e.type==SDL_EVENT_TEXT_INPUT) {
         ret = Insert(tString(e.text.text)); // just insert input text as utf8 string
     }
-    else if (e.type==SDL_TEXTEDITING) {
+    // SDL3: SDL_TEXTEDITING → SDL_EVENT_TEXT_EDITING
+    else if (e.type==SDL_EVENT_TEXT_EDITING) {
 //        fprintf(stderr, "text editing \"%s\", selected range (%d, %d)\n",
 //                e.edit.text, e.edit.start, e.edit.length);
     }
-#else
-        else {
-            ret = InsertChar(c.unicode);
-        }
-    }
-#endif
     if( realCursorPos > content->size()) {
         realCursorPos=content->size();
     }
@@ -1097,17 +1209,15 @@ bool uMenuItemString::Event(SDL_Event &e){
 
 void uMenuItemString::Select() {
 #ifndef DEDICATED
-#if SDL_VERSION_ATLEAST(2,0,0)
-    SDL_StartTextInput();
-#endif
+    // SDL3: SDL_StartTextInput takes window parameter
+    SDL_StartTextInput(sr_screen);
 #endif
 }
 
 void uMenuItemString::Deselect() {
 #ifndef DEDICATED
-#if SDL_VERSION_ATLEAST(2,0,0)
-    SDL_StopTextInput();
-#endif
+    // SDL3: SDL_StopTextInput takes window parameter
+    SDL_StopTextInput(sr_screen);
 #endif
 }
 
@@ -1302,9 +1412,10 @@ void uAutoCompleter::ShowPossibilities(std::deque<tString> &results, tString &wo
 //! @param match      the string that will be inserted into the other one
 //! @return the new cursor position
 int uAutoCompleter::DoCompletion(tString &string, int pos, int len, tString &match) {
+
     string.erase(pos-len, len);
     string.insert(pos-len, match);
-    return pos - len + match.size();
+    return pos - len + match.Len();
 }
 
 //! @param string     the string in which the completion should take place
@@ -1409,8 +1520,8 @@ uMenuItemStringWithHistory::~uMenuItemStringWithHistory() {
 /// @returns true if the event was handled, false if it wasn't
 bool uMenuItemStringWithHistory::Event(SDL_Event &e){
 #ifndef DEDICATED
-    if (e.type==SDL_KEYDOWN &&
-            (e.key.keysym.sym==SDLK_UP && !m_Searchmode )){
+    if (e.type==SDL_EVENT_KEY_DOWN &&
+            (e.key.key==SDLK_UP && !m_Searchmode )){
         if (m_History.size() - 1 > m_HistoryPos)
         {
             if(m_HistoryPos == 0)  //the new entry... save it before overwriting it
@@ -1422,8 +1533,8 @@ bool uMenuItemStringWithHistory::Event(SDL_Event &e){
 
         return true;
     }
-    else if (e.type==SDL_KEYDOWN &&
-             (e.key.keysym.sym==SDLK_DOWN && !m_Searchmode)){
+    else if (e.type==SDL_EVENT_KEY_DOWN &&
+             (e.key.key==SDLK_DOWN && !m_Searchmode)){
         if (m_HistoryPos > 0)
         {
             m_HistoryPos--;
@@ -1433,7 +1544,7 @@ bool uMenuItemStringWithHistory::Event(SDL_Event &e){
 
         return true;
     }
-    else if (e.type==SDL_KEYDOWN && e.key.keysym.mod & KMOD_CTRL && e.key.keysym.sym == SDLK_r ) {
+    else if (e.type==SDL_EVENT_KEY_DOWN && e.key.mod & SDL_KMOD_CTRL && e.key.key == SDLK_R ) {
         m_Searchmode = true;
         if(m_HistoryPos == 0 && !content->empty()) {  //the new entry... save it before overwriting it
             m_History.front() = *content;
@@ -1445,16 +1556,16 @@ bool uMenuItemStringWithHistory::Event(SDL_Event &e){
         m_SearchFailing=false;
         return true;
     }
-    else if (e.type==SDL_KEYDOWN &&
-             (e.key.keysym.sym==SDLK_TAB && !m_Searchmode)){
+    else if (e.type==SDL_EVENT_KEY_DOWN &&
+             (e.key.key==SDLK_TAB && !m_Searchmode)){
         if(m_Completer != 0) {
             realCursorPos = m_Completer->Complete(*content, realCursorPos);
         }
 
         return true;
     }
-    else if (e.type==SDL_KEYDOWN && m_Searchmode) {
-        if(e.key.keysym.sym==SDLK_LEFT || e.key.keysym.sym==SDLK_RIGHT) {
+    else if (e.type==SDL_EVENT_KEY_DOWN && m_Searchmode) {
+        if(e.key.key==SDLK_LEFT || e.key.key==SDLK_RIGHT) {
             *content = m_History[m_HistoryPos];
             m_Searchmode = false;
             realCursorPos=0;
@@ -1647,14 +1758,18 @@ bool uMenu::IdleInput( bool processInput )
         return uMenu::quickexit != uMenu::QuickExit_Off;
     }
 
+    // Render a frame so blocking network operations show console output
+    // (e.g. "Connecting to master server…") instead of a frozen screen.
+    rRenderFrame([](){});
+
     SDL_Event event;
     uInputProcessGuard inputProcessGuard;
     while (!s_idleBackground && su_GetSDLInput(event))
     {
         switch (event.type)
         {
-        case SDL_KEYDOWN:
-            switch (event.key.keysym.sym)
+        case SDL_EVENT_KEY_DOWN:
+            switch (event.key.key)
             {
             case(SDLK_ESCAPE):
                 s_globalRepeat = false;
@@ -1664,6 +1779,16 @@ bool uMenu::IdleInput( bool processInput )
             default:
                 break;
             }
+            break;
+        case SDL_EVENT_FINGER_UP:
+            // On touchscreen, a tap cancels the blocking network operation
+            // (equivalent to pressing ESC on desktop).
+            if (su_GetEnableTouch() > 0)
+            {
+                s_globalRepeat = false;
+                return true;
+            }
+            break;
         default:
             break;
         }
@@ -1843,39 +1968,52 @@ void uAnimationPlayer::Render( tRectangle & drawArea )
     REAL xh = drawArea.GetHigh().x;
     REAL yh = drawArea.GetHigh().y;
 
-    glEnable(GL_ALPHA_TEST);
-    glDisable(GL_BLEND);
+    // Set up identity matrices for HUD rendering
+    ModelMatrix();
+    IdentityMatrix();
+    ProjMatrix();
+    IdentityMatrix();
+
+    RenderEnableState(rCapability::AlphaTest);
+    RenderDisableState(rCapability::Blend);
     for( std::vector< rITexture * >::iterator iter = textures_.begin();
          iter != textures_.end(); ++iter )
     {
         (*iter)->Select(true);
-        glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MAG_FILTER,
-                        GL_NEAREST);
+        RenderTexParameter(rGLConst::Texture2D, rGLConst::TextureMagFilter, rGLConst::Nearest);
 
         bool end = ( iter+1 == textures_.end() );
         if ( end )
         {
-            glAlphaFunc(GL_GREATER,1-completion);
-
+            RenderAlphaFunc(rCompareFunc::Greater,1-completion);
         }
         else
         {
-            glAlphaFunc(GL_GREATER,0);
+            RenderAlphaFunc(rCompareFunc::Greater,0);
         }
 
-        Color(1,1,1);
-        BeginQuads();
-        TexCoord(0,1);
-        Vertex(xl,yl);
-        TexCoord(0,0);
-        Vertex(xl,yh);
-        TexCoord(1,0);
-        Vertex(xh,yh);
-        TexCoord(1,1);
-        Vertex(xh,yl);
-        RenderEnd();
+        // Get texture ID for batch rendering
+        unsigned int textureId = RenderGetBoundTexture2D();
+
+        // Create textured quad for animation frame
+        std::vector<rVertex20> animVerts;
+        animVerts.reserve(6);
+        // Triangle 1: bottom-left, top-left, top-right
+        animVerts.push_back(rVertex20(xl, yl, 0.0f, 255, 255, 255, 255, 0.0f, 1.0f));
+        animVerts.push_back(rVertex20(xl, yh, 0.0f, 255, 255, 255, 255, 0.0f, 0.0f));
+        animVerts.push_back(rVertex20(xh, yh, 0.0f, 255, 255, 255, 255, 1.0f, 0.0f));
+        // Triangle 2: bottom-left, top-right, bottom-right
+        animVerts.push_back(rVertex20(xl, yl, 0.0f, 255, 255, 255, 255, 0.0f, 1.0f));
+        animVerts.push_back(rVertex20(xh, yh, 0.0f, 255, 255, 255, 255, 1.0f, 0.0f));
+        animVerts.push_back(rVertex20(xh, yl, 0.0f, 255, 255, 255, 255, 1.0f, 1.0f));
+
+        // Use Opaque blend mode since we're using alpha test
+        rRenderStateKey animState = rRenderStateKey::HUD(textureId, rBlendMode::Opaque);
+        animState.flags |= rRenderStateKey::AlphaTest;
+        rRenderQueue::Instance().Submit(rRenderPhase::HUD, animState, animVerts.data(), animVerts.size());
+        rRenderQueue::Instance().ExecutePhase(rRenderPhase::HUD);
     }
-    glAlphaFunc(GL_GREATER,0);
+    RenderAlphaFunc(rCompareFunc::Greater,0);
 }
 
 #endif
@@ -1890,8 +2028,8 @@ bool uMenu::Message(const tOutput& message, const tOutput& interpretation, REAL 
 #else
     uAnimationPlayer player( animation );
 
-    // reload textures (just in case)
-    rITexture::UnloadAll();
+    // Note: the original GL code called rITexture::UnloadAll() here to free VRAM.
+    // In Vulkan, this destroys the font atlas without proper reload, causing blank text.
 
     tAdvanceFrame();
 
@@ -1903,16 +2041,6 @@ bool uMenu::Message(const tOutput& message, const tOutput& interpretation, REAL 
 
     rTextField::SetDefaultColor( tColor(1,1,1,1) );
     rTextField::SetBlendColor( tColor(1,1,1,1) );
-
-    rSysDep::ClearGL();
-    rSysDep::SwapGL();
-    //    if (sr_glOut)
-    //    {
-    //        rFont::s_defaultFont.Select();
-    //        rFont::s_defaultFontSmall.Select();
-    //    }
-    rSysDep::ClearGL();
-    rSysDep::SwapGL();
 
     double timeout = tSysTimeFloat() + to;
     double ignoreInput = tSysTimeFloat() + .5;
@@ -1939,12 +2067,18 @@ bool uMenu::Message(const tOutput& message, const tOutput& interpretation, REAL 
                 lastNewline = i + 1;
             }
         }
+
         while (  !quickexit &&
                  (to < 0 || tSysTimeFloat() < timeout)){
-            //while(  !quickexit && ( !su_GetSDLInput(tEvent) || tEvent.type!=SDL_KEYDOWN) &&
+            //while(  !quickexit && ( !su_GetSDLInput(tEvent) || tEvent.type!=SDL_EVENT_KEY_DOWN) &&
             //        (to < 0 || tSysTimeFloat() < timeout)){
-            if ( su_GetSDLInput(tEvent) && tEvent.type==SDL_KEYDOWN) {
-                switch (tEvent.key.keysym.sym) {
+            if ( su_GetSDLInput(tEvent) &&
+                 (tEvent.type==SDL_EVENT_KEY_DOWN || tEvent.type==SDL_EVENT_FINGER_DOWN) ) {
+                if (tEvent.type == SDL_EVENT_FINGER_DOWN) {
+                    // Touch anywhere dismisses the message (after ignore window)
+                    if (tSysTimeFloat() > ignoreInput) break;
+                } else {
+                switch (tEvent.key.key) {
                 case SDLK_UP:
                     if (offset > 0)
                         offset -= 1;
@@ -1968,90 +2102,99 @@ bool uMenu::Message(const tOutput& message, const tOutput& interpretation, REAL 
                     // esc may have been pressed in error
                     ret = true;
                 }
+                }
             }
             if ( sr_glOut )
             {
-                sr_ResetRenderState(true);
-                rViewport::s_viewportFullscreen.Select();
+                rRenderFrame([&]() {
+                    sr_ResetRenderState(true);
+                    rViewport::s_viewportFullscreen.Select();
 
-                rSysDep::ClearGL();
+                    // GenericBackground();
+                    static rFileTexture background( rTextureGroups::TEX_FONT, "textures/message_background.png" );
+                    background.Select();
 
-                // GenericBackground();
-                static rFileTexture background( rTextureGroups::TEX_FONT, "textures/message_background.png" );
-                background.Select();
+                    // Batch render background quad
+                    unsigned int textureId = RenderGetBoundTexture2D();
 
-                Color(1,1,1);
+                    std::vector<rVertex20> bgVerts;
+                    bgVerts.reserve(6);
+                    // Triangle 1: top-left, top-right, bottom-right
+                    bgVerts.push_back(rVertex20(-1.0f, 1.0f, 0.0f, 255, 255, 255, 255, 0.0f, 0.0f));
+                    bgVerts.push_back(rVertex20(1.0f, 1.0f, 0.0f, 255, 255, 255, 255, 1.0f, 0.0f));
+                    bgVerts.push_back(rVertex20(1.0f, -1.0f, 0.0f, 255, 255, 255, 255, 1.0f, 1.0f));
+                    // Triangle 2: top-left, bottom-right, bottom-left
+                    bgVerts.push_back(rVertex20(-1.0f, 1.0f, 0.0f, 255, 255, 255, 255, 0.0f, 0.0f));
+                    bgVerts.push_back(rVertex20(1.0f, -1.0f, 0.0f, 255, 255, 255, 255, 1.0f, 1.0f));
+                    bgVerts.push_back(rVertex20(-1.0f, -1.0f, 0.0f, 255, 255, 255, 255, 0.0f, 1.0f));
 
-                BeginQuads();
-                TexCoord(0,0);
-                Vertex(-1,1);
-                TexCoord(1,0);
-                Vertex(1,1);
-                TexCoord(1,1);
-                Vertex(1,-1);
-                TexCoord(0,1);
-                Vertex(-1,-1);
-                RenderEnd();
+                    rRenderStateKey bgState = rRenderStateKey::Textured(textureId, rBlendMode::Alpha);
+                    rRenderQueue::Instance().Submit(rRenderPhase::HUD, bgState, bgVerts.data(), bgVerts.size());
 
                 //16*3/640.0, 32*3/480.0
                 REAL w=0.1*(REAL(sr_screenHeight)/sr_screenWidth),h=0.2;
 
-                //REAL middle=-.6;
+                    //REAL middle=-.6;
 
-                tString m(message);
-                int len = tColoredString::RemoveColors(m).Len();
-                float maxWidth = 4.8;
-                if (w * len > maxWidth)
-                {
-                    h = h * maxWidth / (w * len);
-                    w = maxWidth / len;
-                }
-
-                Color(1,1,1);
-                DisplayText(0,.8,w,message,sr_fontError);
-
-                //16/640.0
-                w = 1/30.0*(REAL(sr_screenHeight)/sr_screenWidth);
-                h = 32/480.0;
-
-                REAL center = .4;
-                if (offset >= lines.size()) offset = lines.size() - 1;
-                {
-                    rTextField c(-.9,.6, h, sr_fontError);
-                    c.EnableLineWrap();
-                    c.SetWidth(1.8);
-
-                    for (unsigned i = offset; i < lines.size(); ++i)
-                        c << lines[i] << "\n";
-
-                    center = (c.GetBottom()+1)/4;
-                }
-
-                // determite best display size for animation, asuming it is 64 pixels high
-                {
-                    int middleY = int( sr_screenHeight * center );
-                    int maxHeight = middleY - 5 - sr_screenHeight/20;
-                    int maxWidth = sr_screenWidth/2 - 10;
-                    int height = 32;
-                    int width = height*2;
-                    int scale = 1;
-                    while( ( scale + 1) * height + 1 < maxHeight && ( scale + 1 ) * width < maxWidth )
+                    tString m(message);
+                    int len = tColoredString::RemoveColors(m).Len();
+                    float maxWidth = 4.8;
+                    if (w * len > maxWidth)
                     {
-                        scale++;
+                        h = h * maxWidth / (w * len);
+                        w = maxWidth / len;
                     }
-                    height *= scale;
-                    width  *= scale;
-                    REAL wr = 2*width/REAL(sr_screenWidth);
-                    REAL hr = 2*height/REAL(sr_screenHeight);
-                    REAL c = (center*2)-1;
 
-                    tRectangle ani = tRectangle( tCoord(-wr, c-hr), tCoord(wr, c+hr) );
-                    player.Render( ani );
-                }
+                    Color(1,1,1);
+                    DisplayText(0,.8,w,message,sr_fontError);
 
+                    //16/640.0
+                    w = 1/30.0*(REAL(sr_screenHeight)/sr_screenWidth);
+                    h = 32/480.0;
 
+                    REAL center = .4;
+                    if (offset >= lines.size()) offset = lines.size() - 1;
+                    {
+                        rTextField c(-.9,.6, h, sr_fontError);
+                        c.EnableLineWrap();
+                        c.SetWidth(1.8);
+
+                        for (unsigned i = offset; i < lines.size(); ++i)
+                            c << lines[i] << "\n";
+
+                        center = (c.GetBottom()+1)/4;
+                    }
+
+                    // determite best display size for animation, asuming it is 64 pixels high
+                    {
+                        int middleY = int( sr_screenHeight * center );
+                        int maxHeight = middleY - 5 - sr_screenHeight/20;
+                        int maxWidth = sr_screenWidth/2 - 10;
+                        int height = 32;
+                        int width = height*2;
+                        int scale = 1;
+                        while( ( scale + 1) * height + 1 < maxHeight && ( scale + 1 ) * width < maxWidth )
+                        {
+                            scale++;
+                        }
+                        height *= scale;
+                        width  *= scale;
+                        REAL wr = 2*width/REAL(sr_screenWidth);
+                        REAL hr = 2*height/REAL(sr_screenHeight);
+                        REAL c = (center*2)-1;
+
+                        tRectangle ani = tRectangle( tCoord(-wr, c-hr), tCoord(wr, c+hr) );
+                        player.Render( ani );
+                    }
+
+                    // Execute HUD phase to render all batched geometry
+                    rRenderQueue::Instance().ExecutePhase(rRenderPhase::HUD);
+                });
             }
-            rSysDep::SwapGL();
+            else
+            {
+                rSysDep::SwapGL();
+            }
             tAdvanceFrame();
         }
     }
@@ -2063,9 +2206,6 @@ bool uMenu::Message(const tOutput& message, const tOutput& interpretation, REAL 
     }
 
     uMenu::SetIdle(idle_back);
-
-    // reload textures (just in case)
-    rITexture::UnloadAll();
 
     sr_textOut = textOutBack;
 #endif

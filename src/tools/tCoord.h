@@ -96,19 +96,20 @@ private:
         tCoord const &m_reference;
     public:
         GrahamComparator(tCoord const &reference) : m_reference(reference) {}
-        bool operator()(tCoord const &a, tCoord const &b) {
-            REAL ta = Tangent(m_reference, a), tb = Tangent(m_reference, b);
+        bool operator()(tCoord const &a, tCoord const &b) const {
+            // Use atan2 for provably strict-weak-ordered angular sort.
+            // atan2 is deterministic (same inputs → same output) and its
+            // results are totally ordered by IEEE 754 <, so transitivity
+            // and all other SWO axioms hold unconditionally — no
+            // floating-point degenerate cases can break the ordering.
+            double ax = a.x - m_reference.x, ay = a.y - m_reference.y;
+            double bx = b.x - m_reference.x, by = b.y - m_reference.y;
 
-            //check for 90 degree angles...
-            if(std::isnan(ta) && std::isnan(tb)) return fabs((m_reference-a).NormSquared()) < fabs((m_reference-b).NormSquared());
-            if(std::isnan(ta)) return tb<0;
-            if(std::isnan(tb)) return ta>0;
-
-            //check for opposite sides
-            if(ta>0 && tb<0) return true;
-            if(tb>0 && ta<0) return false;
-
-            return (ta<tb-EPS) || ((fabs(ta-tb)<EPS) && fabs((m_reference-a).NormSquared()) < fabs((m_reference-b).NormSquared()));
+            double ta = std::atan2(ay, ax);
+            double tb = std::atan2(by, bx);
+            if (ta != tb) return ta < tb;
+            // Co-linear (same angle): nearer point sorts first
+            return ax*ax + ay*ay < bx*bx + by*by;
         }
     };
 public:

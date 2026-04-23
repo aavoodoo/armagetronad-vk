@@ -30,13 +30,12 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 
 
 #include <vector>
-#include <boost/shared_ptr.hpp>
+#include <memory>
 #include "gVectorExtra.h"
 #include "ePlayer.h"
 #include "gCycle.h"
 #include "eTeam.h"
 #include "zone/zMisc.h"
-#include <boost/shared_ptr.hpp>
 #include "tPolynomial.h"
 
 class zSelector;

@@ -33,6 +33,8 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 
 #include "rRender.h"
 #include "rScreen.h"
+#include "rVertex.h"
+#include "rRenderQueue.h"
 #ifdef ENABLE_ZONESV1
 #include "gWinZone.h"
 #endif
@@ -69,109 +71,68 @@ extern std::deque<zZone *> sz_Zones;
 namespace cWidget {
 
 void Map::ClipperRect::Begin(Map &map, tCoord const &e1, tCoord const &e2) {
-    // set clipping frame in map coordinates
-    GLdouble pl0[4] = {1.0, 0.0, 0.0, -e1.x };
-    GLdouble pl1[4] = {-1.0, 0.0, 0.0, e2.x };
-    GLdouble pl2[4] = {0.0, 1.0, 0.0, -e1.y };
-    GLdouble pl3[4] = {0.0, -1.0, 0.0, e2.y };
-    glClipPlane(GL_CLIP_PLANE0, pl0);
-    glEnable(GL_CLIP_PLANE0);
-    glClipPlane(GL_CLIP_PLANE1, pl1);
-    glEnable(GL_CLIP_PLANE1);
-    glClipPlane(GL_CLIP_PLANE2, pl2);
-    glEnable(GL_CLIP_PLANE2);
-    glClipPlane(GL_CLIP_PLANE3, pl3);
-    glEnable(GL_CLIP_PLANE3);
-    // Add frame ...
-    map.m_foreground.BeginDraw();
-    glBegin(GL_LINE_STRIP);
-    //TODO: this should use a function of the rGradient.
-    map.m_foreground.DrawPoint(e1);
-    map.m_foreground.DrawPoint(tCoord(e2.x, e1.y));
-    map.m_foreground.DrawPoint(e2);
-    map.m_foreground.DrawPoint(tCoord(e1.x, e2.y));
-    map.m_foreground.DrawPoint(e1);
-    glEnd();
-    map.m_background.SetGradientEdges(e1, e2);
-    map.m_background.DrawRect(e1, e2);
+    // Scissor is already set by the enclosing Draw() call; just emit geometry.
+
+    // Frame border
+    {
+        rVertex20 frame[5] = {
+            map.m_foreground.GeneratePointVertex(e1),
+            map.m_foreground.GeneratePointVertex(tCoord(e2.x, e1.y)),
+            map.m_foreground.GeneratePointVertex(e2),
+            map.m_foreground.GeneratePointVertex(tCoord(e1.x, e2.y)),
+            map.m_foreground.GeneratePointVertex(e1)
+        };
+        rRenderQueue::Instance().SubmitLineStrip(rRenderPhase::Sky, map.m_foreground.GetRenderStateKey(), frame, 5);
+        rRenderQueue::Instance().ExecutePhase(rRenderPhase::Sky);
+        ModelMatrix();
+    }
+    // Background
+    {
+        map.m_background.SetGradientEdges(e1, e2);
+        std::vector<rVertex20> bg = map.m_background.GenerateRectVertices(e1, e2);
+
+        rRenderQueue::Instance().Submit(rRenderPhase::Sky, map.m_background.GetRenderStateKey(), bg.data(), bg.size());
+        rRenderQueue::Instance().ExecutePhase(rRenderPhase::Sky);
+        ModelMatrix();
+    }
 }
 
 void Map::ClipperRect::End() {
-    glDisable(GL_CLIP_PLANE0);
-    glDisable(GL_CLIP_PLANE1);
-    glDisable(GL_CLIP_PLANE2);
-    glDisable(GL_CLIP_PLANE3);
+    // No-op: scissor state belongs to the enclosing Draw() call.
 }
 
+// ClipperCircle now delegates to rectangular scissor (simplified)
 Map::ClipperCircle::ClipperCircle() {
-    glGetIntegerv(GL_MAX_CLIP_PLANES, (GLint *)(&m_edges));
-    if(m_edges > 20) {
-        m_edges = 20;
-    }
+    m_edges = 4; // unused, kept for interface compatibility
 }
-//the visible area is on the "left side" of the line, if you go from u to v
-void Map::ClipperCircle::Clip(int i, tCoord const &u, tCoord const &v) {
-    //glBegin(GL_LINES);
-    //Color(1,0,0);
-    //Vertex(u.x, u.y);
-    //Color(0,1,0);
-    //Vertex(v.x, v.y);
-    //glEnd();
-    if(u.x == v.x) {
-        GLdouble factor = (u.y>v.y) ? 1 : -1;
-        GLdouble pl[4] = {factor*1.0, 0.0, 0.0, -factor*v.x };
-        glClipPlane(GL_CLIP_PLANE0+i, pl);
-        glEnable(GL_CLIP_PLANE0+i);
-    } else {
-        GLdouble factor = (u.x<v.x) ? -1 : 1;
-        GLdouble a = (v.y-u.y)/(v.x-u.x);
-        GLdouble pl[4] = {
-                             factor*-a,
-                             factor,
-                             0.,
-                             factor*-(u.y-a*u.x)
-                         };
-        glClipPlane(GL_CLIP_PLANE0+i, pl);
-        glEnable(GL_CLIP_PLANE0+i);
-    }
-}
+void Map::ClipperCircle::Clip(int, tCoord const &, tCoord const &) {}
 void Map::ClipperCircle::Begin(Map &map, tCoord const &e1, tCoord const &e2) {
-    tCoord centre = .5*(e1+e2);
-    tCoord ab = .5*(e2-e1);
-    ab.x = fabs(ab.x); ab.y = fabs(ab.y);
-    float stepsize=M_PI*2/m_edges;
+    // Scissor is already set by the enclosing Draw() call; just emit geometry.
 
-	map.m_background.BeginDraw();
-	map.m_background.SetGradientEdges(centre - ab, centre + ab);
-	glBegin(GL_POLYGON);
-    for(int i = 0; i < m_edges; ++i) {
-        float t = (i+1)*stepsize;
-        tCoord next(centre.x+ab.x*cos(t), centre.y-ab.y*sin(t));
-        map.m_background.DrawPoint(next);
+    // Frame border
+    {
+        rVertex20 frame[5] = {
+            map.m_foreground.GeneratePointVertex(e1),
+            map.m_foreground.GeneratePointVertex(tCoord(e2.x, e1.y)),
+            map.m_foreground.GeneratePointVertex(e2),
+            map.m_foreground.GeneratePointVertex(tCoord(e1.x, e2.y)),
+            map.m_foreground.GeneratePointVertex(e1)
+        };
+        rRenderQueue::Instance().SubmitLineStrip(rRenderPhase::Sky, map.m_foreground.GetRenderStateKey(), frame, 5);
+        rRenderQueue::Instance().ExecutePhase(rRenderPhase::Sky);
+        ModelMatrix();
     }
-	glEnd();
-	glDisable(GL_TEXTURE_2D);
-    tCoord last = centre + tCoord(ab.x, 0);
-	map.m_foreground.SetGradientEdges(centre - ab, centre + ab);
-	map.m_foreground.BeginDraw();
-    for(int i = 0; i < m_edges; ++i) {
-        float t = (i+1)*stepsize;
-        tCoord next(centre.x+ab.x*cos(t), centre.y-ab.y*sin(t));
-		glBegin(GL_LINES);
-        glVertex2f(next.x, next.y);
-        glVertex2f(last.x, last.y);
-        map.m_foreground.DrawPoint(next);
-        map.m_foreground.DrawPoint(last);
-		glEnd();
-        Clip(i, last, next);
-        last = next;
+    // Background
+    {
+        map.m_background.SetGradientEdges(e1, e2);
+        std::vector<rVertex20> bg = map.m_background.GenerateRectVertices(e1, e2);
+        rRenderQueue::Instance().Submit(rRenderPhase::Sky, map.m_background.GetRenderStateKey(), bg.data(), bg.size());
+        rRenderQueue::Instance().ExecutePhase(rRenderPhase::Sky);
+        ModelMatrix();
     }
-	glDisable(GL_TEXTURE_2D);
 }
 void Map::ClipperCircle::End() {
-    for(int i = 0; i < m_edges; ++i) {
-        glDisable(GL_CLIP_PLANE0 + i); //according to the documentation you're allowed to do that
-    }
+    // No-op: scissor state belongs to the enclosing Draw() call.
 }
 
 bool Map::Process(tXmlParser::node cur) {
@@ -239,18 +200,29 @@ void Map::HandleEvent(bool state, int id) {
 void Map::Render() {
     // I haven't checked possible initial matrix state, so init to identity and modelview
     if(stc_forbidHudMap) return; // the server doesn't want us to do that
-    glMatrixMode(GL_PROJECTION);
-    glLoadIdentity();
-    glMatrixMode(GL_MODELVIEW);
-    glLoadIdentity();
-    glDisable(GL_TEXTURE_2D);
-    glDisable(GL_LIGHTING);
-    glDisable(GL_LINE_SMOOTH);
-    glHint (GL_LINE_SMOOTH_HINT, GL_FASTEST);
+    ProjMatrix();
+    IdentityMatrix();
+    ModelMatrix();
+    IdentityMatrix();
+
+    // Save states that we disable for map rendering
+    bool hadTexture = RenderIsEnabled(rCapability::Texture2D);
+    bool hadLighting = RenderIsEnabled(rCapability::Lighting);
+    bool hadLineSmooth = RenderIsEnabled(rCapability::LineSmooth);
+
+    RenderDisableState(rCapability::Texture2D);
+    RenderDisableState(rCapability::Lighting);
+    RenderDisableState(rCapability::LineSmooth);
+    RenderHint(rHintTarget::LineSmoothHint, rHintMode::Fastest);
     DrawMap(true, true,
             5.5, 0.,
             m_position.x-m_size.x, m_position.y-m_size.y, 2.*m_size.x, 2.*m_size.y,
             sr_screenWidth*m_size.x, sr_screenWidth*m_size.y, .5, .5);
+
+    // Restore states
+    if (hadTexture) RenderEnableState(rCapability::Texture2D);
+    if (hadLighting) RenderEnableState(rCapability::Lighting);
+    if (hadLineSmooth) RenderEnableState(rCapability::LineSmooth);
 }
 void Map::DrawMap(bool rimWalls, bool cycleWalls,
                   double cycleSize, double border,
@@ -368,21 +340,31 @@ void Map::DrawMap(bool rimWalls, bool cycleWalls,
     yscale *=zoom;
     xpos = x - m_centre.x * xscale + w / 2;
     ypos = y - m_centre.y * yscale + h / 2;
+    // Enable scissor for the widget area (all modes).
+    int scissorVP[4];
+    {
+        RenderGetViewport(scissorVP);
+        int sx = scissorVP[0] + static_cast<int>((x + 1.0f) * 0.5f * scissorVP[2]);
+        int sy = scissorVP[1] + static_cast<int>((y + 1.0f) * 0.5f * scissorVP[3]);
+        int sw = static_cast<int>(w * 0.5f * scissorVP[2]);
+        int sh = static_cast<int>(h * 0.5f * scissorVP[3]);
+        RenderScissor(sx, sy, sw, sh);
+    }
     if(m_mode != MODE_STD) {
         m_clipper->Begin(*this, tCoord(x,y), tCoord(x+w, y+h));
     }
     // set projection matrix
-    glPushMatrix();
-    glTranslatef(xpos, ypos, 0);
-    glScalef(xscale, yscale, 1);
+    PushMatrix();
+    TranslateMatrix(xpos, ypos, 0);
+    ScaleMatrix(xscale, yscale, 1);
     // translate and rotate
-    GLfloat r[16] = {
+    float r[16] = {
           rotate.x,  -rotate.y, 0, 0,
           rotate.y,   rotate.x, 0, 0,
                  0,          0, 1, 0,
         m_centre.x, m_centre.y, 0, 1};
-    glMultMatrixf(r);
-    glTranslatef(-m_centre.x,-m_centre.y,0);
+    MultMatrix(r);
+    TranslateMatrix(-m_centre.x,-m_centre.y,0);
     if(rimWalls)
         DrawRimWalls(se_rimWalls);
     if(cycleWalls) {
@@ -390,41 +372,55 @@ void Map::DrawMap(bool rimWalls, bool cycleWalls,
         DrawWalls(sg_netPlayerWalls);
     }
     DrawObjects(tCoord((cycleSize * w) / (rw * xscale), (cycleSize * h) / (rh * yscale)));
-    glPopMatrix();
+    PopMatrix();
     if(m_mode != MODE_STD) {
         m_clipper->End();
     }
+    // Reset scissor to full viewport (Vulkan has no "disable scissor"; set to viewport bounds).
+    RenderScissor(scissorVP[0], scissorVP[1], scissorVP[2], scissorVP[3]);
 }
 
 void Map::DrawRimWalls( tList<eWallRim> &list ) {
     if(sr_alphaBlend && m_mode == MODE_STD) {
         const eRectangle &bounds = eWallRim::GetBounds();
         const tCoord dims = bounds.GetHigh() - bounds.GetLow();
-        const float max = fmax(dims.x, dims.y); // make sure we get a square
+        const float max = fmax(dims.x, dims.y);
         m_background.SetGradientEdges(bounds.GetLow(), tCoord(bounds.GetLow().x + max, bounds.GetLow().y + max));
-        m_background.BeginDraw();
-        glBegin(GL_POLYGON);
-        for(std::vector<tCoord>::iterator iter = se_rimWallRubberBand.begin(); iter != se_rimWallRubberBand.end(); ++iter) {
-            m_background.DrawPoint(*iter);
+        // Polygon → triangle fan
+        if (se_rimWallRubberBand.size() >= 3) {
+            std::vector<rVertex20> polyVerts;
+            polyVerts.reserve((se_rimWallRubberBand.size() - 1) * 3);
+            rVertex20 v0 = m_background.GeneratePointVertex(se_rimWallRubberBand[0]);
+            for (size_t i = 1; i + 1 < se_rimWallRubberBand.size(); ++i) {
+                polyVerts.push_back(v0);
+                polyVerts.push_back(m_background.GeneratePointVertex(se_rimWallRubberBand[i]));
+                polyVerts.push_back(m_background.GeneratePointVertex(se_rimWallRubberBand[i+1]));
+            }
+
+
+            // Don't TransformVerticesByMVP — vertices are in world coords,
+            // the shader applies the map's MVP (currently on the matrix stack)
+            rRenderQueue::Instance().Submit(rRenderPhase::Sky, m_background.GetRenderStateKey(), polyVerts.data(), polyVerts.size());
+            rRenderQueue::Instance().ExecutePhase(rRenderPhase::Sky);
+            ModelMatrix();
         }
-        m_background.DrawPoint(se_rimWallRubberBand.front());
-        glEnd();
     }
-    glDisable(GL_TEXTURE_2D);
-    glColor4f(1, 1, 1, .5);
-    glBegin(GL_LINES);
+    // Rim wall outlines
     {
+        std::vector<rVertex20> lines;
+        lines.reserve(list.Len() * 2);
         for (int i=list.Len()-1; i >= 0; --i)
         {
             eWallRim *wall = list[i];
             eCoord begin = wall->EndPoint(0), end = wall->EndPoint(1);
-            glVertex2f(begin.x, begin.y);
-            glVertex2f(end.x, end.y);
+            lines.push_back(rVertex20(begin.x, begin.y, 0, 255, 255, 255, 127, 0, 0));
+            lines.push_back(rVertex20(end.x, end.y, 0, 255, 255, 255, 127, 0, 0));
         }
-
-
+        rRenderStateKey state = rRenderStateKey::HUD(0, rBlendMode::Alpha);
+        rRenderQueue::Instance().SubmitLines(rRenderPhase::Sky, state, lines.data(), lines.size());
+        rRenderQueue::Instance().ExecutePhase(rRenderPhase::Sky);
+        ModelMatrix();
     }
-    glEnd();
 }
 
 void Map::DrawWalls(tList<gNetPlayerWall> &list) {
@@ -432,7 +428,8 @@ void Map::DrawWalls(tList<gNetPlayerWall> &list) {
     double currentTime = se_GameTime();
     bool limitedLength = gCycle::WallsLength() > 0;
     double wallsStayUpDelay = gCycle::WallsStayUpDelay();
-    glBegin(GL_LINES);
+    std::vector<rVertex20> wallLines;
+    wallLines.reserve(len * 4);
     for(i=0; i<len; i++) {
         gNetPlayerWall *wall = list[i];
         gCycle *cycle = wall->Cycle();
@@ -443,7 +440,10 @@ void Map::DrawWalls(tList<gNetPlayerWall> &list) {
             alpha -= 2 * (currentTime - cycle->DeathTime() - wallsStayUpDelay);
             if(alpha <= 0) continue;
         }
-        glColor4f(cycle->color_.r_, cycle->color_.g_, cycle->color_.b_, alpha);
+        uint8_t cr = static_cast<uint8_t>(cycle->color_.r_ * 255.0f);
+        uint8_t cg = static_cast<uint8_t>(cycle->color_.g_ * 255.0f);
+        uint8_t cb = static_cast<uint8_t>(cycle->color_.b_ * 255.0f);
+        uint8_t ca = static_cast<uint8_t>(alpha * 255.0f);
         double cycleDist = cycle->GetDistance();
         double minDist = limitedLength && cycleDist > wallsLength ? cycleDist - wallsLength : 0;
         const eCoord &begPos = wall->EndPoint(0), &endPos = wall->EndPoint(1);
@@ -462,14 +462,23 @@ void Map::DrawWalls(tList<gNetPlayerWall> &list) {
             if(curDist < minDist) curDist = minDist;
             curDist = (curDist - begDist) / lenDist;
             if(prevDangerous) {
-                glVertex2f(begPos.x + prevDist * (endPos.x - begPos.x), begPos.y + prevDist * (endPos.y - begPos.y));
-                glVertex2f(begPos.x +  curDist * (endPos.x - begPos.x), begPos.y +  curDist * (endPos.y - begPos.y));
+                float px = begPos.x + prevDist * (endPos.x - begPos.x);
+                float py = begPos.y + prevDist * (endPos.y - begPos.y);
+                float cx = begPos.x + curDist * (endPos.x - begPos.x);
+                float cy = begPos.y + curDist * (endPos.y - begPos.y);
+                wallLines.push_back(rVertex20(px, py, 0, cr, cg, cb, ca, 0, 0));
+                wallLines.push_back(rVertex20(cx, cy, 0, cr, cg, cb, ca, 0, 0));
             }
             prevDangerous = curDangerous;
             prevDist = curDist;
         }
     }
-    glEnd();
+    if (!wallLines.empty()) {
+        rRenderStateKey state = rRenderStateKey::HUD(0, rBlendMode::Alpha);
+        rRenderQueue::Instance().SubmitLines(rRenderPhase::Sky, state, wallLines.data(), wallLines.size());
+        rRenderQueue::Instance().ExecutePhase(rRenderPhase::Sky);
+        ModelMatrix();
+    }
 }
 
 void Map::DrawObjects(tCoord scale) {

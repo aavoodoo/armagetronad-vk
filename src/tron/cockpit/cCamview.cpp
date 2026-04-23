@@ -125,13 +125,13 @@ bool Camview::Process(tXmlParser::node cur) {
 void Camview::Render() {
     // I haven't checked possible initial matrix state, so init to identity and modelview
     if(stc_forbidHudCamera) return; // the server doesn't want us to do that
-	glClear(GL_DEPTH_BUFFER_BIT);
-    glMatrixMode(GL_PROJECTION);
-    glPushMatrix();
-    glLoadIdentity();
-    glMatrixMode(GL_MODELVIEW);
-    glPushMatrix();
-    glLoadIdentity();
+	RenderClear(false, true, false);
+    ProjMatrix();
+    PushMatrix();
+    IdentityMatrix();
+    ModelMatrix();
+    PushMatrix();
+    IdentityMatrix();
 
 	// Rendering cameras
     rViewportConfiguration* viewportConfiguration = rViewportConfiguration::CurrentViewportConfiguration();
@@ -191,17 +191,14 @@ void Camview::Render() {
 	}
 		
 	//restore gl context
-    glMatrixMode(GL_MODELVIEW);
-	glPopMatrix();
-    glMatrixMode(GL_PROJECTION);
-	glPopMatrix();
-    
+    ModelMatrix();
+	PopMatrix();
+    ProjMatrix();
+	PopMatrix();
+
     // Restore the root viewport
     sr_ResetRenderState(true);
-    glViewport (GLsizei(0),
-                GLsizei(0),
-                GLsizei(sr_screenWidth),
-                GLsizei(sr_screenWidth));
+    RenderViewport(0, 0, sr_screenWidth, sr_screenWidth);
 }
 
 void Camview::PostParsingProcess()

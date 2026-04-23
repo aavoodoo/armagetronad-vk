@@ -1,0 +1,14 @@
+# Depth buffer visualization overlay (diagnostic post-process effect).
+#
+# Single pass, reads SCENE_COLOR and SCENE_DEPTH, writes SWAPCHAIN.
+# The fragment shader composites a grayscale depth thumbnail in the
+# top-right corner on top of the unmodified scene color.
+#
+# See depthviz.frag for the visualization math and depthviz.meta for
+# runtime-tunable parameters. Activate with:
+#   POST_PROCESS_ENABLED 1
+#   POST_PROCESS_EFFECT  depthviz
+
+PASS depthviz SWAPCHAIN
+  SAMPLER 0 SCENE_COLOR
+  SAMPLER 1 SCENE_DEPTH

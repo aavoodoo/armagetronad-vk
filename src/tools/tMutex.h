@@ -20,7 +20,7 @@ GNU General Public License for more details.
 You should have received a copy of the GNU General Public License
 along with this program; if not, write to the Free Software
 Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
-  
+
 ***************************************************************************
 
 */
@@ -29,133 +29,19 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 #define ArmageTron_TMUTEX_H
 
 #include "defs.h"
+#include <mutex>
 
-#ifdef HAVE_BOOST_THREAD
-
-#include <boost/thread/recursive_mutex.hpp>
-#include <boost/thread/mutex.hpp>
-#include <boost/thread/locks.hpp>
-
-#else // HAVE_BOOST_THREAD
-
+// Provide boost-compatible aliases in the boost namespace
 namespace boost
 {
-// replicate the little we actually use with PThreads; for documentation, see boost.
-class mutex
-{
-private:
-    mutex( mutex const & );
-    mutex & operator = ( mutex const & );
-protected:
-    pthread_mutex_t mutex_;
+    using mutex = std::mutex;
+    using recursive_mutex = std::recursive_mutex;
 
-    // special constructor, do not initialize mutex
-    explicit mutex( int );
-public:
-    mutex();
-    ~mutex();
-    void lock();
-    void unlock();
-};
+    template <class T>
+    using lock_guard = std::lock_guard<T>;
 
-class recursive_mutex
- : public mutex
-{
-public:
-    recursive_mutex();
-};
-
-template <class T>
-class lock_base
-{
-private:
-    lock_base( lock_base const & );
-    lock_base & operator = ( lock_base const & );
-protected:
-    lock_base(T & m)
-    : mutex_(m)
-    {}
-
-    void lock_()
-    {
-        mutex_.lock();
-    };
-
-    void unlock_()
-    {
-        mutex_.unlock();
-    }
-
-    T & mutex_;
-};
-
-template <class T>
-class lock_guard: public lock_base<T>
-{
-public:
-    lock_guard(T & m)
-    : lock_base<T>(m)
-    {
-        this->lock_();
-    };
-
-    ~lock_guard()
-    {
-        this->unlock_();
-    };
-};
-
-template <class T>
-class unique_lock: public lock_base<T>
-{
-private:
-    bool locked_;
-public:
-    unique_lock(T & m)
-    : lock_base<T>(m), locked_(false)
-    {
-        this->lock();
-    };
-
-    ~unique_lock()
-    {
-        this->unlock();
-    };
-
-    void lock()
-    {
-        if( !locked_ )
-        {
-            locked_ = true;
-            this->lock_();
-        }
-    }
-
-    void unlock()
-    {
-        if( locked_ )
-        {
-            locked_ = false;
-            this->unlock_();
-        }
-    }
-
-    T * release()
-    {
-        if( locked_ )
-        {
-            locked_ = false;
-            return &this->mutex_;
-        }
-        else
-        {
-            return nullptr;
-        }
-    }
-};
-
+    template <class T>
+    using unique_lock = std::unique_lock<T>;
 }
-
-#endif // HAVE_BOOST_THREAD
 
 #endif

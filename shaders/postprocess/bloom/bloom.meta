@@ -1,0 +1,15 @@
+# Multi-pass Tron glow bloom parameters.
+#
+# Format: PARAM_<TYPE> <name> <slot> <default> <min> <max> <description>
+#         PARAM_VEC4   <name> <slot> <r> <g> <b> <a> <description>
+#
+# Float slots are linear 0..31. Vec4 slots must be aligned to 4 (0, 4, 8, ...).
+
+NAME Bloom (Tron Glow)
+DESCRIPTION 2-level Gaussian blur pyramid applied to the scene emissive attachment. Cycles, cycle walls, and zones glow by default (controlled by uber_hooks.glsl).
+
+PARAM_FLOAT intensity    0 1.5   0.0 5.0  Final composite strength
+PARAM_FLOAT threshold    1 0.05  0.0 1.0  Emissive alpha cutoff (near-0 removes noise)
+PARAM_FLOAT radius       2 1.5   0.5 4.0  Blur radius multiplier (wider = softer halo)
+PARAM_FLOAT half_weight  3 0.6   0.0 1.0  Half-res pyramid level contribution (vs quarter-res)
+PARAM_VEC4  tint         4 1.0 1.0 1.0 1.0 Glow color tint (RGB * intensity)

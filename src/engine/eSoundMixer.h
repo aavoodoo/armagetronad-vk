@@ -36,16 +36,19 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 #include "tString.h"
 #include "tSafePTR.h"
 //#include "tLinkedList.h"
-#ifndef DEDICATED
-#include <SDL_mixer.h>
-#else
-// dummy types
-typedef int Mix_Chunk;
-typedef int Mix_Music;
-#endif
 #include "tPlayList.h"
 
+#ifdef HAVE_LIBSDL_MIXER
+#include <SDL_mixer.h>
 #include "sdl_mixer/eChannelSDLMixer.h"
+#elif defined(HAVE_MINIAUDIO)
+#include "eChannelMiniaudio.h"
+#else
+// Dedicated server - dummy types
+typedef int eWavData;
+typedef int eChannel;
+typedef int eMusicTrack;
+#endif
 
 #include <deque>
 
@@ -80,9 +83,11 @@ class eGameObject;
 class eCoord;
 class eGrid;
 
+#if defined(HAVE_LIBSDL_MIXER) || defined(HAVE_MINIAUDIO)
 // Forward declarations from this file
 class eMusicTrack;
 class eChannel;
+#endif
 
 /*******************************************************************************
  *

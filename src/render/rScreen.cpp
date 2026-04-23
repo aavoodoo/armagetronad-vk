@@ -35,13 +35,16 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
     #include "rSysdep.h"
     #include "rConsole.h"
     #include "rViewport.h"
+    #ifndef DEDICATED
+    #include "rRender.h"
+    #include "rRenderQueue.h"
+    #endif
     #include "tConfiguration.h"
     #include "tRecorder.h"
     #include "tSysTime.h"
 
     #ifndef DEDICATED
 // #include "../network/nNetwork.h"
-    #include "rGL.h"
     #include "rSDL.h"
 
     #ifdef POWERPAK_DEB
@@ -59,30 +62,15 @@ tCONFIG_ENUM( rResolution );
 tCONFIG_ENUM( rColorDepth );
 tCONFIG_ENUM( rVSync );
 
-#if SDL_VERSION_ATLEAST(2,0,0)
+#ifndef DEDICATED
+// SDL3: always use SDL_Window and SDL_GLContext
 SDL_Window   *sr_screen=NULL;
-#ifndef DEDICATED
 SDL_GLContext sr_glcontext=NULL;
-#endif
-#else
-SDL_Surface  *sr_screen=NULL; // our window
-#endif
 
-#if ! SDL_VERSION_ATLEAST(2,0,1)
-// this flag was introduced in 2.0.1, we can live without
-#define SDL_WINDOW_ALLOW_HIGHDPI 0
-#endif
-
-#ifndef DEDICATED
-#ifndef SDL_OPENGL
-#error "need SDL 1.1"
-#endif
-
-static int default_texturemode = GL_LINEAR_MIPMAP_LINEAR;
-    #endif
+static int default_texturemode = rGLConst::LinearMipmapLinear;
+#endif // DEDICATED
 
 rDisplayListUsage sr_useDisplayLists=rDisplayList_Off;
-bool              sr_blacklistDisplayLists=false;
 
 static int width[ArmageTron_Custom+2]  = {0, 320, 320, 400, 512, 640, 800, 1024	, 1280, 1280, 1280, 1600, 1680, 2048,800,320};
 static int height[ArmageTron_Custom+2] = {0, 200, 240, 300, 384, 480, 600,  768	,  800,  854, 1024, 1200, 1050, 1572,600,200};
@@ -95,6 +83,64 @@ int sr_screenWidth{960},sr_screenHeight{540};
 // screen/window dimensions in whatever the system uses for screen coordinates (points/pixels)
 int sr_screenWidthInPoints{960},sr_screenHeightInPoints{540};
 
+REAL sr_ScreenKeyboardHeightFraction()
+{
+#ifndef DEDICATED
+#if defined(__APPLE__) && TARGET_OS_IOS
+    // Use the real keyboard height from UIKit notifications (rScreenIOS.mm)
+    extern float sr_iOSKeyboardHeightFraction(void);
+    float frac = sr_iOSKeyboardHeightFraction();
+    if (frac > 0.01f) return frac;
+#endif
+    extern SDL_Window *sr_screen;
+#ifdef __ANDROID__
+    // On Android, SDL_ScreenKeyboardShown returns true whenever SDL_StartTextInput
+    // is active — including menu string editing, not just chat/console. Only apply
+    // the viewport offset when the game explicitly requested the keyboard via the
+    // touch overlay (chat/console actions), not for generic menu text input.
+    extern bool sr_androidKeyboardExplicit;
+    if (sr_screen && SDL_ScreenKeyboardShown(sr_screen))
+    {
+        if (sr_androidKeyboardExplicit)
+            return (sr_screenHeightInPoints < 500) ? 0.55f : 0.40f;
+    }
+    else
+    {
+        sr_androidKeyboardExplicit = false; // reset when keyboard dismissed
+    }
+#else
+    // Desktop platforms (macOS, Linux, Windows): no on-screen keyboard.
+    // SDL3 may spuriously return true for SDL_ScreenKeyboardShown when
+    // SDL_StartTextInput is active (menu editing), so we ignore it entirely.
+#endif
+#endif
+    return 0.0f;
+}
+
+REAL sr_TouchUIScale()
+{
+    // Compute a UI scale multiplier for touch-friendly menus on mobile.
+    // Uses the screen diagonal in "points" (logical pixels) as a proxy for
+    // physical screen size.
+    //
+    // Reference values (landscape, points = native pixels / scale factor):
+    //   iPhone 16e:      667x375 pts → diag  765  → scale 2.00
+    //   iPhone 17 Pro:   874x402 pts → diag  962  → scale 1.60
+    //   iPhone 17 PM:    932x430 pts → diag 1026  → scale 1.50
+    //   iPad Mini 7:    1133x744 pts → diag 1355  → scale 1.13
+    //   iPad Pro 11":   1194x834 pts → diag 1457  → scale 1.05
+    //   iPad Pro 13":   1366x1024pts → diag 1708  → scale 1.00
+    //
+    // Large tablets (diag >= 1500 pts) get 1.0x. Phones get up to 2.0x.
+    // Small iPads (Mini) get a mild boost too.
+    float diagPts = sqrtf(float(sr_screenWidthInPoints) * sr_screenWidthInPoints
+                        + float(sr_screenHeightInPoints) * sr_screenHeightInPoints);
+    if (diagPts >= 1500.0f) return 1.0f;
+    if (diagPts <= 0.0f) return 1.0f;
+    REAL scale = 1500.0f / diagPts;
+    if (scale > 2.0f) scale = 2.0f;
+    return scale;
+}
 
 static tSettingItem<int>  at_ch("CUSTOM_SCREEN_HEIGHT"	, height[ArmageTron_Custom]);
 static tSettingItem<int>  at_cw("CUSTOM_SCREEN_WIDTH" 	, width	[ArmageTron_Custom]);
@@ -135,19 +181,8 @@ rScreenSettings currentScreensetting(sr_DesktopScreensizeSupported() ? ArmageTro
 bool sr_DesktopScreensizeSupported()
 {
 #ifndef DEDICATED
-#if SDL_VERSION_ATLEAST(2, 0, 0)
-    SDL_version sdlVersion;
-    SDL_GetVersion(&sdlVersion);
-#else
-    SDL_version const & sdlVersion = *SDL_Linked_Version();
-#endif
-
-    return
-    sdlVersion.major > 1 ||
-    ( sdlVersion.major == 1 &&
-      ( sdlVersion.minor > 2 ||
-        ( sdlVersion.minor == 2 &&
-          ( sdlVersion.patch >= 10 ) ) ) );
+    // SDL3 always supports desktop screen size
+    return true;
 #else
     return false;
 #endif
@@ -155,13 +190,11 @@ bool sr_DesktopScreensizeSupported()
 
 static int failed_attempts = 0;
 
-#if SDL_VERSION_ATLEAST(2, 0, 0)
 static tConfItem<int>  at_di("ARMAGETRON_DISPLAY_INDEX"	, currentScreensetting.displayIndex);
 static tConfItem<int>  at_ldi("ARMAGETRON_LAST_DISPLAY_INDEX"	, lastSuccess.displayIndex);
 
 static tConfItem<int>  at_rr("ARMAGETRON_REFRESH_RATE"	, currentScreensetting.refreshRate);
 static tConfItem<int>  at_lrr("ARMAGETRON_LAST_REFRESH_RATE"	, lastSuccess.refreshRate);
-#endif
 
 static tConfItem<rResolution> screenres("ARMAGETRON_SCREENMODE",currentScreensetting.res.res);
 static tConfItem<rResolution> screenresLast("ARMAGETRON_LAST_SCREENMODE",lastSuccess.res.res);
@@ -171,6 +204,8 @@ static tConfItem<rResolution> winsizeLast("ARMAGETRON_LAST_WINDOWSIZE",lastSucce
 
 static tConfItem<rVSync> vSync("ARMAGETRON_VSYNC",currentScreensetting.vSync);
 static tConfItem<rVSync> vSyncLast("ARMAGETRON_VSYNC_LAST",lastSuccess.vSync);
+
+static tConfItem<int> presentMode("VULKAN_PRESENT_MODE",currentScreensetting.presentMode);
 
 static tConfItem<int> screenres_w("ARMAGETRON_SCREENMODE_W",currentScreensetting.res.width);
 static tConfItem<int> screenresLast_w("ARMAGETRON_LAST_SCREENMODE_W", lastSuccess.res.width);
@@ -198,11 +233,6 @@ static tConfItem<rColorDepth> tc("COLORDEPTH",currentScreensetting.colorDepth);
 static tConfItem<rColorDepth> ltc("LAST_COLORDEPTH",lastSuccess.colorDepth);
 static tConfItem<rColorDepth> tzd("ZDEPTH",currentScreensetting.zDepth);
 static tConfItem<rColorDepth> ltzd("LAST_ZDEPTH",lastSuccess.zDepth);
-
-#if !SDL_VERSION_ATLEAST(2,0,0)
-static tConfItem<bool> check_errors("CHECK_ERRORS",currentScreensetting.checkErrors);
-static tConfItem<bool> check_errorsl("LAST_CHECK_ERRORS",lastSuccess.checkErrors);
-#endif
 
 static tConfItem<int> fa("FAILED_ATTEMPTS", failed_attempts);
 
@@ -385,7 +415,7 @@ int rScreenSize::Compare( rScreenSize const & other ) const
 // *******************************************************************************************
 
 rScreenSettings::rScreenSettings( rResolution r, bool fs, rColorDepth cd, bool ce )
-:res(r), windowSize(r), fullscreen(fs), colorDepth(cd), zDepth( ArmageTron_ColorDepth_Desktop ), checkErrors(true), displayIndex(0), refreshRate(0), vSync( ArmageTron_VSync_Default ), aspect (1)
+:res(r), windowSize(r), fullscreen(fs), colorDepth(cd), zDepth( ArmageTron_ColorDepth_Desktop ), checkErrors(true), displayIndex(0), refreshRate(0), vSync( ArmageTron_VSync_Default ), aspect (1), presentMode(0)
 {
     // special case for desktop resolution: window size of 640x480
     if ( r == ArmageTron_Desktop )
@@ -395,9 +425,6 @@ rScreenSettings::rScreenSettings( rResolution r, bool fs, rColorDepth cd, bool c
 }
 
 void sr_ReinitDisplay(){
-#if !SDL_VERSION_ATLEAST(2, 0, 0)
-    sr_ExitDisplay();
-#endif
     if (!sr_InitDisplay()){
         tERR_ERROR("Oops. Failed to reinit video hardware. "
                    "Resetting to defaults..\n");
@@ -424,37 +451,12 @@ static tConfItem<bool> lsr("SOFTWARE_RENDERER",last_software_renderer);
 
 tString lastError("Unknown");
 
-#if SDL_VERSION_ATLEAST(2,0,0)
-#else
-#ifndef DEDICATED
-static int countBits(unsigned int count)
-{
-    int ret = 0;
-    while (count)
-    {
-        ret    += count & 1;
-        count >>= 1;
-    }
-
-    return ret;
-}
-#endif
-#endif
-
     #ifndef DEDICATED
-    #ifdef SDL_OPENGL
 // sets the number of vsync signals to wait for each frame
 static bool sr_SetSwapControl( int frames, bool after = false )
 {
-// use SDL, requires 1.2.10
-#if SDL_VERSION_ATLEAST( 1, 2, 10 )
-#if SDL_VERSION_ATLEAST( 2, 0, 0 )
-    return !SDL_GL_SetSwapInterval( frames );
-#else
-    SDL_GL_SetAttribute( SDL_GL_SWAP_CONTROL, frames );
-    return true;
-#endif
-#endif
+    // SDL3: Use SDL_GL_SetSwapInterval directly
+    return SDL_GL_SetSwapInterval( frames );
 }
 
 static bool sr_SetSwapControlAuto( bool after = false )
@@ -513,7 +515,6 @@ static void sr_CompleteGLAttributes()
 {
     sr_SetSwapControlAuto( true );
 }
-    #endif // SDL_OPENGL
     #endif // DEDICATED
 
 // flag indicating whether directX is supposed to be used for input (defaults to false, crashes on my Win7)
@@ -521,13 +522,13 @@ static void sr_CompleteGLAttributes()
 // static bool use_directx_back = false;
 
 #ifndef DEDICATED
-#if SDL_VERSION_ATLEAST(2,0,0)
 
 bool IsWindowActive(void) {
     Uint32 flags = 0;
 
     flags = SDL_GetWindowFlags(sr_screen);
-    if ((flags & SDL_WINDOW_SHOWN) && !(flags & SDL_WINDOW_MINIMIZED)) {
+    // SDL3: SDL_WINDOW_SHOWN is removed, check for not hidden and not minimized
+    if (!(flags & SDL_WINDOW_HIDDEN) && !(flags & SDL_WINDOW_MINIMIZED)) {
         return true;
     }
     return false;
@@ -540,21 +541,20 @@ int SDL_EnableUNICODE(int enable) {
     switch (enable) {
     case 1:
         SDL_enabled_UNICODE = 1;
-        SDL_StartTextInput();
+        // SDL3: SDL_StartTextInput takes window parameter
+        SDL_StartTextInput(sr_screen);
         break;
     case 0:
         SDL_enabled_UNICODE = 0;
-        SDL_StopTextInput();
+        SDL_StopTextInput(sr_screen);
         break;
     }
     return previous;
 }
 #endif
-#endif
 
 
 #ifndef DEDICATED
-#if SDL_VERSION_ATLEAST(2,0,0)
 static int CountBits(int toCount)
 {
     int ret = 0;
@@ -572,11 +572,24 @@ static int CountBits(int toCount)
 static bool lowlevel_sr_InitDisplay(){
     rCallbackBeforeScreenModeChange::Exec();
 
+#if defined(__ANDROID__) || (defined(__APPLE__) && TARGET_OS_IOS)
+    // On mobile (Android/iOS), always force fullscreen at native screen resolution.
+    // Configured resolution values are meaningless — the OS owns the display size.
+    // Zero width+height causes the "desktop/borderless fullscreen" path below,
+    // which calls SDL_SetWindowFullscreenMode(nullptr) to use native resolution.
+    currentScreensetting.fullscreen = true;
+    // Do NOT force aspect = 1.0 — let SDL report the real drawable size so the
+    // viewport fills the entire screen without black bars on widescreen iPhones.
+    currentScreensetting.res = rScreenSize(0, 0);
+#endif
+
     rScreenSize & res = currentScreensetting.fullscreen ? currentScreensetting.res : currentScreensetting.windowSize;
 
     // update pixel aspect ratio
+#ifndef __ANDROID__
     if ( res.res != ArmageTron_Invalid && size_t(res.res) < sizeof(aspect)/sizeof(aspect[0]) )
         currentScreensetting.aspect = aspect[res.res];
+#endif
 
     res.UpdateSize();
     sr_screenWidthInPoints = res.width;
@@ -603,7 +616,7 @@ static bool lowlevel_sr_InitDisplay(){
     if( sr_screen )
     {
         // fetch actual display index in case user dragged window
-        int factualDisplayIndex = SDL_GetWindowDisplayIndex(sr_screen);
+        int factualDisplayIndex = AA_GetWindowDisplayIndex(sr_screen);
         if(factualDisplayIndex != lastFactualDisplayIndex)
         {
             currentScreensetting.displayIndex = factualDisplayIndex;
@@ -617,11 +630,11 @@ static bool lowlevel_sr_InitDisplay(){
         }
     }
 
-    if(0 > currentScreensetting.displayIndex || currentScreensetting.displayIndex >= SDL_GetNumVideoDisplays())
+    if(0 > currentScreensetting.displayIndex || currentScreensetting.displayIndex >= AA_GetNumVideoDisplays())
         currentScreensetting.displayIndex = 0;
     lastFactualDisplayIndex = currentScreensetting.displayIndex;
 
-    static SDL_DisplayMode desktopMode;
+    static const SDL_DisplayMode* desktopMode = nullptr;
 
     if ( sr_lastDisplayIndex != currentScreensetting.displayIndex )
     {
@@ -631,14 +644,16 @@ static bool lowlevel_sr_InitDisplay(){
         sr_desktopWidth = minWidth;
         sr_desktopHeight = minHeight;
 
-        if (!SDL_GetDesktopDisplayMode(currentScreensetting.displayIndex, &desktopMode)) {
-            sr_desktopWidth  = desktopMode.w;
-            sr_desktopHeight = desktopMode.h;
+        SDL_DisplayID displayID = AA_GetDisplayID(currentScreensetting.displayIndex);
+        desktopMode = SDL_GetDesktopDisplayMode(displayID);
+        if (desktopMode) {
+            sr_desktopWidth  = desktopMode->w;
+            sr_desktopHeight = desktopMode->h;
 
             int bpp;
             Uint32 Rmask, Gmask, Bmask, Amask;
 
-            if (SDL_PixelFormatEnumToMasks(desktopMode.format, &bpp, &Rmask, &Gmask, &Bmask, &Amask)) {
+            if (SDL_GetMasksForPixelFormat(desktopMode->format, &bpp, &Rmask, &Gmask, &Bmask, &Amask)) {
                 // desktopCD    = bpp;
                 desktopCD_R  = CountBits(Rmask);
                 desktopCD_G  = CountBits(Gmask);
@@ -647,9 +662,36 @@ static bool lowlevel_sr_InitDisplay(){
         }
     }
 
+#if defined(__ANDROID__) || (defined(__APPLE__) && TARGET_OS_IOS)
+    // SDL_GetDesktopDisplayMode may return portrait dims (iOS always reports portrait base).
+    // The game is landscape-only, so ensure width > height.
+    if (sr_desktopWidth < sr_desktopHeight)
+        std::swap(sr_desktopWidth, sr_desktopHeight);
+#endif
+
     // determine layout of current screen
     SDL_Rect screenBounds;
-    SDL_GetDisplayBounds(currentScreensetting.displayIndex, &screenBounds);
+    SDL_DisplayID currentDisplayID = AA_GetDisplayID(currentScreensetting.displayIndex);
+    SDL_GetDisplayBounds(currentDisplayID, &screenBounds);
+
+#if defined(__APPLE__) && TARGET_OS_IOS
+    // On iOS, SDL_GetDesktopDisplayMode and SDL_GetDisplayBounds may return
+    // a lower-resolution "Display Zoom" compatibility mode.  Query
+    // UIScreen.nativeBounds directly for the true hardware pixel resolution.
+    {
+        void sr_GetNativeScreenPixels(int* w, int* h); // defined in rScreenIOS.mm
+        int nativeW = 0, nativeH = 0;
+        sr_GetNativeScreenPixels(&nativeW, &nativeH);
+        if (nativeW < nativeH) std::swap(nativeW, nativeH); // landscape
+        float density = desktopMode ? desktopMode->pixel_density : 3.0f;
+        int nativePtsW = (int)(nativeW / density);
+        int nativePtsH = (int)(nativeH / density);
+        if (nativePtsW > sr_desktopWidth || nativePtsH > sr_desktopHeight) {
+            sr_desktopWidth  = nativePtsW;
+            sr_desktopHeight = nativePtsH;
+        }
+    }
+#endif
 
     // default start window size and position
     int defaultWidth = sr_desktopWidth;
@@ -731,16 +773,17 @@ static bool lowlevel_sr_InitDisplay(){
         default: break;
         }
 
-        sr_SetGLAttributes( singleCD_R, singleCD_G, singleCD_B, zDepth );
+        // Vulkan: no GL attributes needed, use Vulkan window flag
+        // sr_SetGLAttributes( singleCD_R, singleCD_G, singleCD_B, zDepth );
 
-        int attrib=SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE;
+        SDL_WindowFlags attrib = SDL_WINDOW_VULKAN | SDL_WINDOW_RESIZABLE;
 
         if(highDPI)
         {
-            attrib |= SDL_WINDOW_ALLOW_HIGHDPI;
+            attrib |= SDL_WINDOW_HIGH_PIXEL_DENSITY;
         }
 
-        SDL_SetRelativeMouseMode(SDL_FALSE);
+        // Note: SDL_SetRelativeMouseMode will be set after window creation
 
     #ifdef FORCE_WINDOW
     #ifdef WIN32
@@ -754,23 +797,35 @@ static bool lowlevel_sr_InitDisplay(){
         // int CD = fullCD;
 
 #ifdef FORCE_WINDOW_X
-        #undef SDL_WINDOW_FULLSCREEN_DESKTOP
-        #define SDL_WINDOW_FULLSCREEN_DESKTOP 0
-        #undef SDL_WINDOW_FULLSCREEN
-        #define SDL_WINDOW_FULLSCREEN 0
+        // Force windowed mode for debugging
+        attrib &= ~SDL_WINDOW_FULLSCREEN;
 #endif
 
         // try fullscreen first if requested and sensible (only display 0 is supported)
         if (currentScreensetting.fullscreen && currentScreensetting.displayIndex == 0)
         {
-            sr_screen = SDL_CreateWindow("", defaultX, defaultY, sr_desktopWidth, sr_desktopHeight, attrib | SDL_WINDOW_FULLSCREEN_DESKTOP);
+            // SDL3: Create window then set fullscreen mode
+            sr_screen = SDL_CreateWindow("", sr_desktopWidth, sr_desktopHeight, attrib | SDL_WINDOW_FULLSCREEN);
+            if (sr_screen)
+            {
+                // Set desktop fullscreen mode (NULL for borderless fullscreen)
+                SDL_SetWindowFullscreenMode(sr_screen, nullptr);
+                SDL_SetWindowPosition(sr_screen, defaultX, defaultY);
+            }
         }
 
         // only reinit the screen if the desktop res detection hasn't left us
         // with a perfectly good one.
-        if (!sr_screen &&
-            !(sr_screen = SDL_CreateWindow("", defaultX, defaultY, defaultWidth, defaultHeight, attrib))
-            )
+        if (!sr_screen)
+        {
+            sr_screen = SDL_CreateWindow("", defaultWidth, defaultHeight, attrib);
+            if (sr_screen)
+            {
+                SDL_SetWindowPosition(sr_screen, defaultX, defaultY);
+            }
+        }
+
+        if (!sr_screen)
         {
             lastError.Clear();
             lastError << "Couldn't set video mode: ";
@@ -787,7 +842,7 @@ static bool lowlevel_sr_InitDisplay(){
     if(!sr_screen)
         return false;
 
-    if (SDL_GetWindowDisplayIndex(sr_screen) != currentScreensetting.displayIndex ||
+    if (AA_GetWindowDisplayIndex(sr_screen) != currentScreensetting.displayIndex ||
         (sr_lastDisplayIndex >= 0 && sr_lastDisplayIndex != currentScreensetting.displayIndex) ||
         (currentScreensetting.fullscreen && !lastSuccess.fullscreen)
         )
@@ -809,37 +864,37 @@ static bool lowlevel_sr_InitDisplay(){
         // do we need a custom display mode? if a display mode
         // is set, yes, but also if a non-default custom refresh rate
         // is set.
-        if ( sr_screenWidthInPoints + sr_screenHeightInPoints > 0 || (currentScreensetting.refreshRate != desktopMode.refresh_rate && currentScreensetting.refreshRate > 0))
+        float desktopRefreshRate = desktopMode ? desktopMode->refresh_rate : 60.0f;
+        if ( sr_screenWidthInPoints + sr_screenHeightInPoints > 0 || (currentScreensetting.refreshRate != static_cast<int>(desktopRefreshRate) && currentScreensetting.refreshRate > 0))
         {
             fullscreenSuccess = false;
 
             // find best display mode
-            SDL_DisplayMode desiredMode, mode, lastMode;
-            desiredMode.format = 0;
-            desiredMode.w = sr_screenWidthInPoints;
-            desiredMode.h = sr_screenHeightInPoints;
-            if ( sr_screenWidthInPoints + sr_screenHeightInPoints <= 0)
+            int desiredW = sr_screenWidthInPoints;
+            int desiredH = sr_screenHeightInPoints;
+            if ( sr_screenWidthInPoints + sr_screenHeightInPoints <= 0 && desktopMode)
             {
-                desiredMode.w = desktopMode.w;
-                desiredMode.h = desktopMode.h;
+                desiredW = desktopMode->w;
+                desiredH = desktopMode->h;
             }
-            else
+
+            SDL_DisplayID currentDisplayID = AA_GetDisplayID(currentScreensetting.displayIndex);
+            // SDL3: SDL_GetClosestFullscreenDisplayMode returns bool and takes output param
+            SDL_DisplayMode closestMode;
+            bool foundClosest = SDL_GetClosestFullscreenDisplayMode(
+                currentDisplayID, desiredW, desiredH,
+                static_cast<float>(currentScreensetting.refreshRate), true, &closestMode);
+            const SDL_DisplayMode *closest = foundClosest ? &closestMode : nullptr;
+            if(foundClosest)
             {
-                desiredMode.w = sr_screenWidthInPoints;
-                desiredMode.h = sr_screenHeightInPoints;
-            }
-            desiredMode.refresh_rate = currentScreensetting.refreshRate;
-            desiredMode.driverdata = NULL;
-            SDL_DisplayMode *closest = SDL_GetClosestDisplayMode(currentScreensetting.displayIndex, &desiredMode, &mode);
-            if(closest)
-            {
-                SDL_GetWindowDisplayMode(sr_screen, &lastMode);
-                if(lastMode.format != closest->format ||
-                   lastMode.w != closest->w ||
-                   lastMode.h != closest->h ||
-                   lastMode.refresh_rate != closest->refresh_rate)
+                const SDL_DisplayMode *lastMode = SDL_GetWindowFullscreenMode(sr_screen);
+                if(!lastMode ||
+                   lastMode->format != closest->format ||
+                   lastMode->w != closest->w ||
+                   lastMode->h != closest->h ||
+                   lastMode->refresh_rate != closest->refresh_rate)
                 {
-                    SDL_SetWindowFullscreen(sr_screen, 0);
+                    SDL_SetWindowFullscreen(sr_screen, false);
                     SDL_Delay(100);
                     SDL_PumpEvents();
                 }
@@ -848,14 +903,14 @@ static bool lowlevel_sr_InitDisplay(){
                 sr_screenWidthInPoints = closest->w;
                 sr_screenHeightInPoints = closest->h;
 
-                if(0 == SDL_SetWindowDisplayMode(sr_screen, closest))
+                if(SDL_SetWindowFullscreenMode(sr_screen, closest))
                 {
                     SDL_Delay(100);
                     SDL_PumpEvents();
                     SDL_SetWindowSize(sr_screen, sr_screenWidthInPoints, sr_screenHeightInPoints);
                     SDL_Delay(100);
                     SDL_PumpEvents();
-                    fullscreenSuccess = (0 == SDL_SetWindowFullscreen(sr_screen, SDL_WINDOW_FULLSCREEN));
+                    fullscreenSuccess = SDL_SetWindowFullscreen(sr_screen, true);
                 }
             }
 
@@ -864,13 +919,14 @@ static bool lowlevel_sr_InitDisplay(){
                 lastError.Clear();
                 lastError << "Couldn't set video mode: ";
                 lastError << SDL_GetError();
-                std::cerr << lastError << '\n';
+                std::cerr << static_cast<const char*>(lastError) << '\n';
             }
         }
         else
         {
-            // simply set fullscreen mode
-            fullscreenSuccess = (0 == SDL_SetWindowFullscreen(sr_screen, SDL_WINDOW_FULLSCREEN_DESKTOP));
+            // simply set fullscreen mode (desktop/borderless fullscreen via NULL mode)
+            SDL_SetWindowFullscreenMode(sr_screen, nullptr);
+            fullscreenSuccess = SDL_SetWindowFullscreen(sr_screen, true);
         }
 
         // if desktop resolution was selected or custom mode setting failed, pick desktop mode with explicit resolution
@@ -878,26 +934,29 @@ static bool lowlevel_sr_InitDisplay(){
         {
             sr_screenWidthInPoints = sr_desktopWidth;
             sr_screenHeightInPoints = sr_desktopHeight;
-            SDL_SetWindowFullscreen(sr_screen, SDL_WINDOW_FULLSCREEN_DESKTOP);
-            SDL_SetWindowFullscreen(sr_screen, 0);
+            SDL_SetWindowFullscreenMode(sr_screen, nullptr);
+            SDL_SetWindowFullscreen(sr_screen, false);
             SDL_Delay(100);
             SDL_PumpEvents();
             SDL_SetWindowSize(sr_screen, sr_screenWidthInPoints, sr_screenHeightInPoints);
             SDL_Delay(100);
             SDL_PumpEvents();
-            fullscreenSuccess = (0 == SDL_SetWindowFullscreen(sr_screen, SDL_WINDOW_FULLSCREEN_DESKTOP));
+            SDL_SetWindowFullscreenMode(sr_screen, nullptr);
+            fullscreenSuccess = SDL_SetWindowFullscreen(sr_screen, true);
         }
 
         if(fullscreenSuccess)
         {
-            SDL_SetRelativeMouseMode(SDL_TRUE);
+            // SDL3: Sync window to ensure fullscreen mode change is complete
+            SDL_SyncWindow(sr_screen);
+            SDL_SetWindowRelativeMouseMode(sr_screen, true);
         }
         else
         {
             lastError.Clear();
             lastError << "Couldn't set desktop video mode: ";
             lastError << SDL_GetError();
-            std::cerr << lastError << '\n';
+            std::cerr << static_cast<const char*>(lastError) << '\n';
 
             currentScreensetting.fullscreen = false;
 
@@ -908,7 +967,7 @@ static bool lowlevel_sr_InitDisplay(){
     if (!currentScreensetting.fullscreen)
     {
         // Set windowed mode and size accordingly
-        if (!SDL_SetWindowFullscreen(sr_screen, 0))
+        if (SDL_SetWindowFullscreen(sr_screen, false))
         {
             SDL_SetWindowSize(sr_screen, sr_screenWidthInPoints, sr_screenHeightInPoints);
             {
@@ -938,11 +997,9 @@ static bool lowlevel_sr_InitDisplay(){
                 }
             }
 
-#if SDL_VERSION_ATLEAST(2, 0, 5)
             // we're already setting the relevant flag on creation, but maybe it gets lost in fullscreen mode
-            SDL_SetWindowResizable(sr_screen, SDL_TRUE);
-#endif
-            SDL_SetRelativeMouseMode(SDL_FALSE);
+            SDL_SetWindowResizable(sr_screen, true);
+            SDL_SetWindowRelativeMouseMode(sr_screen, false);
 
         }
         else
@@ -950,29 +1007,34 @@ static bool lowlevel_sr_InitDisplay(){
             lastError.Clear();
             lastError << "Couldn't set windowed mode: ";
             lastError << SDL_GetError();
-            std::cerr << lastError << '\n';
+            std::cerr << static_cast<const char*>(lastError) << '\n';
             return false;
         }
     }
 
-    {
-        static SDL_Window *lastScreen = NULL;
-        if(lastScreen != sr_screen)
-        {
-            if(sr_glcontext)
-                SDL_GL_DeleteContext(sr_glcontext);
-            sr_glcontext = SDL_GL_CreateContext( sr_screen );
-        }
-        if(!sr_glcontext)
-        {
-            lastError.Clear();
-            lastError << "Couldn't get OpenGL context: ";
-            lastError << SDL_GetError();
-            std::cerr << lastError << '\n';
-            return false;
-        }
+    // SDL3: Synchronize window state on async windowing systems (Wayland, etc.)
+    // This ensures fullscreen/windowed mode changes are complete before continuing
+    SDL_SyncWindow(sr_screen);
 
-        sr_CompleteGLAttributes();
+#if defined(__APPLE__) && TARGET_OS_IOS
+    {
+        // On iOS, SDL_GetDesktopDisplayMode may report a reduced "Display Zoom"
+        // resolution (e.g. 480x320 pts) rather than the real display size.
+        // After the window is created and synced, ask SDL for the actual window
+        // size so the viewport covers the full screen.
+        int actualW = 0, actualH = 0;
+        SDL_GetWindowSize(sr_screen, &actualW, &actualH);
+        if (actualW > 0 && actualH > 0) {
+            sr_screenWidthInPoints  = actualW;
+            sr_screenHeightInPoints = actualH;
+        }
+    }
+#endif
+
+    {
+        // Vulkan: complete initialization now that the SDL window exists
+        extern void sr_vkRendererLateInit();
+        sr_vkRendererLateInit();
     }
 
     #ifndef DEDICATED
@@ -995,47 +1057,34 @@ static bool lowlevel_sr_InitDisplay(){
             {
                 texmode = default_texturemode;
             }
-            if( texmode < GL_NEAREST )
+            if( texmode < rGLConst::Nearest )
             {
-                texmode = GL_NEAREST;
+                texmode = rGLConst::Nearest;
             }
-            if( texmode > GL_LINEAR_MIPMAP_LINEAR )
+            if( texmode > rGLConst::LinearMipmapLinear )
             {
-                texmode = GL_LINEAR_MIPMAP_LINEAR;
+                texmode = rGLConst::LinearMipmapLinear;
             }
         }
     }
 
-    gl_vendor     << reinterpret_cast<const char *>(glGetString(GL_VENDOR));
-    gl_renderer   << reinterpret_cast<const char *>(glGetString(GL_RENDERER));
-    gl_version    << reinterpret_cast<const char *>(glGetString(GL_VERSION));
-    gl_extensions << reinterpret_cast<const char *>(glGetString(GL_EXTENSIONS));
+    gl_vendor     << RenderGetRendererString(rGLConst::Vendor);
+    gl_renderer   << RenderGetRendererString(rGLConst::Renderer);
+    gl_version    << RenderGetRendererString(rGLConst::Version);
+    gl_extensions << RenderGetRendererString(rGLConst::Extensions);
 
-    // display list blacklist
-    sr_blacklistDisplayLists=false;
-
-    if(strstr(gl_version,"Mesa 7.0") || strstr(gl_version,"Mesa 7.1"))
-    {
-        // mesa DRI and software has problems in the 7.0/7.1 series
-        sr_blacklistDisplayLists=true;
-    }
-
-    if(strstr(gl_vendor,"SiS"))
-    {
-        // almost nobody has those cards/chips, and we have
-        // at least one bluescreen problem reported.
-        sr_blacklistDisplayLists=true;
-    }
+    // Display lists are not used in GL3 renderer
 
 
 #ifndef WIN32
     if(!strstr(gl_renderer,"Voodoo3"))
     #endif
     {
+        // SDL3: SDL_ShowCursor/SDL_HideCursor take no arguments
         if(currentScreensetting.fullscreen)
-            SDL_ShowCursor(0);
+            SDL_HideCursor();
         else
-            SDL_ShowCursor(1);
+            SDL_ShowCursor();
     }
 
     #ifdef WIN32
@@ -1090,13 +1139,13 @@ static bool lowlevel_sr_InitDisplay(){
     }
 
     // fonts look best in bilinear filtering, no mipmaps
-    if ( rTextureGroups::TextureMode[rTextureGroups::TEX_FONT] > GL_LINEAR )
-        rTextureGroups::TextureMode[rTextureGroups::TEX_FONT] = GL_LINEAR;
+    if ( rTextureGroups::TextureMode[rTextureGroups::TEX_FONT] > rGLConst::Linear )
+        rTextureGroups::TextureMode[rTextureGroups::TEX_FONT] = rGLConst::Linear;
 
     // disable trilinear filtering for ATI cards
     if ( strstr( gl_vendor, "ATI" ) )
     {
-        default_texturemode = GL_LINEAR_MIPMAP_NEAREST;
+        default_texturemode = rGLConst::LinearMipmapNearest;
     }
 
     // wait for activation if we were ALT-Tabbed away:
@@ -1118,6 +1167,9 @@ static bool lowlevel_sr_InitDisplay(){
         SDL_Delay(100);
         SDL_PumpEvents();
     }
+
+    // Update drawable size before resetting render state to ensure correct viewport
+    sr_GetDrawableSize();
 
     sr_ResetRenderState(true);
 
@@ -1134,365 +1186,12 @@ static bool lowlevel_sr_InitDisplay(){
 
     return true;
 }
-#else // #if SDL_VERSION_ATLEAST(2,0,0)
-static bool lowlevel_sr_InitDisplay(){
-    rScreenSize & res = currentScreensetting.fullscreen ? currentScreensetting.res : currentScreensetting.windowSize;
-
-    // update pixel aspect ratio
-    if ( res.res != ArmageTron_Invalid  && size_t(res.res) < sizeof(aspect)/sizeof(aspect[0]) )
-        currentScreensetting.aspect = aspect[res.res];
-
-    res.UpdateSize();
-    sr_screenWidthInPoints = res.width;
-    sr_screenHeightInPoints= res.height;
-
-    // desktop color depth
-    static int desktopCD_R = 5;
-    static int desktopCD_G = 5;
-    static int desktopCD_B = 5;
-    static int desktopCD   = 16;
-    // desktop resolution
-    static int sr_desktopWidth = 0, sr_desktopHeight = 0;
-
-    static const int minWidth = 640;
-    static const int minHeight = 480;
-
-    // determine those values
-    if ( sr_desktopWidth == 0 && !sr_screen )
-    {
-        // select sane defaults in case the following operation fails
-        sr_desktopWidth = minWidth;
-        sr_desktopHeight = minHeight;
-
-        const SDL_VideoInfo* videoInfo     = SDL_GetVideoInfo( );
-        if( videoInfo )
-        {
-            const SDL_PixelFormat* pixelFormat = videoInfo->vfmt;
-
-            // don't accept anything less than 15 bpp, OpenGL doesn't like indexed colors.
-            if( pixelFormat && 15 <= pixelFormat->BitsPerPixel && NULL == pixelFormat->palette )
-            {
-                desktopCD    = pixelFormat->BitsPerPixel;
-                desktopCD_R  = countBits(pixelFormat->Rmask);
-                desktopCD_G  = countBits(pixelFormat->Gmask);
-                desktopCD_B  = countBits(pixelFormat->Bmask);
-            }
-
-            // the struct components we read here only exist since
-            // SDL 1.2.10. The version check here is to safeguard against
-            // code compiled against SDL 1.2.10, but linked with an earlier
-            // version, accessing data out of bounds.
-#if SDL_VERSION_ATLEAST(1, 2, 10)
-            if( sr_DesktopScreensizeSupported() )
-            {
-                sr_desktopWidth  = videoInfo->current_w;
-                sr_desktopHeight = videoInfo->current_h;
-            }
-#endif
-        }
-    }
-
-    if (!sr_screen)
-    {
-        int singleCD_R	= 5;
-        int singleCD_G	= 5;
-        int singleCD_B	= 5;
-        int fullCD		= 16;
-        int zDepth		= 16;
-
-        switch (currentScreensetting.colorDepth)
-        {
-        case ArmageTron_ColorDepth_16:
-            // parameters already set for this depth
-            break;
-        case ArmageTron_ColorDepth_Desktop:
-            {
-                fullCD     = desktopCD;
-                singleCD_R = desktopCD_R;
-                singleCD_G = desktopCD_G;
-                singleCD_B = desktopCD_B;
-            }
-            break;
-        case ArmageTron_ColorDepth_32:
-            singleCD_R	= 8;
-            singleCD_G	= 8;
-            singleCD_B	= 8;
-            fullCD		= 24;
-            zDepth		= 32;
-            break;
-        }
-
-        switch ( currentScreensetting.zDepth )
-        {
-        case ArmageTron_ColorDepth_16: zDepth = 16; break;
-        case ArmageTron_ColorDepth_32: zDepth = 32; break;
-        default: break;
-        }
-
-        sr_SetGLAttributes( singleCD_R, singleCD_G, singleCD_B, zDepth );
-
-        /*
-          #ifdef POWERPAK_DEB
-          PD_SetGFXMode(sr_screenWidthInPoints, sr_screenHeightInPoints, 32, PD_DEFAULT);
-          sr_screen=DoubleBuffer;
-          #else
-        */
-
-        int attrib;
-
-#ifndef FORCE_WINDOW
-        if (currentScreensetting.fullscreen)
-        {
-            attrib=SDL_OPENGL | SDL_FULLSCREEN;
-        }
-        else
-#endif
-        {
-            attrib=SDL_OPENGL;
-        }
-
-    #ifdef FORCE_WINDOW
-    #ifdef WIN32
-        //		sr_screenWidthInPoints  = 400;
-        //		sr_screenHeightInPoints = 300;
-    #else
-        //		sr_screenWidthInPoints  = minWidth;
-        //		sr_screenHeightInPoints = 480;
-    #endif
-    #endif
-        int CD = fullCD;
-
-        // only check for errors if requested and if we're not about to set the
-        // desktop resolution, where SDL_VideoModeOK apparently doesn't work.
-        if (currentScreensetting.checkErrors && sr_screenWidthInPoints + sr_screenHeightInPoints > 0)
-        {
-            // check if the video mode should be OK:
-            CD = SDL_VideoModeOK
-                 (sr_screenWidthInPoints, sr_screenHeightInPoints,   fullCD,
-                  attrib);
-
-            // if not quite right
-            if (CD < 15){
-                // check if the other fs/windowed mode is better
-                int CD_fsinv = SDL_VideoModeOK
-                               (sr_screenWidthInPoints, sr_screenHeightInPoints,   fullCD,
-                                attrib^SDL_FULLSCREEN);
-
-                if (CD_fsinv >= 15){
-                    // yes! change the mode
-                    currentScreensetting.fullscreen=!currentScreensetting.fullscreen;
-                    attrib ^= SDL_FULLSCREEN;
-                    CD = CD_fsinv;
-                }
-            }
-
-            if (CD < fullCD && currentScreensetting.colorDepth != ArmageTron_ColorDepth_16)
-            {
-                currentScreensetting.colorDepth = ArmageTron_ColorDepth_16;
-
-                sr_SetGLAttributes( 5, 5, 5, 16 );
-            }
-        }
-
-        // if desktop resolution was selected, pick it
-        if ( sr_screenWidthInPoints + sr_screenHeightInPoints == 0 )
-        {
-            sr_screenWidthInPoints = sr_desktopWidth;
-            sr_screenHeightInPoints = sr_desktopHeight;
-        }
-        else
-        {
-            // have the screen reinited
-            sr_screen = NULL;
-        }
-
-        // only reinit the screen if the desktop res detection hasn't left us
-        // with a perfectly good one.
-        if ( !sr_screen && (sr_screen=SDL_SetVideoMode (sr_screenWidthInPoints, sr_screenHeightInPoints, CD, attrib)) == NULL) {
-            if((sr_screen=SDL_SetVideoMode (sr_screenWidthInPoints, sr_screenHeightInPoints, CD, attrib^SDL_FULLSCREEN))==NULL ) {
-                lastError.Clear();
-                lastError << "Couldn't set video mode: ";
-                lastError << SDL_GetError();
-                std::cerr << lastError << '\n';
-                return false;
-            }
-            else
-            {
-                currentScreensetting.fullscreen=!currentScreensetting.fullscreen;
-            }
-        }
-
-        sr_SetWindowTitle();
-
-        sr_CompleteGLAttributes();
-
-        SDL_EnableUNICODE(1);
-    }
-
-    #ifndef DEDICATED
-    gl_vendor.Clear();
-    gl_renderer.Clear();
-    gl_version.Clear();
-    gl_extensions.Clear();
-    renderer_identification.Clear();
-
-    // sanity check texture modes
-    for(int i=rTextureGroups::TEX_GROUPS-1; i>=0; --i)
-    {
-        int & texmode = rTextureGroups::TextureMode[i];
-
-        // don't do anything for deliberately disabled textures
-        if( i == rTextureGroups::TEX_FONT || texmode >= 0 )
-        {
-            // to default if the modes have been reset for some reason
-            if( texmode == 0 )
-            {
-                texmode = default_texturemode;
-            }
-            if( texmode < GL_NEAREST )
-            {
-                texmode = GL_NEAREST;
-            }
-            if( texmode > GL_LINEAR_MIPMAP_LINEAR )
-            {
-                texmode = GL_LINEAR_MIPMAP_LINEAR;
-            }
-        }
-    }
-
-    gl_vendor     << reinterpret_cast<const char *>(glGetString(GL_VENDOR));
-    gl_renderer   << reinterpret_cast<const char *>(glGetString(GL_RENDERER));
-    gl_version    << reinterpret_cast<const char *>(glGetString(GL_VERSION));
-    gl_extensions << reinterpret_cast<const char *>(glGetString(GL_EXTENSIONS));
-
-    // display list blacklist
-    sr_blacklistDisplayLists=false;
-
-    if(strstr(gl_version,"Mesa 7.0") || strstr(gl_version,"Mesa 7.1"))
-    {
-        // mesa DRI and software has problems in the 7.0/7.1 series
-        sr_blacklistDisplayLists=true;
-    }
-
-    if(strstr(gl_vendor,"SiS"))
-    {
-        // almost nobody has those cards/chips, and we have
-        // at least one bluescreen problem reported.
-        sr_blacklistDisplayLists=true;
-    }
-
-
-#ifndef WIN32
-    if(!strstr(gl_renderer,"Voodoo3"))
-    #endif
-    {
-        if(currentScreensetting.fullscreen)
-            SDL_ShowCursor(0);
-        else
-            SDL_ShowCursor(1);
-    }
-
-    #ifdef WIN32
-    renderer_identification << "WIN32 ";
-    #else
-    #ifdef MACOSX
-    renderer_identification << "MACOSX ";
-    #else
-    renderer_identification << "LINUX ";
-    #endif
-    #endif
-    renderer_identification << rRenderIdCallback::RenderId() << ' ';
-    renderer_identification << "SDL 1.2\n";
-    renderer_identification << "CD=" << currentScreensetting.colorDepth  << '\n';
-    renderer_identification << "FS=" << currentScreensetting.fullscreen  << '\n';
-    renderer_identification << "GL_VENDOR=" << gl_vendor   << '\n';
-    renderer_identification << "GL_RENDERER=" << gl_renderer << '\n';
-    renderer_identification << "GL_VERSION=" << gl_version  << '\n';
-    #endif
-
-    if (// test for Windows software GL (be a little flexible...)
-        (
-            strstr(gl_vendor,"icrosoft") || strstr(gl_vendor,"SGI")
-        )
-        && strstr(gl_renderer,"eneric")
-    )
-        software_renderer=true;
-
-    if ( // test for Mesa software GL
-        strstr(gl_vendor,"rian") && strstr(gl_renderer,"X11") &&
-        strstr(gl_renderer,"esa")
-    )
-        software_renderer=true;
-
-    if ( // test for Mesa software GL, new versions
-        strstr(gl_vendor,"Mesa") &&
-        strstr(gl_renderer,"Software Rasterizer")
-        )
-        software_renderer=true;
-
-    if ( // test for GLX software GL
-        strstr(gl_renderer,"GLX") &&
-        strstr(gl_renderer,"ndirect") &&
-        strstr(gl_renderer,"esa")
-    )
-        software_renderer=true;
-
-    // disable storage of non-alpha textures on Savage MX
-    if ( strstr( gl_renderer, "SavageMX" ) )
-    {
-        rISurfaceTexture::storageHack_ = true;
-    }
-
-    // fonts look best in bilinear filtering, no mipmaps
-    if ( rTextureGroups::TextureMode[rTextureGroups::TEX_FONT] > GL_LINEAR )
-        rTextureGroups::TextureMode[rTextureGroups::TEX_FONT] = GL_LINEAR;
-
-    // disable trilinear filtering for ATI cards
-    if ( strstr( gl_vendor, "ATI" ) )
-    {
-        default_texturemode = GL_LINEAR_MIPMAP_NEAREST;
-    }
-
-    // wait for activation if we were ALT-Tabbed away:
-    while ( (SDL_GetAppState() & SDL_APPACTIVE) == 0)
-    {
-        SDL_Delay(100);
-        SDL_PumpEvents();
-    }
-
-    if (software_renderer && !last_software_renderer && !tRecorder::IsPlayingBack())
-        sr_LoadDefaultConfig();
-
-    last_software_renderer=software_renderer;
-
-
-    // wait for activation if we were ALT-Tabbed away:
-    while ( (SDL_GetAppState() & SDL_APPACTIVE) == 0)
-    {
-        SDL_Delay(100);
-        SDL_PumpEvents();
-    }
-
-    sr_ResetRenderState(true);
-
-    rCallbackAfterScreenModeChange::Exec();
-
-    lastSuccess=currentScreensetting;
-    failed_attempts = 0;
-//    sr_useDirectX = use_directx_back;
-    st_SaveConfig();
-
-    return true;
-}
-#endif // #if SDL_VERSION_ATLEAST(2,0,0)
 #else // #ifdef DEDICATED
 static bool lowlevel_sr_InitDisplay()
 {
     return true;
 }
 #endif
-
-bool cycleprograminited = false;
 
 bool sr_InitDisplay(){
 //    use_directx_back = sr_useDirectX;
@@ -1503,7 +1202,6 @@ bool sr_InitDisplay(){
     lastSuccessLowColor.colorDepth = rColorDepth::ArmageTron_ColorDepth_16;
     lastSuccessLowColor.zDepth = rColorDepth::ArmageTron_ColorDepth_16;
 
-    cycleprograminited = false;
     while (failed_attempts <= MAXEMERGENCY+1)
     {
         if (failed_attempts)
@@ -1520,27 +1218,6 @@ bool sr_InitDisplay(){
         // prepare for crash, note failure and save config
         failed_attempts++;
         st_SaveConfig();
-
-    #ifdef MACOSX
-    #if !SDL_VERSION_ATLEAST(2,0,0)
-        // init the screen once in windowed mode
-        static bool first = true;
-        if ( first && currentScreensetting.fullscreen )
-        {
-            first = false;
-            currentScreensetting.fullscreen = false;
-
-            sr_LockSDL();
-            if (lowlevel_sr_InitDisplay())
-            {
-                sr_ExitDisplay();
-            }
-            sr_UnlockSDL();
-
-            currentScreensetting.fullscreen = true;
-        }
-    #endif
-    #endif
 
         auto Success = [&]()
         {
@@ -1586,31 +1263,70 @@ bool sr_InitDisplay(){
     return false;
 }
 
+//! Clean up all GL resources before destroying context
+//! CRITICAL: Must be called BEFORE destroying the GL context
+//! This ensures proper cleanup order: resources -> context -> window
+static void sr_CleanupGLResources()
+{
+    #ifndef DEDICATED
+    // Flush all pending GPU commands to ensure completion
+    RenderFlush();
+    RenderFinish();
+
+    // ITERATION 11: Complete GPU resource cleanup
+    // Cleanup order matters: resources that depend on others must be released first
+
+    // 1. Clean up render queue resources (may reference other resources)
+    rRenderQueue::Instance().ReleaseGPU();
+
+    // 2. Unload all textures from GPU memory
+    rITexture::UnloadAll();
+
+    // Note: Wall geometry cleaned via RAII when game objects destroyed
+    #endif
+}
 
 void sr_ExitDisplay(){
     #ifndef DEDICATED
     rCallbackBeforeScreenModeChange::Exec();
 
-    if (sr_screen){
+    // CRITICAL FIX: Proper OpenGL cleanup order
+    // 1. Clean up GL resources
+    // 2. Destroy GL context
+    // 3. Destroy window
+    // This order prevents crashes and resource leaks on some drivers
+
+    if(sr_glcontext && sr_screen)
+    {
         sr_LockSDL();
-#if SDL_VERSION_ATLEAST(2,0,0)
-        SDL_SetWindowFullscreen(sr_screen, 0);
-        SDL_SetRelativeMouseMode(SDL_FALSE);
-        SDL_DestroyWindow(sr_screen);
-#else
-        // z-man: according to man SDL_SetVideoSurface, screen should not bee freed.
-        // SDL_FreeSurface(sr_screen);
-        sr_screen=NULL;
-#endif
+
+        // Make context current for cleanup operations
+        SDL_GL_MakeCurrent(sr_screen, sr_glcontext);
+
+        // Clean up all GL resources BEFORE destroying context
+        sr_CleanupGLResources();
+
+        // Now destroy GL context
+        SDL_GL_DestroyContext(sr_glcontext);
+        sr_glcontext = nullptr;
+
         sr_UnlockSDL();
-        //SDL_Quit();
     }
 
-#if SDL_VERSION_ATLEAST(2,0,0)
-    if(sr_glcontext)
-        SDL_GL_DeleteContext(sr_glcontext);
-    sr_glcontext = nullptr;
+    // Finally destroy window
+    if (sr_screen)
+    {
+        sr_LockSDL();
+#if !(defined(__APPLE__) && TARGET_OS_IOS)
+        // On iOS these calls are no-ops at best and can stall/crash after Vulkan
+        // has already torn down the Metal layer — skip them entirely.
+        SDL_SetWindowFullscreen(sr_screen, false);
+        SDL_SetWindowRelativeMouseMode(sr_screen, false);
 #endif
+        SDL_DestroyWindow(sr_screen);
+        sr_screen = nullptr;
+        sr_UnlockSDL();
+    }
 
     #endif
 }
@@ -1618,13 +1334,13 @@ void sr_ExitDisplay(){
 void sr_GetDrawableSize()
 {
 #ifndef DEDICATED
-#if SDL_VERSION_ATLEAST(2,0,1)
     if(sr_screen)
     {
-        SDL_GL_GetDrawableSize(sr_screen, &sr_screenWidth, &sr_screenHeight);
+        // SDL3: SDL_GL_GetDrawableSize → SDL_GetWindowSizeInPixels
+        // SDL3: SDL_GL_GetDrawableSize → SDL_GetWindowSizeInPixels
+        SDL_GetWindowSizeInPixels(sr_screen, &sr_screenWidth, &sr_screenHeight);
         return;
     }
-#endif
     sr_screenWidth = sr_screenWidthInPoints;
     sr_screenHeight = sr_screenHeightInPoints;
 #endif
@@ -1669,7 +1385,7 @@ void sr_LoadDefaultConfig(){
         rTextureGroups::TextureMode[i]=default_texturemode;
 
     // fonts look best in bilinear filtering, no mipmaps
-    rTextureGroups::TextureMode[rTextureGroups::TEX_FONT]=GL_LINEAR;
+    rTextureGroups::TextureMode[rTextureGroups::TEX_FONT]=rGLConst::Linear;
     #endif
     sr_floorDetail=rFLOOR_TWOTEXTURE;
     sr_floorMirror=rMIRROR_OFF;
@@ -1684,8 +1400,8 @@ void sr_LoadDefaultConfig(){
             rTextureGroups::TextureMode[i]=-1;
 
     #ifndef DEDICATED
-        rTextureGroups::TextureMode[rTextureGroups::TEX_OBJ]=GL_NEAREST_MIPMAP_NEAREST;
-        rTextureGroups::TextureMode[rTextureGroups::TEX_FONT]=GL_NEAREST_MIPMAP_NEAREST;
+        rTextureGroups::TextureMode[rTextureGroups::TEX_OBJ]=rGLConst::NearestMipmapNearest;
+        rTextureGroups::TextureMode[rTextureGroups::TEX_FONT]=rGLConst::NearestMipmapNearest;
     #endif
 
         sr_highRim=false;
@@ -1701,10 +1417,12 @@ void sr_LoadDefaultConfig(){
         //sr_lineAntialias=rFEAT_OFF;
     }
     else if(strstr(gl_vendor,"NVIDIA")){
-        // infinity , display lists and glFlush swapping work for NVIDIA
+        // infinity plane works for NVIDIA
         sr_infinityPlane=true;
-        sr_useDisplayLists=rDisplayList_CAC;
-        // rSysDep::swapMode_=rSysDep::rSwap_glFlush;
+    }
+    else if(strstr(gl_vendor,"Apple")){
+        // Vulkan/MoltenVK on Apple Silicon — infinity plane via large finite quad
+        sr_infinityPlane=true;
     }
     #ifdef MACOSX
     else if(strstr(gl_vendor,"ATI")){
@@ -1715,13 +1433,6 @@ void sr_LoadDefaultConfig(){
     else if(strstr(gl_vendor,"Matrox")){
         sr_floorDetail = rFLOOR_TEXTURE;  // double textured floor does not work
     }
-
-    /*
-    else if(strstr(gl_version,"Mesa"))
-    {
-        sr_useDisplayLists=rDisplayList_Off;
-    }
-    */
 }
 
 void sr_ResetRenderState(bool menu){
@@ -1730,57 +1441,51 @@ void sr_ResetRenderState(bool menu){
     #ifndef DEDICATED
 
     // Z-Buffering and perspective correction
+    // Use renderer abstraction to ensure gl3Renderer state tracking is updated
 
     if (menu){
-        glDisable(GL_DEPTH_TEST);
-        glHint (GL_PERSPECTIVE_CORRECTION_HINT, GL_FASTEST);
-        glViewport (0, 0, GLsizei(sr_screenWidth), GLsizei(sr_screenHeight));
+        RenderDisableState(rGLConst::DepthTest);
+        RenderHint(0x0C50, rGLConst::Fastest);
+        RenderViewport(0, 0, sr_screenWidth, sr_screenHeight);
     }
     else{
-        glEnable(GL_DEPTH_TEST);
-        glDepthFunc(GL_LEQUAL);
+        RenderEnableState(rGLConst::DepthTest);
+        RenderDepthFunc(rGLConst::LEqual);
     }
 
     if (sr_dither)
-        glEnable(GL_DITHER);
+        RenderEnableState(0x0BD0);
     else
-        glDisable(GL_DITHER);
+        RenderDisableState(0x0BD0);
 
-    glDisable(GL_LIGHTING);
+    RenderDisableState(rGLConst::Lighting);
 
     // disable texture mapping (selecting textures will reactivate it)
+    RenderDisableState(rGLConst::Texture2D);
 
-    //  glDisable(GL_TEXTURE);
-    glDisable(GL_TEXTURE_2D);
-
-
-    // flat or smooth shading
-    if (sr_smoothShading)
-        glShadeModel(GL_SMOOTH);
-    else
-        glShadeModel(GL_FLAT);
+    // Note: Flat/smooth shading is always smooth in GL3 renderer (vertex color interpolation)
+    // The RenderShadeModel calls have been removed as they are no-ops in the modern renderer
 
     // alpha blending
     if (sr_alphaBlend){
-        glEnable(GL_ALPHA_TEST);
-        glAlphaFunc(GL_GREATER,0);
-        glEnable(GL_BLEND);
-        glBlendFunc(GL_SRC_ALPHA,GL_ONE_MINUS_SRC_ALPHA);
+        RenderAlphaFunc(rGLConst::Greater, 0);
+        RenderEnableState(rGLConst::Blend);
+        RenderBlendFunc(rGLConst::SrcAlpha, rGLConst::OneMinusSrcAlpha);
     }
     else{
-        glDisable(GL_ALPHA_TEST);
-        glDisable(GL_BLEND);
+        RenderDisableState(rGLConst::AlphaTest);
+        RenderDisableState(rGLConst::Blend);
     }
 
     // reset matrices
-    glMatrixMode(GL_TEXTURE);
-    glLoadIdentity();
+    TexMatrix();
+    IdentityMatrix();
 
-    glMatrixMode(GL_PROJECTION);
-    glLoadIdentity();
+    ProjMatrix();
+    IdentityMatrix();
 
-    glMatrixMode(GL_MODELVIEW);
-    glLoadIdentity();
+    ModelMatrix();
+    IdentityMatrix();
     #endif
 }
 
@@ -1801,27 +1506,19 @@ static uMenuItemFunction apply
 //static bool offs=false;
 
 void sr_DepthOffset(bool offset){
-    // return;
-    //  if(offset!=offs){
-    //offs=offset;
     #ifndef DEDICATED
     if (offset){
-        //glMatrixMode(GL_PROJECTION);
-        //glScalef(.9,.9,.9);
-        glPolygonOffset(-2,-5);
-        glEnable(GL_POLYGON_OFFSET_LINE);
-        glEnable(GL_POLYGON_OFFSET_POINT);
-        glEnable(GL_POLYGON_OFFSET_FILL);
+        RenderPolygonOffset(-2, -5);
+        RenderEnableState(rCapability::PolygonOffsetLine);
+        RenderEnableState(rCapability::PolygonOffsetPoint);
+        RenderEnableState(rCapability::PolygonOffsetFill);
     }
     else{
-        glPolygonOffset(0,0);
-        glDisable(GL_POLYGON_OFFSET_POINT);
-        glDisable(GL_POLYGON_OFFSET_LINE);
-        glDisable(GL_POLYGON_OFFSET_FILL);
-        //glMatrixMode(GL_PROJECTION);
-        //glScalef(1/.9,1/.9,1/.9);
+        RenderPolygonOffset(0, 0);
+        RenderDisableState(rCapability::PolygonOffsetPoint);
+        RenderDisableState(rCapability::PolygonOffsetLine);
+        RenderDisableState(rCapability::PolygonOffsetFill);
     }
-    //  }
     #endif
 }
 
@@ -1843,18 +1540,6 @@ void sr_Activate(bool active)
         rCallbackBeforeScreenModeChange::Exec();
 
     // Jonathans fullscreen bugfix.
-    // z-man's ammendmend: apparently, doing this in Linux is painful as well.
-    // Only on Windows, you get a deactivation event when you ALT-TAB away
-    // from th application, then iconification is the right thing to do.
-    // On Linux at least, there is no standard alt-tab for fullscreen applications.
-    #ifdef WIN32
-    #if !SDL_VERSION_ATLEAST(2,0,0)
-    if ( currentScreensetting.fullscreen && !active )
-    {
-        SDL_WM_IconifyWindow();
-    }
-    #endif
-    #endif
     #endif
 }
 
@@ -1880,11 +1565,7 @@ void sr_SetWindowTitle(tString s)
 #endif
     {
 #ifndef DEDICATED
-#if SDL_VERSION_ATLEAST(2,0,0)
         SDL_SetWindowTitle(sr_screen, s);
-#else
-        SDL_WM_SetCaption(s, s);
-#endif
 #endif
     }
 }

@@ -25,7 +25,6 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 
 */
 
-#include "rGL.h"
 #include "eGameObject.h"
 #include "uInputQueue.h"
 #include "eTimer.h"
@@ -140,7 +139,13 @@ eGameObject::eGameObject(eGrid *g,const eCoord &p,const eCoord &d,eFace *current
 
 eGameObject::~eGameObject(){
     currentFace = 0;
-    RemoveFromListsAll();
+    // Remove from lists without calling Release(): we're in a destructor and cannot
+    // make virtual calls safely (vtable already reset to eGameObject level where
+    // Release() = 0).  The paired Release() for AddToList()'s AddRef() is skipped
+    // intentionally — the object is being freed anyway.
+    grid->gameObjects.Remove(this, id);
+    grid->gameObjectsInactive.Remove(this, inactiveID);
+    grid->gameObjectsInteresting.Remove(this, interestingID);
     tCHECK_DEST;
 }
 
@@ -937,8 +942,6 @@ void eGameObject::RenderAll(eGrid *grid, const eCamera *cam){
             displayed_gameobject = object;
 #endif
 
-	    sr_CheckGLError();
-
 	    object->Render(cam);
 
             bool thisAlpha = object->RendersAlpha();
@@ -971,7 +974,6 @@ void eGameObject::RenderAll(eGrid *grid, const eCamera *cam){
                 // store first known alpha blending object
                 firstAlpha = object;
             }
-            sr_CheckGLError();
 
 #ifdef DEBUG
             displayed_gameobject = 0;

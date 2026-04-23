@@ -17,14 +17,15 @@ class gWallRim;
 class gXMLCharReturn;
 
 #ifdef ENABLE_ZONESV2
-#include <boost/any.hpp>
+#include <any>
+#include <memory>
 #include "zone/zShape.h"
 #include "zone/zZone.h"
 #include "zone/zMisc.h"
 
 class gParserState {
 private:
-    typedef std::map<std::string, std::shared_ptr<boost::any> > my_map_t;
+    typedef std::map<std::string, std::shared_ptr<std::any> > my_map_t;
     std::deque< my_map_t > _varstack;
 public:
     gParserState();
@@ -35,21 +36,21 @@ public:
         if (!isset(var))
             return false;
         try {
-            boost::any_cast<T>(getAny(var));
+            std::any_cast<T>(getAny(var));
             return true;
         }
-        catch (const boost::bad_any_cast &)
+        catch (const std::bad_any_cast &)
         {
             return false;
         }
     }
-    boost::any getAny(std::string const & var) const;
+    std::any getAny(std::string const & var) const;
     template<typename T> T get(std::string const & var) const {
-        return boost::any_cast<T>(getAny(var));
+        return std::any_cast<T>(getAny(var));
     }
-    void setAny(std::string const & var, boost::any val);
+    void setAny(std::string const & var, std::any val);
     template<typename T> void set(std::string const & var, T val) {
-        setAny(var, boost::any(val));
+        setAny(var, std::any(val));
     }
     void unset(std::string const & var);
     void inherit(std::string const & var);

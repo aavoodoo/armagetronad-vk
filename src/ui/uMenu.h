@@ -36,9 +36,7 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 #include "tLocale.h"
 
 #include "rSDL.h"
-#ifndef DEDICATED
-#include <SDL_events.h>
-#endif
+// SDL_events is included via rSDL.h -> SDL.h
 
 #include <deque>
 #include <vector>
@@ -113,8 +111,18 @@ protected:
     REAL                 center;
 
     int                  selected;
+    REAL                 blinkTime_;
 
     REAL YPos(int num);
+    int  TouchYToItem(float touchY) const;   // convert normalized touch Y [0..1] to item index
+
+    // Touch tracking state for menu navigation (ENABLE_TOUCH > 0)
+    int64_t touchFingerId_           = -1;
+    float   touchStartX_            = 0, touchStartY_ = 0;
+    float   touchLastX_             = 0;
+    float   touchLastY_             = 0;
+    bool    touchMoved_             = false;
+    bool    touchStartedOnSelected_ = false; // finger down was on already-selected item
 public:
     static bool          wrap;
     
@@ -378,17 +386,20 @@ public:
     }
 
     virtual void LeftRight(int lr){
+        if (!choices.Len()) return;
         select+=lr;
+        // Wrap around so mobile swipe always moves through all values
         if(select>=choices.Len())
-            select=choices.Len()-1;
-        if(select<0)
             select=0;
-        if (choices.Len())
-            *target=choices(select)->value;
+        if(select<0)
+            select=choices.Len()-1;
+        *target=choices(select)->value;
         if (onselect) onselect(*target);
     }
 
     virtual void Enter(){
+        // On mobile a tap should advance to the next value, same as swiping right.
+        if (choices.Len() > 0) LeftRight(1);
         if (onenter) onenter(*target);
     }
     

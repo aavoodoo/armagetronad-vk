@@ -1,0 +1,117 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleDevelopmentRegion</key>
+    <string>en</string>
+
+    <key>CFBundleExecutable</key>
+    <string>$(EXECUTABLE_NAME)</string>
+
+    <key>CFBundleIdentifier</key>
+    <string>org.armagetronad.armagetronad</string>
+
+    <key>CFBundleInfoDictionaryVersion</key>
+    <string>6.0</string>
+
+    <key>CFBundleName</key>
+    <string>Armagetron Advanced</string>
+
+    <key>CFBundleDisplayName</key>
+    <string>Armagetron</string>
+
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+
+    <key>CFBundleShortVersionString</key>
+    <string>@VERSION@</string>
+
+    <key>CFBundleVersion</key>
+    <string>1</string>
+
+    <!-- Minimum iOS version — Vulkan/MoltenVK requires iOS 12+; target 14+ for modern APIs -->
+    <key>MinimumOSVersion</key>
+    <string>14.0</string>
+
+    <!-- Require Metal (needed by MoltenVK) and arm64 hardware -->
+    <key>UIRequiredDeviceCapabilities</key>
+    <array>
+        <string>metal</string>
+        <string>arm64</string>
+    </array>
+
+    <!-- Run fullscreen only -->
+    <key>UIRequiresFullScreen</key>
+    <true/>
+
+    <!-- Hide status bar for immersive gameplay -->
+    <key>UIStatusBarHidden</key>
+    <true/>
+
+    <!-- Support all orientations; game will lock to landscape via SDL -->
+    <key>UISupportedInterfaceOrientations</key>
+    <array>
+        <string>UIInterfaceOrientationLandscapeLeft</string>
+        <string>UIInterfaceOrientationLandscapeRight</string>
+    </array>
+
+    <!-- Allow arbitrary network loads for game server connections -->
+    <key>NSAppTransportSecurity</key>
+    <dict>
+        <key>NSAllowsArbitraryLoads</key>
+        <true/>
+    </dict>
+
+    <!-- Background audio (optional: keep music playing when minimized) -->
+    <key>UIBackgroundModes</key>
+    <array>
+        <string>audio</string>
+    </array>
+
+    <!-- Expose the app's Documents directory via iTunes File Sharing and the Files app.
+         Users can drop moviepacks (*.zip), autoexec.cfg, and custom maps here.
+         The game reads user data from Documents/ (see tDirectories::InitiOS). -->
+    <key>UIFileSharingEnabled</key>
+    <true/>
+
+    <!-- Allow the Files app to open and edit documents inside the app sandbox in-place
+         (rather than making a copy). Required for LSSupportsOpeningDocumentsInPlace to work. -->
+    <key>LSSupportsOpeningDocumentsInPlace</key>
+    <true/>
+
+    <!-- Enable indirect input (mouse/trackpad) — required by SDL3 and the simulator -->
+    <key>UIApplicationSupportsIndirectInputEvents</key>
+    <true/>
+
+    <!-- Launch screen storyboard — REQUIRED to opt out of iOS legacy 320x480 mode.
+         Without this key, iOS treats the app as a legacy app and forces a 320x480
+         viewport regardless of the actual display size. -->
+    <key>UILaunchStoryboardName</key>
+    <string>LaunchScreen</string>
+
+    <!-- Declare this app targets iPhone (1) and iPad (2). Required alongside
+         UILaunchStoryboardName for iOS to use the correct display resolution. -->
+    <key>UIDeviceFamily</key>
+    <array>
+        <integer>1</integer>
+        <integer>2</integer>
+    </array>
+
+    <!-- App icons for iPhone home screen and App Store -->
+    <key>CFBundleIcons</key>
+    <dict>
+        <key>CFBundlePrimaryIcon</key>
+        <dict>
+            <key>CFBundleIconFiles</key>
+            <array>
+                <string>AppIcon-60</string>
+                <string>AppIcon-120</string>
+                <string>AppIcon-180</string>
+                <string>AppIcon-1024</string>
+            </array>
+            <key>UIPrerenderedIcon</key>
+            <false/>
+        </dict>
+    </dict>
+</dict>
+</plist>

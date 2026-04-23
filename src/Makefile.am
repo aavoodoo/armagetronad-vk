@@ -48,6 +48,9 @@ libtools_a_SOURCES = ${tools_extra} tools/tVersion.cpp tools/tVersion.h tTrueVer
 	tools/tMemStack.cpp tools/tMemStack.h tools/tReferenceHolder.h \
     tools/tRing.cpp tools/tRing.h tools/tSafePTR.cpp\
 	tools/tSafePTR.h tools/tString.cpp tools/tString.h tools/tSysTime.cpp tools/tSysTime.h tools/tToDo.cpp tools/tToDo.h\
+	tools/tPlatform.h tools/tPlatformTypes.h tools/tPlatform.cpp \
+	tools/tPlatformSDL.h tools/tPlatformSDL.cpp \
+	tools/tPlatformNull.h tools/tPlatformNull.cpp \
 	tools/tException.cpp tools/tException.h\
 	tools/tRecorder.cpp tools/tRecorder.h\
 	tools/tRecorderInternal.cpp tools/tRecorderInternal.h\
@@ -71,6 +74,7 @@ libtools_a_SOURCES = ${tools_extra} tools/tVersion.cpp tools/tVersion.h tTrueVer
 	tools/tStatFile.cpp tools/tStatFile.h\
 	tools/tStatEntry.h tools/tStatEntry.cpp\
 	tools/tRectangle.h tools/tRectangle.cpp \
+	tools/tRectPacker.h \
 	tools/tPlayList.h tools/tPlayList.cpp\
 	tools/tDecorator.h tools/tDecorator.cpp\
 	tools/tMutex.h tools/tMutex.cpp\
@@ -120,6 +124,10 @@ libengine_a_SOURCES=engine/eAdvWall.cpp engine/eAdvWall.h engine/eAuthentication
 	engine/sound/sdl_mixer/eChannelSDLMixer.h \
 	engine/sound/sdl_mixer/eMusicTrackSDLMixer.cpp \
 	engine/sound/sdl_mixer/eMusicTrackSDLMixer.h \
+	engine/sound/eAudioInterface.h \
+	engine/sound/eAudioMiniaudio.cpp \
+	engine/sound/eChannelMiniaudio.h \
+	engine/sound/eChannelMiniaudio.cpp \
 	engine/eEventNotification.h engine/eEventNotification.cpp \
 	engine/eLagCompensation.cpp engine/eLagCompensation.h \
 	engine/eSoundMixer.h engine/eSoundMixer.cpp \
@@ -138,11 +146,45 @@ render_extra=
 endif
 
 librender_a_SOURCES=${render_extra} render/rConsole.cpp render/rConsoleGraph.cpp render/rConsole.h render/rFont.cpp\
-	render/rFont.h render/rGL.cpp render/rGL.h render/rGLEW.h render/rGLRender.cpp render/rModel.cpp render/rModel.h render/rRender.cpp\
-        render/rDisplayList.h render/rDisplayList.cpp \
-	render/rRender.h render/rScreen.cpp render/rScreen.h render/rSDL.h render/rSysdep.cpp render/rSysdep.h\
-	render/rTexture.cpp render/rTexture.h render/rViewport.cpp render/rViewport.h render/rColor.h render/rGradient.cpp render/rGradient.h \
-	render/rTextureRenderTarget.cpp render/rTextureRenderTarget.h render/rGLuintObject.cpp render/rGLuintObject.h
+	render/rFont.h render/rModel.cpp render/rModel.h render/rRender.cpp\
+	render/rRender.h render/rRenderEnums.h render/rScreen.cpp render/rScreen.h render/rSDL.h render/rSysdep.cpp render/rSysdep.h\
+	render/rTexture.cpp render/rTexture.h render/rRawPixelTexture.h render/rRawPixelTexture.cpp \
+	render/rViewport.cpp render/rViewport.h render/rColor.h render/rGradient.cpp render/rGradient.h \
+	render/rWindow.h render/rWindow.cpp \
+	render/rWindowSDL.h render/rWindowSDL.cpp render/rWindowNull.h \
+	render/rFontAtlas.h \
+	render/rMatrixStack.h render/rMatrixStack.cpp \
+	render/rRenderConfig.h \
+	render/rPackedVertex.h \
+	render/rWallGeometryBuffer.h \
+	render/rVertex.h \
+	render/rRenderStats.h render/rRenderStats.cpp \
+	render/rFrameLifecycle.h render/rFrameLifecycle.cpp \
+	render/rRendererState.h render/rRendererState.cpp \
+	render/vulkan/rVulkanContext.h render/vulkan/rVulkanContext.cpp \
+	render/vulkan/rVulkanSwapchain.h render/vulkan/rVulkanSwapchain.cpp \
+	render/vulkan/rVulkanFramebuffer.h render/vulkan/rVulkanFramebuffer.cpp \
+	render/vulkan/rVulkanBuffer.h render/vulkan/rVulkanBuffer.cpp \
+	render/vulkan/rVulkanShader.h render/vulkan/rVulkanShader.cpp \
+	render/vulkan/rVulkanPipeline.h render/vulkan/rVulkanPipeline.cpp \
+	render/vulkan/rVulkanDescriptor.h render/vulkan/rVulkanDescriptor.cpp \
+	render/vulkan/rVulkanRenderQueue.h render/vulkan/rVulkanRenderQueue.cpp \
+	render/vulkan/rVulkanPostProcess.h render/vulkan/rVulkanPostProcess.cpp \
+	render/vulkan/rVulkanRender.h render/vulkan/rVulkanRender.cpp \
+	render/utilities/rRenderBucket.h render/utilities/rRenderBucket.cpp \
+	render/utilities/rRenderQueue.h render/utilities/rRenderQueue.cpp \
+	render/utilities/rRenderState.h render/utilities/rRenderState.cpp \
+	render/renderers/rSkyFloorRenderer.h render/renderers/rSkyFloorRenderer.cpp \
+	render/renderers/rZoneRenderer.h render/renderers/rZoneRenderer.cpp \
+	render/renderers/rEffectsRenderer.h render/renderers/rEffectsRenderer.cpp \
+	render/renderers/rCycleRenderer.h render/renderers/rCycleRenderer.cpp \
+	render/renderers/rHUDRenderer.h render/renderers/rHUDRenderer.cpp \
+	render/fonts/rFontSTB.h render/fonts/rFontSTB.cpp \
+	render/fonts/rMSDF.h render/fonts/rMSDF.cpp \
+	render/geometry/rWallGeometryBufferPacked.h render/geometry/rWallGeometryBufferPacked.cpp \
+	render/geometry/rWallGeometryCollector.h render/geometry/rWallGeometryCollector.cpp \
+	render/rModelMesh.h render/rModelMesh.cpp \
+	render/rStaticMesh.h render/rStaticMesh.cpp
 
 libtron_a_SOURCES=tron/gAIBase.cpp tron/gAIBase.h tron/gAICharacter.cpp tron/gAICharacter.h tron/gArena.cpp tron/gArena.h\
 	tron/gArmagetron.cpp tron/gCamera.cpp tron/gCamera.h tron/gCycle.cpp tron/gCycle.h tron/gCycleMovement.cpp\
@@ -152,7 +194,7 @@ libtron_a_SOURCES=tron/gAIBase.cpp tron/gAIBase.h tron/gAICharacter.cpp tron/gAI
 	tron/gLanguageMenu.cpp tron/gLanguageMenu.h tron/gLogo.cpp tron/gLogo.h\
 	tron/gMenus.cpp tron/gMenus.h tron/gParser.cpp tron/gParser.h tron/gParticles.cpp tron/gParticles.h\
 	tron/gSensor.cpp tron/gSensor.h tron/gServerBrowser.cpp tron/gServerBrowser.h tron/gSparks.cpp tron/gSparks.h\
-	tron/gStuff.cpp tron/gStuff.h tron/gTeam.cpp tron/gTeam.h tron/gWall.cpp\
+	tron/gStuff.cpp tron/gStuff.h tron/gMoviepack.cpp tron/gMoviepack.h tron/gTeam.cpp tron/gTeam.h tron/gWall.cpp\
 	tron/gWall.h\
 	tron/gServerFavorites.h tron/gServerFavorites.cpp\
 	tron/gStatistics.h tron/gStatistics.cpp\
@@ -166,7 +208,8 @@ libtron_a_SOURCES=tron/gAIBase.cpp tron/gAIBase.h tron/gAICharacter.cpp tron/gAI
     tron/cockpit/cCamview.h tron/cockpit/cCamview.cpp \
 	tron/cockpit/cLabel.h tron/cockpit/cLabel.cpp \
 	tron/cockpit/cGauges.h tron/cockpit/cGauges.cpp \
-	tron/cockpit/cRectangle.h tron/cockpit/cRectangle.cpp\
+	tron/cockpit/cRectangle.h tron/cockpit/cRectangle.cpp \
+	tron/cockpit/cTouchButton.h tron/cockpit/cTouchButton.cpp \
 	tron/gFriends.h tron/gFriends.cpp
 
 if BUILDZONESV2
@@ -194,7 +237,11 @@ libtron_a_SOURCES +=\
 	tron/gWinZone.h            tron/gWinZone.cpp
 endif
 
-libui_a_SOURCES=ui/uInput.cpp ui/uInput.h ui/uInputQueue.cpp ui/uInputQueue.h ui/uMenu.cpp ui/uMenu.h
+libui_a_SOURCES=ui/uInput.cpp ui/uInput.h ui/uInputQueue.cpp ui/uInputQueue.h ui/uMenu.cpp ui/uMenu.h \
+	ui/uEvent.h ui/uEventSDL.h ui/uEventSDL.cpp \
+	ui/uInputInterface.h ui/uInputProvider.cpp \
+	ui/uInputProviderSDL.h ui/uInputProviderSDL.cpp \
+	ui/uInputProviderNull.h
 
 if OS_X_TOOLKIT
 if !BUILDDEDICATED
@@ -213,9 +260,9 @@ endif
 libtools_a_CPPFLAGS = -iquote @srcdir@/thirdparty/binreloc
 libtools_a_CXXFLAGS  =$(AM_CXXFLAGS) $(CXXFLAGS_OURFILES) -iquote @srcdir@/tools -iquote @srcdir@/tools/values -iquote @srcdir@/resource -iquote @srcdir@/thirdparty/mathexpr -iquote @srcdir@/thirdparty/utf8 -iquote @srcdir@/protobuf -iquote protobuf
 libnetwork_a_CXXFLAGS=$(libtools_a_CXXFLAGS)  -iquote @srcdir@/network
-librender_a_CXXFLAGS =$(libtools_a_CXXFLAGS)  -iquote @srcdir@/render
+librender_a_CXXFLAGS =$(libtools_a_CXXFLAGS)  -iquote @srcdir@/render -iquote @srcdir@/render/utilities -iquote @srcdir@/render/renderers -iquote @srcdir@/render/geometry -iquote @srcdir@/render/fonts -iquote @srcdir@/thirdparty/stb
 libui_a_CXXFLAGS     =$(librender_a_CXXFLAGS) -iquote @srcdir@/ui -iquote @srcdir@/thirdparty/shttpd -iquote @srcdir@/thirdparty/scrap
-libengine_a_CXXFLAGS =$(libui_a_CXXFLAGS)     -iquote @srcdir@/network -iquote @srcdir@/engine -iquote @srcdir@/engine/sound -iquote @srcdir@/engine/sound/sdl_mixer
+libengine_a_CXXFLAGS =$(libui_a_CXXFLAGS)     -iquote @srcdir@/network -iquote @srcdir@/engine -iquote @srcdir@/engine/sound -iquote @srcdir@/engine/sound/sdl_mixer -iquote @srcdir@/thirdparty/miniaudio
 libtron_a_CXXFLAGS   =$(libengine_a_CXXFLAGS) -iquote @srcdir@/thirdparty/particles -iquote @srcdir@/tron -iquote @srcdir@/tron/cockpit -iquote @srcdir@/tron/zone
 
 if OS_X_TOOLKIT

@@ -36,6 +36,18 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 #include <stdio.h>
 #include <stdlib.h>
 
+#ifdef __ANDROID__
+#include <SDL3/SDL.h>
+#include <SDL3/SDL_system.h>
+#include <vector>
+#endif
+#if defined(__APPLE__)
+#include <TargetConditionals.h>
+#if TARGET_OS_IOS
+#include <SDL3/SDL.h>
+#endif
+#endif
+
 #include "tLocale.h"
 #include "tDirectories.h"
 #include "tString.h"
@@ -201,6 +213,12 @@ static tString st_MusicDir(expand_home_c(DATA_DIR));    // directory for game mu
 #endif
 #endif
 static tString st_UserDataDir(expand_home_c(USER_DATA_DIR));    // directory for game data
+
+#ifdef __ANDROID__
+// External storage path where users can place custom content (moviepacks, autoexec.cfg, etc.)
+// Accessible via the Android Files app under Android/data/org.armagetronad.game/files/
+static tString st_AndroidExternalDir;
+#endif
 
 // load data from unbranded configuration directory on branded builds in Linux
 #if !defined DEDICATED && !defined MACOSX && !defined LEGACY_USER_DATA_DIR && !defined DEBUG
@@ -658,6 +676,15 @@ private:
         }
 #endif
 
+#ifdef __ANDROID__
+        // External storage: user-accessible via Files app. Searched before internal
+        // user data so users can override content by placing files there.
+        if ( st_AndroidExternalDir.Len() > 1 )
+        {
+            paths[ pos++ ] = st_AndroidExternalDir;
+        }
+#endif
+
         if ( st_UserDataDir.Len() > 1 )
         {
             paths[ pos++ ] = st_UserDataDir;
@@ -856,33 +883,73 @@ bool tPath::Open    ( std::ifstream& f,
 
     for ( int prio = paths.Len() - 1; prio>=0; --prio )
     {
-        //  std::ifstream test;
-
         tString fullname;
         fullname << paths( prio ) << "/" << filename;
 
-#ifdef PRINTSEARCH
+        f.clear();
+
+#ifdef __ANDROID__
+        // On Android, APK assets are not accessible via std::ifstream.
+        // Only attempt asset extraction for relative paths (those starting with "./")
+        // that originate from st_DataDir=".". Absolute paths (user-data dir) are
+        // opened directly with std::ifstream below.
+        {
+            const char* raw = static_cast<const char*>(fullname);
+            if (raw[0] == '.' && raw[1] == '/')
+            {
+                const char* assetPath = raw + 2;  // strip "./"
+                if (st_UserDataDir.Len() > 1)
+                {
+                    // Build extraction target.
+                    tString target;
+                    target << st_UserDataDir << "/" << assetPath;
+
+                    // Return cached extraction if already on disk.
+                    f.open(static_cast<const char*>(target));
+                    if (f && f.good())
+                        return true;
+                    f.clear();
+
+                    // Extract from APK asset manager.
+                    SDL_IOStream* io = SDL_IOFromFile(assetPath, "rb");
+                    if (io)
+                    {
+                        Sint64 size = SDL_GetIOSize(io);
+                        if (size > 0)
+                        {
+                            std::vector<char> buf((size_t)size);
+                            SDL_ReadIO(io, buf.data(), (size_t)size);
+                            SDL_CloseIO(io);
+
+                            char* tmp = strdup(static_cast<const char*>(target));
+                            mkdir_recurse(tmp, (size_t)st_UserDataDir.Len());
+                            free(tmp);
+
+                            FILE* out = fopen(static_cast<const char*>(target), "wb");
+                            if (out)
+                            {
+                                fwrite(buf.data(), 1, (size_t)size, out);
+                                fclose(out);
+                                f.open(static_cast<const char*>(target));
+                                if (f && f.good())
+                                    return true;
+                                f.clear();
+                            }
+                        }
+                        else
+                        {
+                            SDL_CloseIO(io);
+                        }
+                    }
+                }
+            }
+        }
 #endif
 
-        //  test.open( fullname );
-        f.clear();
         f.open( fullname );
 
-        //  if ( test )
         if ( f && f.good() )
-        {
-#ifdef PRINTSEARCH
-            std::cout << "Trying to open " << fullname << " succeeded.";
-#endif
-            //   f.open( fullname );
-
-            //   return f;
             return true;
-        }
-
-#ifdef PRINTSEARCH
-        std::cout << "Trying to open " << fullname << " succeeded.";
-#endif
     }
 
     return false;
@@ -945,23 +1012,96 @@ tString tPath::GetReadPath   ( const char* filename   ) const
     {
         tString fullname;
         fullname << paths( prio ) << "/" << filename;
-        std::ifstream f;
 
-        //if (fullname != "./moviepack/sky.png")
 #ifdef PRINTSEARCH
         printf("Searching %s...", (const char *)fullname);
 #endif
-        f.open( fullname );
 
+#ifdef __ANDROID__
+        // On Android, APK assets are not accessible via fopen/ifstream.
+        // Use SDL_IOFromFile for asset paths, then extract to user-data dir
+        // so callers get a real filesystem path they can open with fopen.
+        {
+            const char* assetPath = static_cast<const char*>(fullname);
+            if (assetPath[0] == '.' && assetPath[1] == '/')
+                assetPath += 2;
+
+            // For already-absolute paths (e.g. user-data dir), check with fopen.
+            if (assetPath[0] == '/')
+            {
+                std::ifstream chk;
+                chk.open(assetPath);
+                if (chk && chk.good())
+                {
+#ifdef PRINTSEARCH
+                    printf("OK\n");
+#endif
+                    return fullname;
+                }
+            }
+            else if (st_UserDataDir.Len() > 1)
+            {
+                // Relative path: try APK asset manager, extract to user-data dir.
+                tString target;
+                target << st_UserDataDir << "/" << assetPath;
+
+                // Return cached extraction if it already exists.
+                {
+                    std::ifstream chk;
+                    chk.open(static_cast<const char*>(target));
+                    if (chk && chk.good())
+                    {
+#ifdef PRINTSEARCH
+                        printf("OK (cached)\n");
+#endif
+                        return target;
+                    }
+                }
+
+                SDL_IOStream* io = SDL_IOFromFile(assetPath, "rb");
+                if (io)
+                {
+                    Sint64 size = SDL_GetIOSize(io);
+                    if (size > 0)
+                    {
+                        std::vector<char> buf((size_t)size);
+                        SDL_ReadIO(io, buf.data(), (size_t)size);
+                        SDL_CloseIO(io);
+
+                        char* tmp = strdup(static_cast<const char*>(target));
+                        mkdir_recurse(tmp, (size_t)st_UserDataDir.Len());
+                        free(tmp);
+
+                        FILE* out = fopen(static_cast<const char*>(target), "wb");
+                        if (out)
+                        {
+                            fwrite(buf.data(), 1, (size_t)size, out);
+                            fclose(out);
+#ifdef PRINTSEARCH
+                            printf("OK (extracted)\n");
+#endif
+                            return target;
+                        }
+                    }
+                    else
+                    {
+                        SDL_CloseIO(io);
+                    }
+                }
+            }
+        }
+#else
+        std::ifstream f;
+        f.open( fullname );
         if ( f && f.good() )
         {
-            //if (fullname != "./moviepack/sky.png")
 #ifdef PRINTSEARCH
             printf("OK\n");
 #endif
             return fullname;
         }
-        //if (fullname != "./moviepack/sky.png")
+#endif
+
 #ifdef PRINTSEARCH
         printf("nope\n");
 #endif
@@ -1044,6 +1184,128 @@ void tDirectories::SetUserData( const tString& dir )
 {
     st_UserDataDir = dir;
 }
+
+#ifdef __ANDROID__
+// Initialize Android-specific directory paths.
+// Call this once near startup, after SDL is initialized.
+// Sets the user-writable directory to SDL_GetPrefPath().
+// Read-only data is accessed via SDL_IOFromFile (APK assets, relative paths).
+void tDirectories::InitAndroid()
+{
+    char* prefPath = SDL_GetPrefPath("armagetronad", "armagetronad");
+    if (prefPath)
+    {
+        // SDL_GetPrefPath returns a path with trailing slash — strip it.
+        int len = (int)strlen(prefPath);
+        if (len > 1 && prefPath[len-1] == '/')
+            prefPath[len-1] = '\0';
+        tString pref(prefPath);
+        SetUserData(pref);
+        SetUserConfig(pref + "/config");
+        SDL_free(prefPath);
+    }
+
+    // External storage: user-visible directory under Android/data/<pkg>/files/
+    // Accessible via the Files app without root. Users can place moviepacks,
+    // autoexec.cfg, custom textures, etc. here to override built-in content.
+    if (SDL_GetAndroidExternalStorageState() & SDL_ANDROID_EXTERNAL_STORAGE_READ)
+    {
+        const char* extPath = SDL_GetAndroidExternalStoragePath();
+        if (extPath)
+        {
+            tString ext(extPath);
+            // Strip trailing slash
+            int extLen = ext.Len() - 1; // Len() returns length+1
+            if (extLen > 1 && (static_cast<const char*>(ext))[extLen-1] == '/')
+                ext = tString(static_cast<const char*>(ext)).SubStr(0, extLen - 1);
+            st_AndroidExternalDir = ext;
+
+            // Create standard subdirs so users know where to put things
+            const char* subdirs[] = {"moviepacks", "textures", "sound", "music", "config", nullptr};
+            for (int i = 0; subdirs[i]; ++i)
+            {
+                tString dir;
+                dir << ext << "/" << subdirs[i];
+                mkdir(static_cast<const char*>(dir), 0755);
+            }
+        }
+    }
+}
+#endif
+
+#if defined(__APPLE__) && TARGET_OS_IOS
+// Declared in tDirectoriesIOS.mm (Obj-C helper compiled alongside this TU for iOS builds).
+extern "C" const char* tGetIOSDocumentsPath(void);
+
+// Create standard user subdirectories so the game can write to them on first launch.
+// Called by InitiOS() after the user-data path has been set.
+static void tDirectories_CreateIOSUserDirs(const tString& base)
+{
+    const char* subdirs[] = { "config", "config/user", "var", "screenshot", "resource", "resource/automatic", nullptr };
+    for (int i = 0; subdirs[i]; ++i)
+    {
+        tString dir;
+        dir << base << "/" << subdirs[i];
+        mkdir(static_cast<const char*>(dir), 0755);
+    }
+}
+
+// Initialize iOS-specific directory paths.
+// Call this once near startup, after SDL is initialized.
+// Read-only bundle data is accessed via SDL_IOFromFile with relative paths.
+// User-writable data goes to the app's Documents directory so that users can
+// access it via the Files app and iTunes File Sharing (moviepacks, autoexec.cfg, …).
+void tDirectories::InitiOS()
+{
+    // SDL3: SDL_GetBasePath() returns a const char* (cached internal string — do NOT free).
+    // On iOS it points to the app bundle's resource directory.
+    const char* basePath = SDL_GetBasePath();
+    if (basePath)
+    {
+        // Strip trailing slash if present.
+        tString base(basePath);
+        if (base.size() > 1 && base[base.size()-1] == '/')
+            base = base.substr(0, base.size()-1);
+        SetData(base);
+    }
+
+    // Prefer the Documents directory for user-writable data:
+    //   • Exposed by the Files app ("On My iPhone → Armagetron")
+    //   • Accessible via iTunes File Sharing (requires UIFileSharingEnabled in Info.plist)
+    //   • Users can drop moviepacks (*.zip), autoexec.cfg, custom maps here
+    // Fall back to SDL_GetPrefPath (Library/Application Support) if Documents is unavailable.
+    const char* docPath = tGetIOSDocumentsPath();
+    if (docPath && docPath[0] != '\0')
+    {
+        tString pref(docPath);
+        SetUserData(pref);
+        SetUserConfig(pref + "/config");
+        // Override XDG-derived auto-resource path (USE_XDG is active on iOS because MACOSX
+        // is not defined, causing AUTORESOURCE_DIR = "${XDG_CACHE_HOME}/armagetronad/resource"
+        // which expands to "/armagetronad/resource" when XDG_CACHE_HOME is unset).
+        SetAutoResource(pref + "/resource/automatic");
+        tDirectories_CreateIOSUserDirs(pref);
+    }
+    else
+    {
+        // Fallback: Library/Application Support (not visible in Files app)
+        char* prefPath = SDL_GetPrefPath("armagetronad", "armagetronad");
+        if (prefPath)
+        {
+            int len = (int)strlen(prefPath);
+            if (len > 1 && prefPath[len-1] == '/')
+                prefPath[len-1] = '\0';
+            tString pref(prefPath);
+            SetUserData(pref);
+            SetUserConfig(pref + "/config");
+            SetAutoResource(pref + "/resource/automatic");
+            SDL_free(prefPath);
+            tDirectories_CreateIOSUserDirs(pref);
+        }
+    }
+
+}
+#endif
 
 // set location of config directory
 void tDirectories::SetConfig( const tString& dir )
@@ -1826,8 +2088,12 @@ void tDirectoriesCommandLineAnalyzer::DoInitialize( tCommandLineParser & parser 
     try
     {
         st_pathToExecutable.Set( parser.Executable() );
+#if !defined(__ANDROID__) && !(defined(__APPLE__) && TARGET_OS_IOS)
+        // On Android/iOS, InitAndroid()/InitiOS() handles directory setup;
+        // skip binreloc-based path discovery which fails with .so paths.
         FindDataPath();
         FindConfigurationPath();
+#endif
 
 #ifdef LEGACY_USER_DATA_DIR
         // blank out legacy user data dir if it matches the real user data dir

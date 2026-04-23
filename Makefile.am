@@ -8,6 +8,8 @@ sounddir=${armadatadir}
 languagedir=${armadatadir}
 modeldir=${armadatadir}
 musicdir=${armadatadir}
+shaderdir=${armadatadir}
+moviepackdir=${armadatadir}/moviepacks
 
 # include $(top_srcdir)/Makefile.paths
 include $(top_srcdir)/Makefile.manual
@@ -15,7 +17,7 @@ include $(top_srcdir)/Makefile.manual
 # what goes into the distribution
 EXTRA_DIST = README-DEVELOPER README-Subversion README-SDL \
 armagetron.kdevelop armagetron.kdevelop.pcs armagetron.kdevses tron.ico \
-models sound textures bootstrap.sh music \
+models sound textures bootstrap.sh music shaders moviepacks \
 acinclude.d/accustomdir.m4 acinclude.d/ax_boost_base.m4 acinclude.d/ax_boost_system.m4 acinclude.d/ax_boost_thread.m4\
 acinclude.d/ax_cxx_have_align.m4\
 fingerprint \
@@ -119,6 +121,39 @@ nobase_music_DATA=music/titletrack.ogg  music/when.ogg music/doIknowyou.ogg\
 
 
 nobase_model_DATA=models/cycle_body.mod models/cycle_front.mod models/cycle_rear.mod
+
+# Shaders are shipped as GLSL source and compiled to SPIR-V at runtime
+# by libshaderc. No build-time glslc step and no .spv files installed.
+nobase_shader_DATA=\
+	shaders/uber.vert shaders/uber.frag \
+	shaders/uber_hooks.glsl \
+	shaders/uber_instanced.vert \
+	shaders/procedural.glsl \
+	shaders/postprocess_params.glsl \
+	shaders/postprocess/fullscreen.vert \
+	shaders/postprocess/postprocess_params.glsl \
+	shaders/postprocess/passthrough/passthrough.frag \
+	shaders/postprocess/passthrough/passthrough.pipeline \
+	shaders/postprocess/celshading/celshading.frag \
+	shaders/postprocess/celshading/celshading.pipeline \
+	shaders/postprocess/celshading/celshading.meta \
+	shaders/postprocess/bloom/bloom.pipeline \
+	shaders/postprocess/bloom/bloom.meta \
+	shaders/postprocess/bloom/bloom_blur.glsl \
+	shaders/postprocess/bloom/bloom_blur_h.frag \
+	shaders/postprocess/bloom/bloom_blur_v.frag \
+	shaders/postprocess/bloom/bloom_composite.frag \
+	shaders/postprocess/bloom/bloom_downsample.frag \
+	shaders/postprocess/bloom/bloom_extract.frag \
+	shaders/postprocess/depthviz/depthviz.frag \
+	shaders/postprocess/depthviz/depthviz.pipeline \
+	shaders/postprocess/depthviz/depthviz.meta
+
+moviepack_DATA=\
+	moviepacks/armagetronadGL3.aamvp.zip \
+	moviepacks/gltron.aamvp.zip \
+	moviepacks/original.aamvp.zip
+
 endif
 
 doxy:

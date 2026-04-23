@@ -11,9 +11,7 @@
 #include <sys/types.h>
 #include <stdarg.h>
 #include <memory>
-#include <boost/assign/list_of.hpp>
-#include <boost/foreach.hpp>
-#define foreach BOOST_FOREACH
+#include <sstream>
 
 #include "eCoord.h"
 #include "eGrid.h"
@@ -33,9 +31,7 @@
 #include "gGame.h"
 
 #ifdef ENABLE_ZONESV2
-#include <boost/any.hpp>
-#include <boost/tokenizer.hpp> // to support splitting a string on ","
-#include <boost/shared_ptr.hpp>
+#include <any>
 #endif
 
 #ifdef ENABLE_ZONESV1
@@ -744,16 +740,17 @@ void gParser::myCheapParameterSplitter(const string &str, tFunction &tf, bool ad
 }
 
 typedef std::map<std::string, void(zShape::*)(const tPolynomial&)> shape_polynomial_settings_map_t;
-static shape_polynomial_settings_map_t shape_polynomial_settings =
-    boost::assign::map_list_of("rotation", &zShape::setRotation2)
-                              ("bottom", &zShape::SetBottom)
-                              ("height", &zShape::SetHeight)
-                              ("segments", &zShape::SetSegments)
-                              ("segment_length", &zShape::SetSegmentLength)
-                              ("segment_steps", &zShape::SetSegmentSteps)
-                              ("floor_scale_pct", &zShape::SetFloorScalePct)
-                              ("proximity_distance", &zShape::SetProximityDistance)
-                              ("proximity_offset", &zShape::SetProximityOffset);
+static shape_polynomial_settings_map_t shape_polynomial_settings = {
+    {"rotation", &zShape::setRotation2},
+    {"bottom", &zShape::SetBottom},
+    {"height", &zShape::SetHeight},
+    {"segments", &zShape::SetSegments},
+    {"segment_length", &zShape::SetSegmentLength},
+    {"segment_steps", &zShape::SetSegmentSteps},
+    {"floor_scale_pct", &zShape::SetFloorScalePct},
+    {"proximity_distance", &zShape::SetProximityDistance},
+    {"proximity_offset", &zShape::SetProximityOffset}
+};
 void
 gParser::parseShape(eGrid *grid, xmlNodePtr cur, const xmlChar * keyword, zShapePtr &shape)
 {
@@ -776,7 +773,7 @@ gParser::parseShape(eGrid *grid, xmlNodePtr cur, const xmlChar * keyword, zShape
     }
     shape->setScale( tfScale );
 
-    foreach(shape_polynomial_settings_map_t::value_type item, shape_polynomial_settings) {
+    for (const auto& item : shape_polynomial_settings) {
         const char* name = item.first.c_str();
         if (myxmlHasProp(cur, name)) {
             string str = string(myxmlGetProp(cur, name));
@@ -1125,15 +1122,14 @@ gParser::parseZoneEffectGroup(eGrid *grid, xmlNodePtr cur, const xmlChar * keywo
     if (xmlHasProp(cur, (const xmlChar*)"owners"))
     {
         string ownersDesc( myxmlGetProp(cur, "owners"));
-        boost::tokenizer<> tok(ownersDesc);
+        std::istringstream iss(ownersDesc);
+        std::string token;
 
         // For each owner listed
-        for (boost::tokenizer<>::iterator iter=tok.begin();
-                iter!=tok.end();
-                ++iter)
+        while (iss >> token)
         {
             // Map from map descriptor to in-game ids
-            MapIdToGameId::iterator mapOwnerToInGameOwnerPairIter = playerAsso.find(*iter);
+            MapIdToGameId::iterator mapOwnerToInGameOwnerPairIter = playerAsso.find(token);
             if (mapOwnerToInGameOwnerPairIter != playerAsso.end())
             {
                 // Found a matching in-game owner
@@ -1154,13 +1150,12 @@ gParser::parseZoneEffectGroup(eGrid *grid, xmlNodePtr cur, const xmlChar * keywo
     if (xmlHasProp(cur, (const xmlChar*)"teamOwners"))
     {
         string ownersDesc( myxmlGetProp(cur, "teamOwners"));
-        boost::tokenizer<> tok(ownersDesc);
+        std::istringstream iss(ownersDesc);
+        std::string token;
 
-        for (boost::tokenizer<>::iterator iter=tok.begin();
-                iter!=tok.end();
-                ++iter)
+        while (iss >> token)
         {
-            MapIdToGameId::iterator mapTeamOwnerToInGameTeamOwnerPairIter = teamAsso.find(*iter);
+            MapIdToGameId::iterator mapTeamOwnerToInGameTeamOwnerPairIter = teamAsso.find(token);
             if (mapTeamOwnerToInGameTeamOwnerPairIter != teamAsso.end())
             {
                 // Found a matching in-game owning team
@@ -1938,12 +1933,11 @@ gParser::parseTeamOwnership(eGrid *grid, xmlNodePtr cur, const xmlChar * keyword
     // Explore the teamId attribute
     if (myxmlHasProp(cur, TEAM_ID_STR )) {
         string tOwnersDesc( myxmlGetProp(cur, TEAM_ID_STR));
-        boost::tokenizer<> tokTeam(tOwnersDesc);
+        std::istringstream issTeam(tOwnersDesc);
+        std::string teamToken;
 
-        for (boost::tokenizer<>::iterator tokTeamIter=tokTeam.begin();
-                tokTeamIter!=tokTeam.end();
-                ++tokTeamIter) {
-            tString aTeamId = tString(*tokTeamIter);
+        while (issTeam >> teamToken) {
+            tString aTeamId = tString(teamToken);
             TeamOwnershipInfo::iterator teamIter = mapIdOfTeamOwners.find(aTeamId);
             // Add the teamId to the list if abscent
             if (teamIter == mapIdOfTeamOwners.end()) {
@@ -1956,11 +1950,10 @@ gParser::parseTeamOwnership(eGrid *grid, xmlNodePtr cur, const xmlChar * keyword
             if (myxmlHasProp(cur, PLAYER_ID_STR)) {
                 // Extract all the playerId for this team
                 string plOwnersDesc( myxmlGetProp(cur, PLAYER_ID_STR) );
-                boost::tokenizer<> tokPlayer(plOwnersDesc);
-                for (boost::tokenizer<>::iterator tokPlayerIter=tokPlayer.begin();
-                        tokPlayerIter!=tokPlayer.end();
-                        ++tokPlayerIter) {
-                    tString aPlayerId = tString(*tokPlayerIter);
+                std::istringstream issPlayer(plOwnersDesc);
+                std::string playerToken;
+                while (issPlayer >> playerToken) {
+                    tString aPlayerId = tString(playerToken);
 
                     std::set<string> aa = (*teamIter).second;
                     aa.insert(aPlayerId);
@@ -2083,26 +2076,26 @@ const
     my_map_t::const_iterator i;
     if ((i = vars.find(var)) == vars.end())
         return false;
-    if (i->second->empty())
+    if (!i->second->has_value())
         return false;
     return true;
 }
 
-boost::any
+std::any
 gParser::State_t::getAny(std::string const & var)
 const
 {
     my_map_t vars = _varstack.front();
     my_map_t::const_iterator i;
     if ((i = vars.find(var)) == vars.end())
-        return boost::any();
+        return std::any();
     return *(i->second);
 }
 
 void
-gParser::State_t::setAny(std::string const & var, boost::any val)
+gParser::State_t::setAny(std::string const & var, std::any val)
 {
-    _varstack.front()[var] = std::shared_ptr<boost::any>(new boost::any(val));
+    _varstack.front()[var] = std::make_shared<std::any>(val);
 }
 
 void

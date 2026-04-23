@@ -30,7 +30,7 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 #ifndef ArmageTron_RESOURCEMANAGER_H
 #define ArmageTron_RESOURCEMANAGER_H
 
-#include <boost/shared_ptr.hpp>
+#include <memory>
 
 //#include "tDict.h"
 #include "tString.h"
