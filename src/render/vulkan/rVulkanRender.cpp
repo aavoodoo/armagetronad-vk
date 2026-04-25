@@ -636,6 +636,12 @@ bool vkRenderer::RecreateSwapchain(int width, int height)
     // Save old render pass handle before destroying — we need to invalidate
     // only those cached pipelines, not the entire cache.
     VkRenderPass oldRenderPass = framebuffer_.GetRenderPass();
+
+    // Clear stale render pass copies in the post-process BEFORE destroying
+    // the framebuffer — the PP's composite passes and swapchainRenderPass_
+    // may hold the same handle that framebuffer_.Destroy() is about to free.
+    postProcess_.ClearRenderPassRefs(oldRenderPass);
+
     framebuffer_.Destroy(context_.GetDevice());
 
     if (!swapchain_.Recreate(context_, width, height))
@@ -665,6 +671,15 @@ bool vkRenderer::RecreateSwapchain(int width, int height)
     // Pass the old (destroyed) render pass so PP can skip destroying stale copies.
     postProcess_.OnSwapchainResized(context_, width, height,
                                     framebuffer_.GetRenderPass(), oldRenderPass);
+    // Re-activate the effect — OnSwapchainResized cleared all effects and
+    // set activeEffectPtr_ to nullptr. Without this, the composite pass
+    // doesn't run and swapchain images stay UNDEFINED (magenta screen).
+    if (postProcess_.IsEnabled())
+    {
+        const char* effectName = sr_vkPostProcessEffect();
+        if (effectName && *effectName)
+            postProcess_.SetActiveEffect(effectName);
+    }
 
     // Resize semaphores if swapchain image count changed
     uint32_t newImageCount = swapchain_.GetImageCount();
@@ -695,30 +710,6 @@ bool vkRenderer::RecreateSwapchain(int width, int height)
     sr_screenHeight = static_cast<int>(swapchain_.GetExtent().height);
 
     needsSwapchainRecreation_ = false;
-
-    // Transition all new swapchain images from UNDEFINED to PRESENT_SRC_KHR.
-    // Without this, the first few presents after resize trigger validation errors
-    // because images haven't been through a render pass yet.
-    {
-        VkCommandBuffer cmd = rVulkanBufferManager::BeginSingleTimeCommands(
-            context_.GetDevice(), commandPool_);
-        for (uint32_t i = 0; i < swapchain_.GetImageCount(); i++)
-        {
-            VkImageMemoryBarrier barrier{};
-            barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-            barrier.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-            barrier.newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
-            barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-            barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-            barrier.image = swapchain_.GetImages()[i];
-            barrier.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
-            vkCmdPipelineBarrier(cmd,
-                VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
-                0, 0, nullptr, 0, nullptr, 1, &barrier);
-        }
-        rVulkanBufferManager::EndSingleTimeCommands(
-            context_.GetDevice(), commandPool_, context_.GetGraphicsQueue(), cmd);
-    }
 
     // Notify the game that the screen dimensions changed so cockpit widgets
     // and other layout-dependent code can readjust.

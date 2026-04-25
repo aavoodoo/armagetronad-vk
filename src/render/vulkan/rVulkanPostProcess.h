@@ -215,6 +215,10 @@ public:
     void SetEnabled(bool enabled);
     bool IsEnabled() const { return enabled_ && offscreenBuilt_; }
 
+    //! Clear all references to a render pass handle that's about to be destroyed.
+    //! Called BEFORE framebuffer_.Destroy() to prevent double-free.
+    void ClearRenderPassRefs(VkRenderPass rp);
+
     //! Called from RecreateSwapchain to rebuild offscreen images at the new size.
     //! If the feature is disabled, this is a no-op.
     //! @param oldSwapchainRP The render pass that was destroyed by framebuffer_.Destroy()

@@ -124,6 +124,15 @@ void rVulkanPostProcess::SetEnabled(bool enabled)
     }
 }
 
+void rVulkanPostProcess::ClearRenderPassRefs(VkRenderPass rp)
+{
+    if (rp == VK_NULL_HANDLE) return;
+    if (swapchainRenderPass_ == rp) swapchainRenderPass_ = VK_NULL_HANDLE;
+    for (auto& [name, ef] : effects_)
+        for (auto& pass : ef.passes)
+            if (pass.renderPass == rp) pass.renderPass = VK_NULL_HANDLE;
+}
+
 bool rVulkanPostProcess::OnSwapchainResized(rVulkanContext& ctx, uint32_t width, uint32_t height,
                                             VkRenderPass swapchainRenderPass,
                                             VkRenderPass oldSwapchainRP)
