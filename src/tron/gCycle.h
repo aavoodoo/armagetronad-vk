@@ -201,6 +201,12 @@ public:
     gTextureCycle  *wheelTex,*bodyTex;
     gTextureCycle  *customTexture;
 
+#ifndef DEDICATED
+    uint32_t modelCacheVersion_; // tracks rModel::GetModelCacheVersion() at last load
+
+    void LoadVisuals(); //!< load (or reload) cycle models and textures
+#endif
+
     eCoord rotationFrontWheel,rotationRearWheel; 	// wheel position (rotation)
     REAL   heightFrontWheel,heightRearWheel;  		// wheel (suspension)
 public:

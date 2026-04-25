@@ -422,6 +422,8 @@ private:
     // Set while the app is in the iOS background — BeginFrame skips acquisition to avoid
     // blocking on an unavailable Metal drawable (VK_ERROR_SURFACE_LOST_KHR / timeout).
     bool appInBackground_          = false;
+    // Set on VK_ERROR_DEVICE_LOST — stops the frame loop immediately on all subsequent calls.
+    bool deviceLost_               = false;
 
     // User-created fences (tracked for cleanup)
     std::vector<VkFence*> userFences_;
@@ -433,6 +435,7 @@ private:
     };
     // Key: address of the vertex vector's data pointer (stable for the lifetime of rModelMesh)
     std::unordered_map<uintptr_t, ModelMeshEntry> modelMeshCache_;
+    uint32_t modelMeshCacheVersion_ = 0;  // Incremented on every cache clear
 
     // === Per-viewport FBOs (split-screen depth isolation) ===
     static constexpr int MAX_VIEWPORT_FBOS = 4;
@@ -464,6 +467,7 @@ public:
     void BeginViewportFBO(int index, int totalViewports, int x, int y, int w, int h);
     void EndViewportFBO();
     void CompositeViewportFBOs(int count, const int viewportRects[][4], const int viewportRotations[]);
+    uint32_t GetModelMeshCacheVersion() const { return modelMeshCacheVersion_; }
 private:
 
 };

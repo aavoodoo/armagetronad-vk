@@ -7109,6 +7109,11 @@ static bool se_alreadyDisplayedScores = false;
 
 static bool show_scores=false;
 
+void ePlayerNetID::ResetDisplayedScores()
+{
+    se_alreadyDisplayedScores = false;
+}
+
 void ePlayerNetID::DisplayScores()
 {
     if( !show_scores || !se_mainGameTimer || se_alreadyDisplayedScores )

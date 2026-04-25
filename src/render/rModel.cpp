@@ -399,6 +399,7 @@ rModel::~rModel(){
 }
 
 static std::map<std::string, rModel *> sr_modelCache;
+static uint32_t s_modelCacheVersion = 0;
 
 //! returns a model from the cache
 rModel * rModel::GetModel(const char * filename)
@@ -427,6 +428,12 @@ void rModel::ClearCache()
     }
 
     sr_modelCache.clear();
+    ++s_modelCacheVersion;
+}
+
+uint32_t rModel::GetModelCacheVersion()
+{
+    return s_modelCacheVersion;
 }
 
 

@@ -32,6 +32,7 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 #include "rModelMesh.h"
 #ifndef DEDICATED
 #include "rCycleRenderer.h"
+
 #endif
 //#include "eTess.h"
 #include "eGrid.h"
@@ -2355,6 +2356,9 @@ void gCycle::MyInitAfterCreation(){
     wheelTex = NULL;
     bodyTex = NULL;
     customTexture = NULL;
+#ifndef DEDICATED
+    modelCacheVersion_ = UINT32_MAX;
+#endif
 
     correctPosSmooth=eCoord(0,0);
 
@@ -2395,43 +2399,7 @@ void gCycle::MyInitAfterCreation(){
 
     // load model and texture
 #ifndef DEDICATED
-    gCycleVisuals visuals( color_ );
-    if ( !visuals.LoadModel( mp ) )
-    {
-        tERR_ERROR( "Neither classic style nor moviepack style model and textures found. "
-                    "The folders \"textures\" and \"moviepack\" need to contain either "
-                    "cycle.ase and bike.png or body.mod, front.mod, rear.mod, cycle_body.png and cycle_wheel.png." );
-    }
-
-    mp = visuals.mpType;
-
-    // transfer models and textures
-    if ( mp )
-    {
-        // use moviepack style body and texture
-        customModel = visuals.customModel;
-        visuals.customModel = 0;
-        customTexture = visuals.customTexture;
-        visuals.customTexture = 0;
-    }
-    else
-    {
-        // use classic style body and texture
-        body = visuals.bodyModel;
-        visuals.bodyModel = 0;
-        front = visuals.frontModel;
-        visuals.frontModel = 0;
-        rear = visuals.rearModel;
-        visuals.rearModel = 0;
-        bodyTex = visuals.bodyTexture;
-        visuals.bodyTexture = 0;
-        wheelTex = visuals.wheelTexture;
-        visuals.wheelTexture = 0;
-
-        tASSERT ( body && front && rear && bodyTex && wheelTex );
-
-        mp = false;
-    }
+    LoadVisuals();
 
     // Start the cycle engine sound
     eSoundMixer& mixer = eSoundMixer::GetMixer();
@@ -2516,6 +2484,47 @@ void gCycle::InitAfterCreation(){
 #endif
     MyInitAfterCreation();
 }
+
+#ifndef DEDICATED
+void gCycle::LoadVisuals()
+{
+    // Release owned textures before (re)loading
+    delete bodyTex;       bodyTex = NULL;
+    delete wheelTex;      wheelTex = NULL;
+    delete customTexture; customTexture = NULL;
+    // Model pointers are cache-owned — clear without delete
+    body = front = rear = customModel = NULL;
+
+    gCycleVisuals visuals( color_ );
+    if ( !visuals.LoadModel( mp ) )
+    {
+        tERR_ERROR( "Neither classic style nor moviepack style model and textures found. "
+                    "The folders \"textures\" and \"moviepack\" need to contain either "
+                    "cycle.ase and bike.png or body.mod, front.mod, rear.mod, cycle_body.png and cycle_wheel.png." );
+    }
+
+    mp = visuals.mpType;
+
+    if ( mp )
+    {
+        customModel = visuals.customModel;     visuals.customModel = 0;
+        customTexture = visuals.customTexture; visuals.customTexture = 0;
+    }
+    else
+    {
+        body = visuals.bodyModel;       visuals.bodyModel = 0;
+        front = visuals.frontModel;     visuals.frontModel = 0;
+        rear = visuals.rearModel;       visuals.rearModel = 0;
+        bodyTex = visuals.bodyTexture;  visuals.bodyTexture = 0;
+        wheelTex = visuals.wheelTexture; visuals.wheelTexture = 0;
+
+        tASSERT ( body && front && rear && bodyTex && wheelTex );
+        mp = false;
+    }
+
+    modelCacheVersion_ = rModel::GetModelCacheVersion();
+}
+#endif // DEDICATED
 
 gCycle::gCycle(eGrid *grid, const eCoord &pos,const eCoord &d,ePlayerNetID *p)
         :gCycleMovement(grid, pos,d,p,false),
@@ -4637,6 +4646,12 @@ void gCycle::Render(const eCamera *cam){
         TexMatrix();
         IdentityMatrix();
 
+        // Reload models if rModel::ClearCache() was called (e.g. moviepack change)
+#ifndef DEDICATED
+        if (modelCacheVersion_ != rModel::GetModelCacheVersion())
+            LoadVisuals();
+#endif
+
         if (mp){
 
             ModelMatrix();
@@ -5420,9 +5435,11 @@ gCycle::gCycle( Game::CycleSync const & sync, nSenderInfo const & sender )
 
     color_.ReadSync( sync.color() );
     trailColor_ = color_;
-
     se_MakeColorValid( color_.r_, color_.g_, color_.b_, 1.0f );
     se_MakeColorValid( trailColor_.r_, trailColor_.g_, trailColor_.b_, .5f );
+
+    MyInitAfterCreation();    // LoadVisuals() uses color_ — must come after color is set
+    predictPosition_ = pos;
 
     // set last time so that the first read_sync will not think this is old
     lastTimeAnim = lastTime = -EPS;

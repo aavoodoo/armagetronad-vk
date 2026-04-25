@@ -85,6 +85,9 @@ public:
     //! clears the model cache
     static void ClearCache();
 
+    //! returns a monotonically increasing version number, bumped each time the cache is cleared
+    static uint32_t GetModelCacheVersion();
+
     void Render();
 
     //! Get the underlying mesh (for instanced rendering cache key).

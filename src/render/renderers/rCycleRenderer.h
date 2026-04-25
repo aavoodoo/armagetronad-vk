@@ -112,4 +112,13 @@ rCycleRenderStats rGetCycleRenderStats();
 //! Begin frame for cycle rendering (reset statistics)
 void rCycleRendererBeginFrame();
 
+//=============================================================================
+// Cache version
+//=============================================================================
+
+//! Returns a counter that increments every time the model mesh cache is cleared
+//! (e.g. on shader reload / moviepack switch).  Game code compares against its
+//! last-seen version and re-primes the cache when they differ.
+uint32_t sr_GetModelMeshCacheVersion();
+
 #endif // RCYCLERENDERER_H

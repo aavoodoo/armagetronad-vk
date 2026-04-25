@@ -372,6 +372,8 @@ void Map::DrawMap(bool rimWalls, bool cycleWalls,
         DrawWalls(sg_netPlayerWalls);
     }
     DrawObjects(tCoord((cycleSize * w) / (rw * xscale), (cycleSize * h) / (rh * yscale)));
+    // Flush zone lines (submitted to Sky by Render2D) before the map MVP is popped.
+    rRenderQueue::Instance().ExecutePhase(rRenderPhase::Sky);
     PopMatrix();
     if(m_mode != MODE_STD) {
         m_clipper->End();

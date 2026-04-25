@@ -2565,14 +2565,24 @@ int nSocket::Broadcast( const char * buf, int len, unsigned int port ) const
         broadcast_ = true;
     }
 
-    // prepare broadcasting address
+    // prepare broadcasting address (LAN broadcast)
     sockaddr_in broadcastaddr;
     broadcastaddr.sin_family = AF_INET;
     broadcastaddr.sin_addr.s_addr = INADDR_BROADCAST;
     broadcastaddr.sin_port = htons(port);
 
-    // delegate to usual write function
-    return Write ( buf, len, reinterpret_cast< sockaddr *>( &broadcastaddr ), sizeof( sockaddr_in ) );
+    int ret = Write ( buf, len, reinterpret_cast< sockaddr *>( &broadcastaddr ), sizeof( sockaddr_in ) );
+
+    // Also send to loopback broadcast so same-machine servers are reachable.
+    // On Linux, 255.255.255.255 does not loop back through lo; 127.255.255.255 does.
+    sockaddr_in lobroadcastaddr;
+    lobroadcastaddr.sin_family = AF_INET;
+    // 127.255.255.255 — the loopback subnet broadcast address
+    lobroadcastaddr.sin_addr.s_addr = htonl(0x7FFFFFFF);
+    lobroadcastaddr.sin_port = htons(port);
+    Write( buf, len, reinterpret_cast< sockaddr *>( &lobroadcastaddr ), sizeof( sockaddr_in ) );
+
+    return ret;
 }
 
 // *******************************************************************************************

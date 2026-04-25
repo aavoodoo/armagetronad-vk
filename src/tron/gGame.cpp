@@ -50,6 +50,7 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 #include "nConfig.h"
 #include "rScreen.h"
 #include "rViewport.h"
+#include "rViewportGuard.h"
 #include "rModel.h"
 #include "uInput.h"
 #include "ePlayer.h"
@@ -1456,6 +1457,8 @@ void RenderAllViewports(eGrid *grid){
 					}
 
 					ePlayer::PlayerConfig(p)->Render();
+					ePlayerNetID::ResetDisplayedScores();
+					ePlayerNetID::DisplayScores();
 
 					if (numViewports > 1)
 						sr_EndViewportFBO();
@@ -1474,10 +1477,11 @@ void RenderAllViewports(eGrid *grid){
         }
     }
 
-    // render the console and scores so it appears behind the global HUD
-    ePlayerNetID::DisplayScores();
+    // render the console — must run at fullscreen viewport to avoid stale FBO state
     if( sr_con.autoDisplayAtSwap )
     {
+        rViewportGuard vpGuard;
+        rViewport::s_viewportFullscreen.Select();
         sr_con.Render();
     }
 

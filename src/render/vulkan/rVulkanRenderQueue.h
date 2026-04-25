@@ -150,6 +150,14 @@ public:
     //! Set which frame slot to use for vertex uploads. Call before any draws each frame.
     void SetCurrentFrame(uint32_t frame) { activeFrame_ = frame % kMaxFrames; }
 
+    //! Invalidate cached pipeline/descriptor state. Must be called after every vkCmdBeginRenderPass
+    //! so the first draw in each new render pass re-binds pipeline and descriptor sets.
+    void InvalidateBindingCache()
+    {
+        lastBoundPipeline_ = VK_NULL_HANDLE;
+        lastBoundDescSet_  = VK_NULL_HANDLE;
+    }
+
     //! Reset the frame offset — call at the start of each frame, after GPU fence is signaled.
     //! Also updates the high-water mark used by CompactIfNeeded().
     void ResetFrameOffset();

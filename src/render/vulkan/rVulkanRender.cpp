@@ -208,9 +208,16 @@ vkRenderer::~vkRenderer()
 
         VkDevice device = context_.GetDevice();
 
+        // Destroy ALL descriptor pools first — this frees all descriptor sets so
+        // that subsequent sampler/image-view destruction doesn't trigger validation
+        // warnings about resources still being referenced by live descriptor sets.
+        descriptorManager_.Destroy();
+        postProcess_.DestroyDescriptorPools();
+        VK_DESTROY(vkDestroyDescriptorPool, device, lightingUBOPool_);
+        VK_DESTROY(vkDestroyDescriptorSetLayout, device, lightingUBOLayout_);
+
         // Erase viewport FBO texture entries from textures_ map so the texture
         // loop below doesn't double-destroy resources owned by ViewportFBO structs.
-        // The actual ViewportFBO resources are destroyed after the descriptor pool.
         for (int f = 0; f < MAX_FRAMES_IN_FLIGHT; f++)
             for (int i = 0; i < MAX_VIEWPORT_FBOS; i++) {
                 ViewportFBO& vfbo = viewportFBOs_[f][i];
@@ -218,9 +225,7 @@ vkRenderer::~vkRenderer()
                 if (vfbo.depthTexId) textures_.erase(vfbo.depthTexId);
             }
 
-        // Destroy textures — their samplers/views are referenced by
-        // descriptor sets. Destroying textures before the descriptor pool
-        // avoids validation warnings about samplers still in use.
+        // Descriptor sets are gone; safe to destroy textures and their samplers.
         for (auto& [id, tex] : textures_)
         {
             VK_DESTROY(vkDestroySampler, device, tex.sampler);
@@ -244,9 +249,10 @@ vkRenderer::~vkRenderer()
         VK_DESTROY(vkDestroyImage, device, dummyTexture_.image);
         VK_FREE_MEMORY(device, dummyTexture_.memory);
 
-        // Destroy per-frame lighting UBOs and set 1 descriptor resources
-        VK_DESTROY(vkDestroyDescriptorPool, device, lightingUBOPool_);
-        VK_DESTROY(vkDestroyDescriptorSetLayout, device, lightingUBOLayout_);
+        // Drain any remaining deferred sampler deletions
+        pendingDeleteSamplers_.drainAll<vkDestroySampler>(device);
+
+        // Destroy per-frame lighting UBO buffers (layouts/pools already destroyed above)
         for (int i = 0; i < MAX_FRAMES_IN_FLIGHT; i++)
         {
             if (lightingUBOMapped_[i]) {
@@ -257,15 +263,6 @@ vkRenderer::~vkRenderer()
             VK_FREE_MEMORY(device, lightingUBOMemory_[i]);
         }
 
-        // Drain any remaining deferred queues
-        pendingDeleteSamplers_.drainAll<vkDestroySampler>(device);
-
-        // Destroy ALL descriptor pools FIRST — this frees descriptor sets so that
-        // subsequent sampler/resource destruction doesn't trigger "in use" warnings.
-        descriptorManager_.Destroy();
-        postProcess_.DestroyDescriptorPools();
-
-        // Now safe to destroy resources that were referenced by descriptor sets
         DestroyViewportFBOs();
         vulkanQueue_.Destroy();
 
@@ -292,11 +289,7 @@ vkRenderer::~vkRenderer()
 bool vkRenderer::Init(SDL_Window* window)
 {
     window_ = window;
-#ifndef NDEBUG
-    bool validation = true; // Always validate in debug builds
-#else
-    bool validation = sr_vulkanValidation; // Configurable in release
-#endif
+    bool validation = sr_vulkanValidation; // Enable via VULKAN_ENABLE_VALIDATION 1
 
     if (!context_.Init(window, validation))
         return false;
@@ -618,7 +611,7 @@ bool vkRenderer::Init(SDL_Window* window)
             dummyTexture_.view, dummyTexture_.sampler);
     }
 
-    std::cerr << "[Vulkan] Renderer initialized: " << context_.GetDeviceName() << std::endl;
+    VK_LOG_INFO("[Vulkan] Renderer initialized: " << context_.GetDeviceName() << std::endl);
     return true;
 }
 
@@ -843,6 +836,7 @@ bool vkRenderer::CreateDummyTexture()
 void vkRenderer::BeginFrame()
 {
     if (frameStarted_) return;
+    if (deviceLost_)   return;  // GPU is gone — stop trying
 
     // iOS: skip frame acquisition entirely while in background.
     // vkAcquireNextImageKHR / vkWaitForFences with UINT64_MAX would block
@@ -932,8 +926,25 @@ void vkRenderer::BeginFrame()
 
     VkDevice device = context_.GetDevice();
 
-    // Wait for previous frame using this slot's fence
-    vkWaitForFences(device, 1, &inFlightFences_[currentFrame_], VK_TRUE, UINT64_MAX);
+    // Wait for previous frame using this slot's fence (5-second timeout to detect GPU hangs)
+    VkResult fenceResult = vkWaitForFences(device, 1, &inFlightFences_[currentFrame_], VK_TRUE,
+                                           5000000000ULL);  // 5 seconds
+    if (fenceResult == VK_TIMEOUT)
+    {
+        std::cerr << "[Vulkan] GPU fence timeout — possible GPU hang or device lost\n";
+        needsSwapchainRecreation_ = true;
+        return;
+    }
+    if (fenceResult != VK_SUCCESS)
+    {
+        std::cerr << "[Vulkan] vkWaitForFences error: " << fenceResult << "\n";
+        if (fenceResult == VK_ERROR_DEVICE_LOST)
+        {
+            std::cerr << "[Vulkan] GPU device lost — rendering stopped. Restart the game.\n";
+            deviceLost_ = true;
+        }
+        return;
+    }
 
     // GPU work for this slot is now complete — safe to free deferred resources.
     // Vertex buffers replaced mid-frame (P0-2 fix)
@@ -1046,6 +1057,7 @@ void vkRenderer::BeginFrame()
     rpInfo.pClearValues = clearValues;
 
     vkCmdBeginRenderPass(cmd, &rpInfo, VK_SUBPASS_CONTENTS_INLINE);
+    vulkanQueue_.InvalidateBindingCache();  // new render pass — force pipeline/descriptor rebind
 
     // Write arena bounds into this frame's lighting UBO up front, so that even
     // frames without any lit draws (menus, etc.) have valid arena bbox data for
@@ -1071,6 +1083,7 @@ void vkRenderer::BeginFrame()
 
     // Reset per-frame viewport FBO count (will be set by BeginViewportFBO calls)
     viewportFBOCount_ = 0;
+    activeViewportFBO_ = -1;  // guard: reset in case last frame didn't close FBO cleanly
 
     // Apply viewport/scissor. If Viewport() was called before BeginFrame() (e.g. the
     // first split-screen player calls conf->Select() before any draw triggers BeginFrame),
@@ -1204,7 +1217,10 @@ void vkRenderer::EndFrame()
     {
         std::cerr << "[Vulkan] vkQueueSubmit failed (" << submitResult << ") — skipping present\n";
         if (submitResult == VK_ERROR_DEVICE_LOST)
-            needsSwapchainRecreation_ = true;
+        {
+            std::cerr << "[Vulkan] GPU device lost — rendering stopped. Restart the game.\n";
+            deviceLost_ = true;
+        }
         frameStarted_ = false;
         return;
     }
@@ -2636,6 +2652,7 @@ void vkRenderer::BeginViewportFBO(int index, int totalViewports, int x, int y, i
     rpInfo.clearValueCount = 2;
     rpInfo.pClearValues = clears;
     vkCmdBeginRenderPass(cmd, &rpInfo, VK_SUBPASS_CONTENTS_INLINE);
+    vulkanQueue_.InvalidateBindingCache();  // new render pass — force pipeline/descriptor rebind
 
     // Pipeline manager needs to know about the render pass for pipeline cache
     pipelineManager_.SetRenderPass(viewportRenderPass_);
@@ -2719,6 +2736,7 @@ void vkRenderer::EndViewportFBO()
     rpInfo.clearValueCount = 3;
     rpInfo.pClearValues = clears;
     vkCmdBeginRenderPass(cmd, &rpInfo, VK_SUBPASS_CONTENTS_INLINE);
+    vulkanQueue_.InvalidateBindingCache();  // new render pass — force pipeline/descriptor rebind
 
     // Restore viewport to full screen
     cachedViewport_[0] = 0;
@@ -2836,13 +2854,28 @@ bool vkRenderer::IsModelMeshCached(const void* geometryKey) const
     return it != modelMeshCache_.end() && !it->second.litVerts.empty();
 }
 
+uint32_t sr_GetModelMeshCacheVersion_impl()
+{
+    return s_vkRenderer ? s_vkRenderer->GetModelMeshCacheVersion() : 0;
+}
+
+static int s_savedScreenW = 0, s_savedScreenH = 0;
+
 void sr_BeginViewportFBO(int index, int totalViewports, int x, int y, int w, int h)
 {
     if (s_vkRenderer) s_vkRenderer->BeginViewportFBO(index, totalViewports, x, y, w, h);
+    // Cockpit code uses sr_screenWidth/Height for sizing — expose FBO dimensions
+    // so per-viewport widgets are sized relative to the FBO, not the full swapchain.
+    s_savedScreenW = sr_screenWidth;
+    s_savedScreenH = sr_screenHeight;
+    sr_screenWidth  = w;
+    sr_screenHeight = h;
 }
 
 void sr_EndViewportFBO()
 {
+    sr_screenWidth  = s_savedScreenW;
+    sr_screenHeight = s_savedScreenH;
     if (s_vkRenderer) s_vkRenderer->EndViewportFBO();
 }
 
@@ -3325,13 +3358,13 @@ void vkRenderer::ReloadShaders()
     VK_LOG_INFO("[Vulkan] ReloadShaders called" << std::endl);
     if (!IsInitialized())
     {
-        std::cerr << "[Vulkan] ReloadShaders: not initialized, ignoring" << std::endl;
+        VK_LOG_INFO("[Vulkan] ReloadShaders: not initialized, ignoring" << std::endl);
         return;
     }
     if (frameStarted_)
     {
         // Called from inside a render frame (e.g. LeftRight menu event). Defer to next BeginFrame.
-        std::cerr << "[Vulkan] ReloadShaders: frame in progress — deferring to next BeginFrame" << std::endl;
+        VK_LOG_INFO("[Vulkan] ReloadShaders: frame in progress — deferring to next BeginFrame" << std::endl);
         pendingShaderReload_ = true;
         return;
     }
@@ -3363,9 +3396,9 @@ void vkRenderer::ReloadShaders()
         if (slash != std::string::npos) includePaths.push_back(p.substr(0, slash));
     }
 
-    std::cerr << "[Vulkan] ReloadShaders: includePaths =";
-    for (const auto& p : includePaths) std::cerr << " [" << p << "]";
-    std::cerr << "\n";
+    VK_LOG_INFO("[Vulkan] ReloadShaders: includePaths =");
+    for (const auto& p : includePaths) VK_LOG_INFO(" [" << p << "]");
+    VK_LOG_INFO("\n");
 
     tString vertSrcPath = tDirectories::Data().GetReadPath("moviepack/shaders/uber.vert");
     if (vertSrcPath.Len() <= 1)
@@ -3407,10 +3440,10 @@ void vkRenderer::ReloadShaders()
             std::cerr << "[Vulkan] ReloadShaders: fragment compile failed (emissive):\n" << errEm << "\n";
     }
 
-    std::cerr << "[Vulkan] ReloadShaders: vert=" << static_cast<const char*>(vertSrcPath)
+    VK_LOG_INFO("[Vulkan] ReloadShaders: vert=" << static_cast<const char*>(vertSrcPath)
               << " frag=" << static_cast<const char*>(fragSrcPath)
               << " newVert=" << newVert << " newFrag=" << newFrag
-              << " newFragEmissive=" << newFragEmissive << std::endl;
+              << " newFragEmissive=" << newFragEmissive << std::endl);
 #else
     // No shaderc (Android): load pre-compiled SPIR-V from APK assets.
     newVert         = rVulkanShader::LoadFromFile(device, "shaders/uber.vert.spv");
@@ -3435,6 +3468,7 @@ void vkRenderer::ReloadShaders()
     // and the pointer-based cache keys could alias freed memory.
     modelMeshCache_.clear();
     sr_modelCacheVersion++;
+    ++modelMeshCacheVersion_;
 
     pipelineManager_.Destroy();
     if (vertShader_         != VK_NULL_HANDLE) vkDestroyShaderModule(device, vertShader_, nullptr);
@@ -3449,13 +3483,11 @@ void vkRenderer::ReloadShaders()
     bool initOk = pipelineManager_.Init(device, framebuffer_.GetRenderPass(),
                                vertShader_, fragShader_, fragShaderEmissive_,
                                reloadSetLayouts, 2, &layout);
-    std::cerr << "[Vulkan] ReloadShaders: pipelineManager_.Init=" << initOk
-              << " layout=" << layout << std::endl;
     if (!initOk)
     {
         std::cerr << "[Vulkan] ReloadShaders: pipelineManager_.Init failed" << std::endl;
     }
-    std::cerr << "[Vulkan] ReloadShaders: complete" << std::endl;
+    VK_LOG_INFO("[Vulkan] ReloadShaders: complete" << std::endl);
 }
 
 // ============================================================================

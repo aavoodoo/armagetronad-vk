@@ -149,7 +149,7 @@ librender_a_SOURCES=${render_extra} render/rConsole.cpp render/rConsoleGraph.cpp
 	render/rFont.h render/rModel.cpp render/rModel.h render/rRender.cpp\
 	render/rRender.h render/rRenderEnums.h render/rScreen.cpp render/rScreen.h render/rSDL.h render/rSysdep.cpp render/rSysdep.h\
 	render/rTexture.cpp render/rTexture.h render/rRawPixelTexture.h render/rRawPixelTexture.cpp \
-	render/rViewport.cpp render/rViewport.h render/rColor.h render/rGradient.cpp render/rGradient.h \
+	render/rViewport.cpp render/rViewport.h render/rViewportGuard.h render/rColor.h render/rGradient.cpp render/rGradient.h \
 	render/rWindow.h render/rWindow.cpp \
 	render/rWindowSDL.h render/rWindowSDL.cpp render/rWindowNull.h \
 	render/rFontAtlas.h \

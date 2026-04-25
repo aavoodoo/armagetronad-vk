@@ -135,10 +135,16 @@ void rBeginCycleRendering()
     rSetupCycleMaterial();
 }
 
-// Forward declaration from rRender.h / rVulkanRender.cpp
+// Forward declarations from rVulkanRender.cpp
 void sr_DrawInstancedModelMesh(const void* geometryKey,
                                const rInstanceData* instances, size_t instanceCount,
                                unsigned int textureId);
+uint32_t sr_GetModelMeshCacheVersion_impl();
+
+uint32_t sr_GetModelMeshCacheVersion()
+{
+    return sr_GetModelMeshCacheVersion_impl();
+}
 
 void rEndCycleRendering()
 {

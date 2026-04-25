@@ -333,7 +333,9 @@ VkFormat rVulkanFramebuffer::FindDepthFormat(VkPhysicalDevice physDev)
                              : (format == VK_FORMAT_D32_SFLOAT_S8_UINT) ? "D32_SFLOAT_S8_UINT"
                              : (format == VK_FORMAT_D24_UNORM_S8_UINT)  ? "D24_UNORM_S8_UINT"
                              : "unknown";
+#ifndef NDEBUG
             std::cerr << "[Vulkan] Depth format selected: " << name << "\n";
+#endif
             return format;
         }
     }

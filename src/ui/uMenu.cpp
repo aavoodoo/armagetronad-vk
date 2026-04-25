@@ -391,6 +391,7 @@ void uMenu::OnEnter(){
         // Render menu with full frame lifecycle
         rRenderFrame([&]() {
             sr_ResetRenderState(true);
+            rViewport::s_viewportFullscreen.Select();
             items[selected]->RenderBackground();
 
             if (selected >= items.Len()) selected = items.Len()-1;

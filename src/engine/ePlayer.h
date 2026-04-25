@@ -446,6 +446,7 @@ public:
     static void  ResetScore();  // resets the ranking list
 
     static void DisplayScores(); // display scores on the screen
+    static void ResetDisplayedScores(); // allow DisplayScores() to run again (multi-viewport)
 
     void GreetHighscores(tString &s); // tell him his positions in the
     // highscore lists (defined in game.cpp)

@@ -330,7 +330,9 @@ bool rVulkanContext::PickPhysicalDevice()
     vkGetPhysicalDeviceProperties(physicalDevice_, &deviceProperties_);
     vkGetPhysicalDeviceMemoryProperties(physicalDevice_, &memoryProperties_);
 
+#ifndef NDEBUG
     std::cerr << "[Vulkan] Selected GPU: " << deviceProperties_.deviceName << std::endl;
+#endif
     return true;
 }
 
