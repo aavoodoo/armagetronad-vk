@@ -50,6 +50,7 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 #include "rScreen.h"
 #include "rHUDRenderer.h"
 #include "rRendererState.h"
+#include "rRenderQueue.h"
 #include "eSensor.h"
 #include <iostream>
 #include "eSoundMixer.h"
@@ -723,6 +724,13 @@ static void display_cockpit_lucifer() {
 
     sr_ResetRenderState(true);
 
+    // Flush any HUD geometry submitted by earlier per-frame tasks (console,
+    // scores) at the current fullscreen viewport, BEFORE we change viewport
+    // for per-player cockpit rendering. The HUD queue doesn't track which
+    // viewport each batch was submitted at, so we must drain it at every
+    // viewport boundary.
+    rRenderQueue::Instance().ExecutePhase(rRenderPhase::HUD);
+
     if (!(se_mainGameTimer &&
             se_mainGameTimer->speed > .9 &&
             se_mainGameTimer->speed < 1.1 &&
@@ -764,9 +772,15 @@ static void display_cockpit_lucifer() {
         player_cockpit->SetPlayer(player);
         // delegate
         player_cockpit->Render();
+
+        // Flush cockpit HUD with this viewport's sub-rect active so
+        // the Vulkan viewport maps NDC to the correct screen region.
+        rRenderQueue::Instance().ExecutePhase(rRenderPhase::HUD);
     }
 
     static_cockpit.Render();
+    // Flush global cockpit (clock, FPS) with VIEWPORT_TOP's viewport.
+    rRenderQueue::Instance().ExecutePhase(rRenderPhase::HUD);
 
 #if 0	// Testing ground :)
     vValue::Expr::Core::Base *test = vValue::Parser::parse(tString("10"));

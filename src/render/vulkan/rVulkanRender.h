@@ -261,6 +261,9 @@ public:
                                 const struct rInstanceData* instances, size_t instanceCount,
                                 unsigned int textureId);
 
+    //! Check if a model mesh geometry key is in the instancing cache
+    bool IsModelMeshCached(const void* geometryKey) const;
+
     // === VBO helpers ===
     void PrepareForVBODraw() override;
     void SetTextureEnabled(bool enabled) override;

@@ -501,30 +501,17 @@ void gZone::Render2D(tCoord) const {
     uint8_t cb = static_cast<uint8_t>(color_.b_ * 255.0f);
     uint8_t ca = static_cast<uint8_t>(color_.a_ * 255.0f);
 
-    // Apply zone transform on CPU: rotation + translation
-    auto xform = [&](REAL lx, REAL ly, float &ox, float &oy) {
-        ox = static_cast<float>(rotation_.x * lx - rotation_.y * ly + pos.x);
-        oy = static_cast<float>(rotation_.y * lx + rotation_.x * ly + pos.y);
+    // Use the map's matrix stack for coordinate transformation (same pattern
+    // as gCycle::Render2D). Submit to Sky phase and flush immediately so the
+    // map's matrices and scissor clip are active.
+    PushMatrix();
+    float m[16] = {
+        static_cast<float>(rotation_.x), static_cast<float>(rotation_.y), 0, 0,
+        static_cast<float>(-rotation_.y), static_cast<float>(rotation_.x), 0, 0,
+        0, 0, 1, 0,
+        static_cast<float>(pos.x), static_cast<float>(pos.y), 0, 1
     };
-
-    float mvp[16];
-    RenderGetMVPMatrix(mvp);
-    auto mvpXform = [&](float &x, float &y) {
-        float ix = x, iy = y;
-        x = mvp[0]*ix + mvp[4]*iy + mvp[12];
-        y = mvp[1]*ix + mvp[5]*iy + mvp[13];
-    };
-
-    int vp[4];
-    RenderGetViewport(vp);
-    float fx = float(vp[0]) / sr_screenWidth;
-    float fy = float(vp[1]) / sr_screenHeight;
-    float fw = float(vp[2]) / sr_screenWidth;
-    float fh = float(vp[3]) / sr_screenHeight;
-    auto remap = [&](float &x, float &y) {
-        x = (fx + (x + 1.0f) * 0.5f * fw) * 2.0f - 1.0f;
-        y = (fy + (y + 1.0f) * 0.5f * fh) * 2.0f - 1.0f;
-    };
+    MultMatrix(m);
 
     std::vector<rVertex20> lines;
     lines.reserve(sg_segments * 2);
@@ -533,19 +520,20 @@ void gZone::Render2D(tCoord) const {
         REAL a = i * 2 * 3.14159 / REAL( sg_segments );
         REAL b = a + seglen;
 
-        float x1, y1, x2, y2;
-        xform(rad * sin(a), rad * cos(a), x1, y1);
-        xform(rad * sin(b), rad * cos(b), x2, y2);
-        mvpXform(x1, y1);
-        mvpXform(x2, y2);
-        remap(x1, y1);
-        remap(x2, y2);
+        float x1 = static_cast<float>(rad * sin(a));
+        float y1 = static_cast<float>(rad * cos(a));
+        float x2 = static_cast<float>(rad * sin(b));
+        float y2 = static_cast<float>(rad * cos(b));
         lines.push_back(rVertex20(x1, y1, 0, cr, cg, cb, ca, 0, 0));
         lines.push_back(rVertex20(x2, y2, 0, cr, cg, cb, ca, 0, 0));
     }
 
     rRenderStateKey state = rRenderStateKey::HUD(0, rBlendMode::Alpha);
-    rRenderQueue::Instance().SubmitLines(rRenderPhase::HUD, state, lines.data(), lines.size());
+    rRenderQueue::Instance().SubmitLines(rRenderPhase::Sky, state, lines.data(), lines.size());
+    rRenderQueue::Instance().ExecutePhase(rRenderPhase::Sky);
+    ModelMatrix();
+
+    PopMatrix();
 #endif
 }
 

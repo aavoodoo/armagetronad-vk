@@ -168,6 +168,7 @@ extern bool sr_dither;
 extern bool sr_infinityPlane;
 extern bool sr_laggometer;
 extern bool sr_predictObjects;
+bool sr_ShouldPredictObjects();  //!< Returns sr_predictObjects, but forced false when spectating/dead
 extern bool sr_texturesTruecolor;
 extern bool sr_keepWindowActive;
 

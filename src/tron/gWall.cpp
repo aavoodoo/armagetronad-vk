@@ -2073,7 +2073,7 @@ void gNetPlayerWall::RealWallReceived( gNetPlayerWall* realWall )
         {
             REAL tEndThis = tEnd;
             // cut from the end if we're in prediction mode and this is an enemy wall
-            if ( sr_predictObjects && this->cycle_->currentWall == this && Owner() != sn_myNetID )
+            if ( sr_ShouldPredictObjects() && this->cycle_->currentWall == this && Owner() != sn_myNetID )
             {
                 tEndThis -= this->cycle_->Lag();
             }

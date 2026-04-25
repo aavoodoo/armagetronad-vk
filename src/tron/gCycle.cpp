@@ -4131,11 +4131,16 @@ void LagOMeterRenderer::render(REAL lag) {
     drawTriangle(eCoord(0,0), directions.ahead(), lag, 1, strip1, cr, cg, cb, ca);
     drawTriangle(eCoord(0,0), directions.ahead(), lag, -1, strip2, cr, cg, cb, ca);
 
+    // Submit to Sky phase and flush immediately so the cycle's model matrix
+    // (currently on the stack) is used for push constants. OpaqueDynamic is
+    // flushed later when the model matrix is gone — causing invisible geometry.
     rRenderStateKey state = rRenderStateKey::Colored(rBlendMode::Opaque);
     if (!strip1.empty())
-        rRenderQueue::Instance().SubmitLineStrip(rRenderPhase::OpaqueDynamic, state, strip1.data(), strip1.size());
+        rRenderQueue::Instance().SubmitLineStrip(rRenderPhase::Sky, state, strip1.data(), strip1.size());
     if (!strip2.empty())
-        rRenderQueue::Instance().SubmitLineStrip(rRenderPhase::OpaqueDynamic, state, strip2.data(), strip2.size());
+        rRenderQueue::Instance().SubmitLineStrip(rRenderPhase::Sky, state, strip2.data(), strip2.size());
+    rRenderQueue::Instance().ExecutePhase(rRenderPhase::Sky);
+    ModelMatrix();
 }
 
 
@@ -4165,7 +4170,7 @@ public:
             rVertex20(outer.x, outer.y, 0, 0, 0, 0, 255, 0, 0)  // black
         };
         rRenderStateKey state = rRenderStateKey::Colored(rBlendMode::Opaque);
-        rRenderQueue::Instance().SubmitLineStrip(rRenderPhase::OpaqueDynamic, state, strip, 3);
+        rRenderQueue::Instance().SubmitLineStrip(rRenderPhase::Sky, state, strip, 3);
     }
     void render() {
         //return; // disable, for now
@@ -4173,6 +4178,9 @@ public:
         line(-1);
         line(0);
         line(1);
+        // Flush immediately while the cycle's matrix is active
+        rRenderQueue::Instance().ExecutePhase(rRenderPhase::Sky);
+        ModelMatrix();
     }
 };
 
@@ -4637,16 +4645,15 @@ void gCycle::Render(const eCamera *cam){
                 if (sr_useBatchedCycles && customModel && customTexture)
                 {
                     // Instanced path for moviepack ASE model (single mesh, no wheels)
-                    // Prime cache on first use
-                    static bool s_mpCachePrimed = false;
-                    if (!s_mpCachePrimed)
+                    // Check if this model's geometry is cached; if not, prime via legacy render
+                    bool mpCacheReady = sr_IsModelMeshCached(customModel->GetMesh().GetVertices().data());
+                    if (!mpCacheReady)
                     {
                         PushMatrix();
                         customTexture->Select();
                         Color(1,1,1);
                         customModel->Render();
                         PopMatrix();
-                        s_mpCachePrimed = true;
                     }
 
                     // Build model matrix: the stack already has translate(p)*scale(0.5)*rotate(dir)*skew(ske)
@@ -4705,18 +4712,37 @@ void gCycle::Render(const eCamera *cam){
             ModelMatrix();
 
             // Shadow: draw BEFORE body so the cycle covers it via depth test.
-            // Both share the same modelview (cycle world position).
+            // Vertices must be in world coordinates because the OpaqueDynamic
+            // flush happens after all cycles render (model matrix no longer on stack).
             {
-                REAL h = 0;
                 sr_DepthOffset(true);
                 RenderEnableState(rCapability::CullFace);
                 if(!blinking && sr_floorDetail>rFLOOR_GRID && rTextureGroups::TextureMode[rTextureGroups::TEX_FLOOR]>0 && sr_alphaBlend){
                     cycle_shad.Select();
                     unsigned int texId = RenderGetBoundTexture2D();
-                    rVertex20 sv0(-.6f,  .4f, h, 0, 0, 0, 255, 0.0f, 1.0f);
-                    rVertex20 sv1(-.6f, -.4f, h, 0, 0, 0, 255, 1.0f, 1.0f);
-                    rVertex20 sv2(2.1f, -.4f, h, 0, 0, 0, 255, 1.0f, 0.0f);
-                    rVertex20 sv3(2.1f,  .4f, h, 0, 0, 0, 255, 0.0f, 0.0f);
+
+                    // Transform shadow corners from cycle-local to world coords
+                    // Model transform: translate(p) * scale(0.5) * rotate(dir)
+                    float s = 0.5f;
+                    float dx = dir.x, dy = dir.y;
+                    // Apply translate(-1.5,0,0) offset before rotate+scale
+                    // (the cycle body is shifted so the front aligns with position)
+                    float tx = -1.5f;
+                    auto toWorld = [&](float lx, float ly) -> std::pair<float,float> {
+                        float ox = lx + tx;
+                        float rx = s * (dx * ox - dy * ly);
+                        float ry = s * (dy * ox + dx * ly);
+                        return {static_cast<float>(p.x) + rx, static_cast<float>(p.y) + ry};
+                    };
+                    auto [x0,y0] = toWorld(-.6f,  .4f);
+                    auto [x1,y1] = toWorld(-.6f, -.4f);
+                    auto [x2,y2] = toWorld(2.1f, -.4f);
+                    auto [x3,y3] = toWorld(2.1f,  .4f);
+
+                    rVertex20 sv0(x0, y0, 0, 0, 0, 0, 255, 0.0f, 1.0f);
+                    rVertex20 sv1(x1, y1, 0, 0, 0, 0, 255, 1.0f, 1.0f);
+                    rVertex20 sv2(x2, y2, 0, 0, 0, 0, 255, 1.0f, 0.0f);
+                    rVertex20 sv3(x3, y3, 0, 0, 0, 0, 255, 0.0f, 0.0f);
                     rRenderStateKey state = rRenderStateKey::Textured(texId, rBlendMode::Alpha);
                     rRenderQueue::Instance().SubmitQuad(rRenderPhase::OpaqueDynamic, state, sv0, sv1, sv2, sv3);
                 }
@@ -4726,13 +4752,18 @@ void gCycle::Render(const eCamera *cam){
 
             if ( !blinking && body && bodyTex && rear && front && wheelTex )
             {
-                // Prime the model mesh cache by rendering once via legacy path.
-                // The instanced path needs cached rVertexLit32 data from DrawModelMesh.
-                static bool s_cachePrimed = false;
-                if (sr_useBatchedCycles && !s_cachePrimed)
+                // Check if this cycle's specific models are in the instancing cache.
+                // Each cycle may use different model objects (different moviepacks,
+                // model paths). If any part is missing, render via legacy path once
+                // to populate the cache, then switch to instanced next frame.
+                bool cacheReady = sr_useBatchedCycles
+                    && sr_IsModelMeshCached(body->GetMesh().GetVertices().data())
+                    && sr_IsModelMeshCached(rear->GetMesh().GetVertices().data())
+                    && sr_IsModelMeshCached(front->GetMesh().GetVertices().data());
+
+                if (sr_useBatchedCycles && !cacheReady)
                 {
-                    // Render all three parts once to populate the cache, then
-                    // immediately switch to instanced for subsequent frames.
+                    // Render via legacy path to populate the cache
                     bodyTex->Select(); body->Render();
                     wheelTex->Select();
                     PushMatrix(); TranslateMatrix(0,0,.73);
@@ -4741,10 +4772,9 @@ void gCycle::Render(const eCamera *cam){
                     PushMatrix(); TranslateMatrix(1.84,0,.43);
                     REAL mf0[4][4]={{rotationFrontWheel.x,0,rotationFrontWheel.y,0},{0,1,0,0},{-rotationFrontWheel.y,0,rotationFrontWheel.x,0},{0,0,0,1}};
                     MultMatrix(mf0); front->Render(); PopMatrix();
-                    s_cachePrimed = true;
                 }
 
-                if (sr_useBatchedCycles)
+                if (cacheReady)
                 {
                     // Instanced path: compute model matrices and submit instances.
                     // The current modelview stack has: translate(p) * scale(0.5) * rotate(dir) * translate(-1.5,0,0) * skew(ske)
@@ -4939,41 +4969,47 @@ void gCycle::Render(const eCamera *cam){
 
             if ( renderPyramid )
             {
-                REAL s=sin(lastTime);
-                REAL c=cos(lastTime);
+                REAL st=sin(lastTime);
+                REAL ct=cos(lastTime);
 
-                REAL m[4][4]={{c,s,0,0},
-                              {-s,c,0,0},
-                              {0,0,1,0},
-                              {0,0,1,1}};
+                // Pre-transform pyramid vertices to world coordinates.
+                // Model transform: Translate(p) * Scale(0.5) * Rotate(dir) * Rotate(time) * Scale(0.5)
+                // Combined scale = 0.25, combined 2D rotation = dir * time_rot
+                float sc = 0.25f;
+                float dx = dir.x, dy = dir.y;
+                // Combined 2D rotation: dir * (ct, st) = (dx*ct - dy*st, dy*ct + dx*st)
+                float rdx = dx*ct - dy*st;
+                float rdy = dy*ct + dx*st;
+                float px = p.x, py = p.y;
+                auto toWorld = [&](float lx, float ly, float lz) -> rVertex20 {
+                    float wx = px + sc * (rdx * lx - rdy * ly);
+                    float wy = py + sc * (rdy * lx + rdx * ly);
+                    float wz = sc * lz;
+                    return rVertex20(wx, wy, wz, 0, 0, 0, 0, 0, 0); // color set below
+                };
 
-                PushMatrix();
+                uint8_t pr = static_cast<uint8_t>(colorPyramid.r_ * 255.0f);
+                uint8_t pg = static_cast<uint8_t>(colorPyramid.g_ * 255.0f);
+                uint8_t pb = static_cast<uint8_t>(colorPyramid.b_ * 255.0f);
+                uint8_t pa = static_cast<uint8_t>(alpha * 255.0f);
+                uint8_t dr = static_cast<uint8_t>(colorPyramid.r_ * .7f * 255.0f);
+                uint8_t dg = static_cast<uint8_t>(colorPyramid.g_ * .7f * 255.0f);
+                uint8_t db = static_cast<uint8_t>(colorPyramid.b_ * .7f * 255.0f);
 
-                MultMatrix(m);
-                ScaleMatrix(.5,.5,.5);
+                auto v0 = toWorld(0, 0, 3);    auto v1 = toWorld(0, 1, 4.5f);
+                auto v2 = toWorld(0, -1, 4.5f); auto v3 = toWorld(0, 0, 3);
+                auto v4 = toWorld(1, 0, 4.5f);  auto v5 = toWorld(-1, 0, 4.5f);
 
-
-                {
-                    uint8_t pr = static_cast<uint8_t>(colorPyramid.r_ * 255.0f);
-                    uint8_t pg = static_cast<uint8_t>(colorPyramid.g_ * 255.0f);
-                    uint8_t pb = static_cast<uint8_t>(colorPyramid.b_ * 255.0f);
-                    uint8_t pa = static_cast<uint8_t>(alpha * 255.0f);
-                    uint8_t dr = static_cast<uint8_t>(colorPyramid.r_ * .7f * 255.0f);
-                    uint8_t dg = static_cast<uint8_t>(colorPyramid.g_ * .7f * 255.0f);
-                    uint8_t db = static_cast<uint8_t>(colorPyramid.b_ * .7f * 255.0f);
-                    rVertex20 tri[6] = {
-                        rVertex20(0, 0, 3, pr, pg, pb, pa, 0, 0),
-                        rVertex20(0, 1, 4.5f, pr, pg, pb, pa, 0, 0),
-                        rVertex20(0, -1, 4.5f, pr, pg, pb, pa, 0, 0),
-                        rVertex20(0, 0, 3, dr, dg, db, pa, 0, 0),
-                        rVertex20(1, 0, 4.5f, dr, dg, db, pa, 0, 0),
-                        rVertex20(-1, 0, 4.5f, dr, dg, db, pa, 0, 0)
-                    };
-                    rRenderStateKey state = rRenderStateKey::Colored(rBlendMode::Alpha);
-                    rRenderQueue::Instance().Submit(rRenderPhase::OpaqueDynamic, state, tri, 6);
-                }
-
-                PopMatrix();
+                rVertex20 tri[6] = {
+                    rVertex20(v0.position[0], v0.position[1], v0.position[2], pr, pg, pb, pa, 0, 0),
+                    rVertex20(v1.position[0], v1.position[1], v1.position[2], pr, pg, pb, pa, 0, 0),
+                    rVertex20(v2.position[0], v2.position[1], v2.position[2], pr, pg, pb, pa, 0, 0),
+                    rVertex20(v3.position[0], v3.position[1], v3.position[2], dr, dg, db, pa, 0, 0),
+                    rVertex20(v4.position[0], v4.position[1], v4.position[2], dr, dg, db, pa, 0, 0),
+                    rVertex20(v5.position[0], v5.position[1], v5.position[2], dr, dg, db, pa, 0, 0)
+                };
+                rRenderStateKey state = rRenderStateKey::Colored(rBlendMode::Alpha);
+                rRenderQueue::Instance().Submit(rRenderPhase::OpaqueDynamic, state, tri, 6);
             }
         }
 
@@ -5013,7 +5049,7 @@ void gCycle::Render(const eCamera *cam){
                 ScaleMatrix(f,f,f);
 
                 // move the sr_laggometer ahead a bit
-                if (!sr_predictObjects || sn_GetNetState()==nSERVER)
+                if (!sr_ShouldPredictObjects() || sn_GetNetState()==nSERVER)
                     TranslateMatrix(l,0,0);
 
 
@@ -5037,7 +5073,9 @@ void gCycle::Render(const eCamera *cam){
                     // Close the loop
                     loopVerts.push_back(loopVerts[0]);
                     rRenderStateKey state = rRenderStateKey::Colored(rBlendMode::Opaque);
-                    rRenderQueue::Instance().SubmitLineStrip(rRenderPhase::OpaqueDynamic, state, loopVerts.data(), loopVerts.size());
+                    rRenderQueue::Instance().SubmitLineStrip(rRenderPhase::Sky, state, loopVerts.data(), loopVerts.size());
+                    rRenderQueue::Instance().ExecutePhase(rRenderPhase::Sky);
+                    ModelMatrix();
                 }
                 PopMatrix();
             }
@@ -5058,7 +5096,7 @@ void gCycle::Render(const eCamera *cam){
             ScaleMatrix(f,f,f);
 
             // move the sr_laggometer back a bit
-            if (sr_predictObjects || sn_GetNetState()==nSERVER) {
+            if (sr_ShouldPredictObjects() || sn_GetNetState()==nSERVER) {
                 TranslateMatrix(-l,0,0);
             }
 

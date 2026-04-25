@@ -39,6 +39,10 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 // Utility: viewport remapping
 //=============================================================================
 
+// When rendering into a per-viewport FBO, the viewport IS the full render
+// target — the HUD phase must NOT reset viewport to fullscreen.
+bool sr_inViewportFBO = false;
+
 //=============================================================================
 // Phase configuration
 //=============================================================================
@@ -228,9 +232,10 @@ void rRenderQueue::ApplyPhaseState(rRenderPhase phase)
     if (config.clearDepth)
         RenderClear(false, true);
 
-    // HUD phase: identity matrices. The viewport is NOT reset — HUD vertices
-    // are in the current viewport's NDC space, and the Vulkan viewport command
-    // maps NDC [-1,1] to the correct pixel region automatically.
+    // HUD phase: identity matrices. The viewport is NOT reset here —
+    // callers are responsible for setting the correct viewport before
+    // calling ExecutePhase(HUD). Cockpit renders at per-player sub-viewports,
+    // while global overlays (console, menu, logo) set fullscreen first.
     if (phase == rRenderPhase::HUD)
     {
         ModelMatrix();

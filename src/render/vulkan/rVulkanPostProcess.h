@@ -217,8 +217,11 @@ public:
 
     //! Called from RecreateSwapchain to rebuild offscreen images at the new size.
     //! If the feature is disabled, this is a no-op.
+    //! @param oldSwapchainRP The render pass that was destroyed by framebuffer_.Destroy()
+    //!        before this call — effect passes may hold stale copies of it.
     bool OnSwapchainResized(rVulkanContext& ctx, uint32_t width, uint32_t height,
-                            VkRenderPass swapchainRenderPass);
+                            VkRenderPass swapchainRenderPass,
+                            VkRenderPass oldSwapchainRP = VK_NULL_HANDLE);
 
     //! Set the active effect by name. Unknown name falls back to passthrough.
     //! The first time a given effect is activated it gets lazily loaded from

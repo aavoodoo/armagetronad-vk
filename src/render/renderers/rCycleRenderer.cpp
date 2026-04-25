@@ -30,6 +30,7 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 #ifndef DEDICATED
 
 #include "rRender.h"
+#include "rRendererState.h"
 #include "tConfiguration.h"
 
 #include <vector>
@@ -166,12 +167,19 @@ void rEndCycleRendering()
         groups[key].push_back(ci.instance);
     }
 
+    // Set render context to Cycles so the emissive shader hook fires
+    // (instanced draws happen after individual Render() calls restored the context)
+    rRenderContext prevCtx = sr_GetRenderContext();
+    sr_SetRenderContext(rRenderContext::Game3D_Cycles);
+
     // Draw each group with one instanced draw call
     for (const auto& [key, instances] : groups)
     {
         sr_DrawInstancedModelMesh(key.geometry, instances.data(), instances.size(), key.texture);
         sg_cycleStats.drawCalls++;
     }
+
+    sr_SetRenderContext(prevCtx);
 
     sg_cycleStats.cyclesRendered = sg_cycleInstances.size();
 }

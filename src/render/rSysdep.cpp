@@ -1188,10 +1188,10 @@ void rSysDep::SwapGL(){
     rPerFrameTaskRuby::DoPerFrameTasks();
 #endif
 
-    // Execute HUD phase for geometry submitted by per-frame tasks (console,
-    // cockpit, text fields). The main render callback already executed its own
-    // HUD phase, but ExecutePhase clears buckets after rendering, so this
-    // only renders what per-frame tasks submitted. No-op if nothing was queued.
+    // Reset viewport to fullscreen for any remaining global HUD elements
+    // (console, text fields). Per-viewport cockpit HUD was already flushed
+    // by display_cockpit_lucifer at each player's sub-viewport.
+    RenderViewport(0, 0, sr_screenWidth, sr_screenHeight);
     rRenderQueue::Instance().ExecutePhase(rRenderPhase::HUD);
 
     // unlock the mutex while waiting for the swap operation to finish

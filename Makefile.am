@@ -134,9 +134,6 @@ nobase_shader_DATA=\
 	shaders/postprocess/postprocess_params.glsl \
 	shaders/postprocess/passthrough/passthrough.frag \
 	shaders/postprocess/passthrough/passthrough.pipeline \
-	shaders/postprocess/celshading/celshading.frag \
-	shaders/postprocess/celshading/celshading.pipeline \
-	shaders/postprocess/celshading/celshading.meta \
 	shaders/postprocess/bloom/bloom.pipeline \
 	shaders/postprocess/bloom/bloom.meta \
 	shaders/postprocess/bloom/bloom_blur.glsl \
@@ -150,7 +147,6 @@ nobase_shader_DATA=\
 	shaders/postprocess/depthviz/depthviz.meta
 
 moviepack_DATA=\
-	moviepacks/armagetronadGL3.aamvp.zip \
 	moviepacks/gltron.aamvp.zip \
 	moviepacks/original.aamvp.zip
 

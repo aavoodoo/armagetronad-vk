@@ -387,10 +387,12 @@ void rModel::Render(){
 }
 #endif
 
+#ifndef DEDICATED
 rModelMesh& rModel::GetMesh(){
     if (!meshBuilt_) BuildMesh();
     return *mesh_;
 }
+#endif
 
 rModel::~rModel(){
     tCHECK_DEST;

@@ -849,7 +849,7 @@ void eGameObject::TimestepThisWrapper(eGrid * grid, REAL currentTime, eGameObjec
     REAL simTime=currentTime;
     // backdate the object a bit
 #ifndef DEDICATED
-    if (sn_GetNetState()==nCLIENT && !sr_predictObjects)
+    if (sn_GetNetState()==nCLIENT && !sr_ShouldPredictObjects())
 #endif
         simTime -= c->Lag();
 

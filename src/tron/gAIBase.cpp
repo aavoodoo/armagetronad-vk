@@ -1965,7 +1965,7 @@ void gAIPlayer::ThinkCloseCombat( ThinkData & data )
 
         // redo the prediction
 #ifndef DEDICATED
-        if (sn_GetNetState()==nCLIENT && !sr_predictObjects)
+        if (sn_GetNetState()==nCLIENT && !sr_ShouldPredictObjects())
 #endif
             enemypos=enemypos-enemydir*enemydist;
         enemydist+=2*REACTION *enemyspeed;

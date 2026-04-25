@@ -104,6 +104,28 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 #include "gArena.h"
 gArena Arena;
 
+// Returns sr_predictObjects, but forced false when the local player is
+// spectating or dead. Prediction makes walls extend past their real position
+// which looks wrong when watching other players.
+bool sr_ShouldPredictObjects()
+{
+#ifndef DEDICATED
+    if (!sr_predictObjects)
+        return false;
+    // Check if the first local player is alive
+    ePlayer* p = ePlayer::PlayerConfig(0);
+    if (p)
+    {
+        ePlayerNetID* pni = p->netPlayer;
+        if (!pni || !pni->Object() || !pni->Object()->Alive())
+            return false;
+    }
+    return true;
+#else
+    return false;
+#endif
+}
+
 static gTutorialBase * sg_tutorial = NULL;
 
 #pragma GCC diagnostic push
@@ -2237,19 +2259,23 @@ static void PlayerLogIn()
 }
 
 void sg_DisplayVersionInfo() {
-    tOutput versionInfo;
+    tOutput title;
+    title << "About Armagetron Advanced";
 
-    versionInfo << "$version_info_gl_vendor";
-    versionInfo << gl_vendor;
-    versionInfo << "$version_info_gl_renderer";
-    versionInfo << gl_renderer;
-    versionInfo << "$version_info_gl_version";
-    versionInfo << gl_version;
-    versionInfo << "\n\n";
-    versionInfo << "$version_info_version" << "\n";
-    versionInfo << "$version_info_misc_stuff";
+    tOutput info;
+    info << "\n--- Renderer ---\n";
+    info << "Vendor:   ";
+    info << gl_vendor;
+    info << "\nDevice:   ";
+    info << gl_renderer;
+    info << "\nVersion:  ";
+    info << gl_version;
+    info << "\n\n--- Game ---\n";
+    info << "Version:  " VERSION "\n";
+    info << "\nWebsite:  https://armagetronad.net/\n";
+    info << "Forums:   https://forums3.armagetronad.net/\n";
 
-    sg_ClientFullscreenMessage("$version_info_title", versionInfo, 1000);
+    sg_ClientFullscreenMessage(title, info, 1000);
 }
 
 void sg_StartupPlayerMenu();

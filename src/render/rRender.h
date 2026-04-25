@@ -659,6 +659,7 @@ void sr_vkRequestSwapchainRecreation();
 
 //! Per-viewport FBO management for split-screen depth isolation.
 //! Each viewport gets its own color+depth framebuffer, composited onto the swapchain.
+extern bool sr_inViewportFBO;  //!< True while rendering into a viewport FBO
 void sr_BeginViewportFBO(int index, int totalViewports, int x, int y, int w, int h);
 void sr_EndViewportFBO();
 void sr_CompositeViewportFBOs(int count, const int viewportRects[][4], const int viewportRotations[] = nullptr);
@@ -668,6 +669,13 @@ struct rInstanceData;
 void sr_DrawInstancedModelMesh(const void* geometryKey,
                                const rInstanceData* instances, size_t instanceCount,
                                unsigned int textureId);
+
+//! Incremented when the model mesh cache is invalidated (e.g. shader reload).
+//! Cycle renderers compare against their last priming version to re-prime.
+extern int sr_modelCacheVersion;
+
+//! Check if a model mesh is already in the instancing cache.
+bool sr_IsModelMeshCached(const void* geometryKey);
 
 //! Initialize the renderer
 void sr_InitRenderer(bool useGL3 = false);

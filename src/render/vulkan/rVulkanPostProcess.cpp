@@ -125,11 +125,16 @@ void rVulkanPostProcess::SetEnabled(bool enabled)
 }
 
 bool rVulkanPostProcess::OnSwapchainResized(rVulkanContext& ctx, uint32_t width, uint32_t height,
-                                            VkRenderPass swapchainRenderPass)
+                                            VkRenderPass swapchainRenderPass,
+                                            VkRenderPass oldSwapchainRP)
 {
     ctx_ = &ctx;
     width_ = width;
     height_ = height;
+    // Save old handles BEFORE updating — effect passes may hold stale copies
+    // of the old swapchain/offscreen render passes (already destroyed by caller).
+    VkRenderPass oldSwapRP = (oldSwapchainRP != VK_NULL_HANDLE) ? oldSwapchainRP : swapchainRenderPass_;
+    VkRenderPass oldSceneRP = offscreenRenderPass_;
     swapchainRenderPass_ = swapchainRenderPass;
 
     if (!enabled_) return true;
@@ -141,10 +146,14 @@ bool rVulkanPostProcess::OnSwapchainResized(rVulkanContext& ctx, uint32_t width,
         VkDevice dev = ctx.GetDevice();
         for (auto& pass : pair.second.passes)
         {
+            if (pass.pipeline)   vkDestroyPipeline(dev, pass.pipeline, nullptr);
             if (pass.fragShader) vkDestroyShaderModule(dev, pass.fragShader, nullptr);
             if (pass.descSet[0]) vkFreeDescriptorSets(dev, pair.second.descriptorPool, 1, &pass.descSet[0]);
             if (pass.framebuffer) vkDestroyFramebuffer(dev, pass.framebuffer, nullptr);
-            if (pass.renderPass) vkDestroyRenderPass(dev, pass.renderPass, nullptr);
+            // Don't destroy render passes that belong to the swapchain or offscreen
+            // (they're destroyed separately by framebuffer_.Destroy / DestroyOffscreen)
+            if (pass.renderPass && pass.renderPass != oldSwapRP && pass.renderPass != oldSceneRP)
+                vkDestroyRenderPass(dev, pass.renderPass, nullptr);
         }
         pair.second.pool.Destroy(dev);
         if (pair.second.descriptorPool) vkDestroyDescriptorPool(dev, pair.second.descriptorPool, nullptr);
@@ -918,6 +927,7 @@ rVulkanPostProcess::Effect* rVulkanPostProcess::EnsureEffectLoaded(const std::st
 
     VkDescriptorPoolCreateInfo dpCI{};
     dpCI.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+    dpCI.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
     dpCI.maxSets = numPasses;
     dpCI.poolSizeCount = 1;
     dpCI.pPoolSizes = &dpSize;

@@ -59,6 +59,9 @@ static float s_arenaBoundsHigh[2] = { 100.0f,  100.0f};
 // push constants to dispatch per-component hook functions.
 int s_renderContextId = 0;
 
+// Model mesh cache version — incremented on cache clear so cycle renderers re-prime.
+int sr_modelCacheVersion = 0;
+
 // Informational logging — guarded to reduce stderr spam in production.
 // Error logging (compile failures, VK errors) is always on.
 #ifdef NDEBUG
@@ -359,12 +362,17 @@ bool vkRenderer::Init(SDL_Window* window)
         tString instVertPath = tDirectories::Data().GetReadPath("shaders/uber_instanced.vert");
         if (instVertPath.Len() > 1)
         {
+            std::cerr << "[Vulkan] Compiling instanced vert: " << static_cast<const char*>(instVertPath) << std::endl;
             std::string instErr;
             vertShaderInstanced_ = rVulkanShader::CompileFromFile(
                 device, static_cast<const char*>(instVertPath),
                 rVulkanShader::Stage::Vertex, includePaths, &instErr);
             if (vertShaderInstanced_ == VK_NULL_HANDLE)
                 std::cerr << "[Vulkan] Instanced vert compile failed:\n" << instErr << "\n";
+        }
+        else
+        {
+            std::cerr << "[Vulkan] WARNING: Instanced shader not found at shaders/uber_instanced.vert — instancing disabled\n";
         }
 
         // Fragment shader: moviepack/shaders/uber.frag → shaders/uber.frag
@@ -643,14 +651,20 @@ bool vkRenderer::RecreateSwapchain(int width, int height)
     }
 
     // Invalidate pipelines that referenced the old (now destroyed) render pass,
-    // then switch to the new one. Pipelines for other render passes (FBOs) survive.
+    // then switch to the new one. Also invalidate post-process and viewport FBO
+    // pipelines since those render passes are rebuilt during resize.
     pipelineManager_.InvalidateRenderPass(oldRenderPass);
+    if (postProcess_.GetSceneRenderPass() != VK_NULL_HANDLE)
+        pipelineManager_.InvalidateRenderPass(postProcess_.GetSceneRenderPass());
+    if (viewportRenderPass_ != VK_NULL_HANDLE)
+        pipelineManager_.InvalidateRenderPass(viewportRenderPass_);
     pipelineManager_.SetRenderPass(framebuffer_.GetRenderPass());
 
     // Rebuild the post-process offscreen target at the new swapchain extent.
     // If PP is disabled this is a cheap no-op (it just records the new size).
+    // Pass the old (destroyed) render pass so PP can skip destroying stale copies.
     postProcess_.OnSwapchainResized(context_, width, height,
-                                    framebuffer_.GetRenderPass());
+                                    framebuffer_.GetRenderPass(), oldRenderPass);
 
     // Resize semaphores if swapchain image count changed
     uint32_t newImageCount = swapchain_.GetImageCount();
@@ -681,6 +695,30 @@ bool vkRenderer::RecreateSwapchain(int width, int height)
     sr_screenHeight = static_cast<int>(swapchain_.GetExtent().height);
 
     needsSwapchainRecreation_ = false;
+
+    // Transition all new swapchain images from UNDEFINED to PRESENT_SRC_KHR.
+    // Without this, the first few presents after resize trigger validation errors
+    // because images haven't been through a render pass yet.
+    {
+        VkCommandBuffer cmd = rVulkanBufferManager::BeginSingleTimeCommands(
+            context_.GetDevice(), commandPool_);
+        for (uint32_t i = 0; i < swapchain_.GetImageCount(); i++)
+        {
+            VkImageMemoryBarrier barrier{};
+            barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+            barrier.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+            barrier.newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+            barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            barrier.image = swapchain_.GetImages()[i];
+            barrier.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+            vkCmdPipelineBarrier(cmd,
+                VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                0, 0, nullptr, 0, nullptr, 1, &barrier);
+        }
+        rVulkanBufferManager::EndSingleTimeCommands(
+            context_.GetDevice(), commandPool_, context_.GetGraphicsQueue(), cmd);
+    }
 
     // Notify the game that the screen dimensions changed so cockpit widgets
     // and other layout-dependent code can readjust.
@@ -1109,6 +1147,7 @@ void vkRenderer::BeginFrame()
 
 void vkRenderer::SwapBuffers()
 {
+
     if (!frameStarted_)
         BeginFrame();
     EndFrame();
@@ -2628,6 +2667,7 @@ void vkRenderer::BeginViewportFBO(int index, int totalViewports, int x, int y, i
     vkCmdSetDepthBias(cmd, 0.0f, 0.0f, 0.0f);
 
     activeViewportFBO_ = index;
+    sr_inViewportFBO = true;
 }
 
 void vkRenderer::EndViewportFBO()
@@ -2704,6 +2744,7 @@ void vkRenderer::EndViewportFBO()
     vkCmdSetScissor(cmd, 0, 1, &scissor);
 
     activeViewportFBO_ = -1;
+    sr_inViewportFBO = false;
 
 }
 
@@ -2789,6 +2830,19 @@ void sr_DrawInstancedModelMesh(const void* geometryKey,
                                unsigned int textureId)
 {
     if (s_vkRenderer) s_vkRenderer->DrawInstancedModelMesh(geometryKey, instances, instanceCount, textureId);
+}
+
+bool sr_IsModelMeshCached(const void* geometryKey)
+{
+    if (!s_vkRenderer || !geometryKey) return false;
+    return s_vkRenderer->IsModelMeshCached(geometryKey);
+}
+
+bool vkRenderer::IsModelMeshCached(const void* geometryKey) const
+{
+    auto key = reinterpret_cast<uintptr_t>(geometryKey);
+    auto it = modelMeshCache_.find(key);
+    return it != modelMeshCache_.end() && !it->second.litVerts.empty();
 }
 
 void sr_BeginViewportFBO(int index, int totalViewports, int x, int y, int w, int h)
@@ -3152,7 +3206,15 @@ void vkRenderer::DrawInstancedModelMesh(const void* geometryKey,
     // Look up cached geometry by key
     auto cacheKey = reinterpret_cast<uintptr_t>(geometryKey);
     auto it = modelMeshCache_.find(cacheKey);
-    if (it == modelMeshCache_.end() || it->second.litVerts.empty()) return;
+    if (it == modelMeshCache_.end() || it->second.litVerts.empty())
+    {
+        static int s_warnCount = 0;
+        if (s_warnCount++ < 10)
+            std::cerr << "[Vulkan] DrawInstancedModelMesh: cache miss for key 0x"
+                      << std::hex << cacheKey << std::dec
+                      << " (cache size=" << modelMeshCache_.size() << ")\n";
+        return;
+    }
 
     const auto& entry = it->second;
 
@@ -3381,6 +3443,7 @@ void vkRenderer::ReloadShaders()
     // Invalidate model mesh cache — models may have changed (moviepack switch)
     // and the pointer-based cache keys could alias freed memory.
     modelMeshCache_.clear();
+    sr_modelCacheVersion++;
 
     pipelineManager_.Destroy();
     if (vertShader_         != VK_NULL_HANDLE) vkDestroyShaderModule(device, vertShader_, nullptr);

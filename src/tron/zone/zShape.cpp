@@ -575,33 +575,17 @@ void zShapeCircle::Render2D(tCoord scale) const {
     uint8_t cb = static_cast<uint8_t>(color_.b_ * 255.0f);
     uint8_t ca = static_cast<uint8_t>(color_.a_ * 255.0f);
 
-    // Apply zone transform to vertices on CPU
-    // m = rotation + translation (column-major)
-    auto xform = [&](REAL lx, REAL ly, float &ox, float &oy) {
-        ox = static_cast<float>(rot.x * lx - rot.y * ly + px);
-        oy = static_cast<float>(rot.y * lx + rot.x * ly + py);
+    // Use the map's matrix stack for coordinate transformation (same pattern
+    // as gCycle::Render2D). Submit to Sky phase and flush immediately so the
+    // map's matrices and scissor clip are active.
+    PushMatrix();
+    float m[16] = {
+        static_cast<float>(rot.x), static_cast<float>(rot.y), 0, 0,
+        static_cast<float>(-rot.y), static_cast<float>(rot.x), 0, 0,
+        0, 0, 1, 0,
+        static_cast<float>(px), static_cast<float>(py), 0, 1
     };
-
-    // Get MVP to transform from map space to clip space
-    float mvp[16];
-    RenderGetMVPMatrix(mvp);
-    auto mvpXform = [&](float &x, float &y) {
-        float ix = x, iy = y;
-        x = mvp[0]*ix + mvp[4]*iy + mvp[12];
-        y = mvp[1]*ix + mvp[5]*iy + mvp[13];
-    };
-
-    // Viewport remap
-    int vp[4];
-    RenderGetViewport(vp);
-    float fx = float(vp[0]) / sr_screenWidth;
-    float fy = float(vp[1]) / sr_screenHeight;
-    float fw = float(vp[2]) / sr_screenWidth;
-    float fh = float(vp[3]) / sr_screenHeight;
-    auto remap = [&](float &x, float &y) {
-        x = (fx + (x + 1.0f) * 0.5f * fw) * 2.0f - 1.0f;
-        y = (fy + (y + 1.0f) * 0.5f * fh) * 2.0f - 1.0f;
-    };
+    MultMatrix(m);
 
     // Generate line segments for each arc
     std::vector<rVertex20> lines;
@@ -616,15 +600,8 @@ void zShapeCircle::Render2D(tCoord scale) const {
             REAL sb = effectiveRadius * sin(b);
             REAL lb = effectiveRadius * cos(b);
 
-            float x1, y1, x2, y2;
-            xform(sa, la, x1, y1);
-            xform(sb, lb, x2, y2);
-            mvpXform(x1, y1);
-            mvpXform(x2, y2);
-            remap(x1, y1);
-            remap(x2, y2);
-            lines.push_back(rVertex20(x1, y1, 0, cr, cg, cb, ca, 0, 0));
-            lines.push_back(rVertex20(x2, y2, 0, cr, cg, cb, ca, 0, 0));
+            lines.push_back(rVertex20(static_cast<float>(sa), static_cast<float>(la), 0, cr, cg, cb, ca, 0, 0));
+            lines.push_back(rVertex20(static_cast<float>(sb), static_cast<float>(lb), 0, cr, cg, cb, ca, 0, 0));
 
             a = b;
             sa = sb;
@@ -633,7 +610,11 @@ void zShapeCircle::Render2D(tCoord scale) const {
     }
 
     rRenderStateKey state = rRenderStateKey::HUD(0, rBlendMode::Alpha);
-    rRenderQueue::Instance().SubmitLines(rRenderPhase::HUD, state, lines.data(), lines.size());
+    rRenderQueue::Instance().SubmitLines(rRenderPhase::Sky, state, lines.data(), lines.size());
+    rRenderQueue::Instance().ExecutePhase(rRenderPhase::Sky);
+    ModelMatrix();
+
+    PopMatrix();
 #endif
 }
 
@@ -857,32 +838,16 @@ void zShapePolygon::Render2D(tCoord scale) const {
     uint8_t cb = static_cast<uint8_t>(color_.b_ * 255.0f);
     uint8_t ca = static_cast<uint8_t>(color_.a_ * 255.0f);
 
-    // Transform: translate + scale + rotate applied on CPU
-    auto xform = [&](REAL lx, REAL ly, float &ox, float &oy) {
-        float sx = sc * static_cast<float>(lx);
-        float sy = sc * static_cast<float>(ly);
-        ox = static_cast<float>(px) + cosA * sx - sinA * sy;
-        oy = static_cast<float>(py) + sinA * sx + cosA * sy;
+    // Use the map's matrix stack for coordinate transformation (same pattern
+    // as gCycle::Render2D). Submit to Sky phase and flush immediately.
+    PushMatrix();
+    float m[16] = {
+        cosA * sc, sinA * sc, 0, 0,
+        -sinA * sc, cosA * sc, 0, 0,
+        0, 0, 1, 0,
+        static_cast<float>(px), static_cast<float>(py), 0, 1
     };
-
-    float mvp[16];
-    RenderGetMVPMatrix(mvp);
-    auto mvpXform = [&](float &x, float &y) {
-        float ix = x, iy = y;
-        x = mvp[0]*ix + mvp[4]*iy + mvp[12];
-        y = mvp[1]*ix + mvp[5]*iy + mvp[13];
-    };
-
-    int vp[4];
-    RenderGetViewport(vp);
-    float fx = float(vp[0]) / sr_screenWidth;
-    float fy = float(vp[1]) / sr_screenHeight;
-    float fw = float(vp[2]) / sr_screenWidth;
-    float fh = float(vp[3]) / sr_screenHeight;
-    auto remap = [&](float &x, float &y) {
-        x = (fx + (x + 1.0f) * 0.5f * fw) * 2.0f - 1.0f;
-        y = (fy + (y + 1.0f) * 0.5f * fh) * 2.0f - 1.0f;
-    };
+    MultMatrix(m);
 
     std::vector<rVertex20> lines;
     lines.reserve(points.size() * 2);
@@ -892,24 +857,20 @@ void zShapePolygon::Render2D(tCoord scale) const {
 
     for(iter = points.begin(); iter != points.end(); prevIter = iter++)
     {
-        REAL xp = (*iter).first.Evaluate( lasttime_ - referencetime_ );
-        REAL yp = (*iter).second.Evaluate( lasttime_ - referencetime_ );
-        REAL xpp = (*prevIter).first.Evaluate( lasttime_ - referencetime_ );
-        REAL ypp = (*prevIter).second.Evaluate( lasttime_ - referencetime_ );
-
-        float x1, y1, x2, y2;
-        xform(xp, yp, x1, y1);
-        xform(xpp, ypp, x2, y2);
-        mvpXform(x1, y1);
-        mvpXform(x2, y2);
-        remap(x1, y1);
-        remap(x2, y2);
+        float x1 = static_cast<float>((*iter).first.Evaluate( lasttime_ - referencetime_ ));
+        float y1 = static_cast<float>((*iter).second.Evaluate( lasttime_ - referencetime_ ));
+        float x2 = static_cast<float>((*prevIter).first.Evaluate( lasttime_ - referencetime_ ));
+        float y2 = static_cast<float>((*prevIter).second.Evaluate( lasttime_ - referencetime_ ));
         lines.push_back(rVertex20(x1, y1, 0, cr, cg, cb, ca, 0, 0));
         lines.push_back(rVertex20(x2, y2, 0, cr, cg, cb, ca, 0, 0));
     }
 
     rRenderStateKey state = rRenderStateKey::HUD(0, rBlendMode::Alpha);
-    rRenderQueue::Instance().SubmitLines(rRenderPhase::HUD, state, lines.data(), lines.size());
+    rRenderQueue::Instance().SubmitLines(rRenderPhase::Sky, state, lines.data(), lines.size());
+    rRenderQueue::Instance().ExecutePhase(rRenderPhase::Sky);
+    ModelMatrix();
+
+    PopMatrix();
 #endif
 }
 
