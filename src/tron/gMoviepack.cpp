@@ -767,6 +767,17 @@ bool gMoviepackManager::ExtractZipToDirectory(const tString& zipPath,
         }
         else
         {
+            // Ensure parent directories exist (ZIP entries may not list
+            // intermediate directories explicitly, causing extract to fail)
+            {
+                std::string dp = static_cast<char const*>(destPath);
+                for (size_t pos = dp.find('/', destDir.Len()); pos != std::string::npos; pos = dp.find('/', pos + 1))
+                {
+                    std::string parent = dp.substr(0, pos);
+                    MKDIR_COMPAT(parent.c_str());
+                }
+            }
+
             // Extract file
             if (!mz_zip_reader_extract_to_file(&zip, i, static_cast<char const*>(destPath), 0))
             {

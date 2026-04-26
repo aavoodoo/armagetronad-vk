@@ -40,6 +40,7 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 #include "eSensor.h"
 #include "eCamera.h"
 #include "rScreen.h"
+#include "rRendererState.h"
 #include "eGameObject.h"
 #include "uInputQueue.h"
 //#include "eTess.h"
@@ -1733,6 +1734,9 @@ void eCamera::Render(){
                   1);
 
         TranslateMatrix(-pos.x,-pos.y,-z);
+
+        // Pass camera world position to the renderer for parallax shader effects
+        sr_SetCameraWorldPos(pos.x, pos.y, z);
 
         bool draw_center=((CenterPos()-pos).NormSquared()>1 ||
                           fabs(CenterZ() - z)>1);

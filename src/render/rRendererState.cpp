@@ -50,4 +50,10 @@ void sr_SetArenaBounds(float lowX, float lowY, float highX, float highY)
     sr_vkSetArenaBounds(lowX, lowY, highX, highY);
 }
 
+extern void sr_vkSetCameraWorldPos(float x, float y, float z);
+void sr_SetCameraWorldPos(float x, float y, float z)
+{
+    sr_vkSetCameraWorldPos(x, y, z);
+}
+
 #endif // DEDICATED

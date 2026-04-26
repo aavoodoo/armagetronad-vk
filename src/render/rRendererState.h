@@ -61,4 +61,7 @@ rRenderContext sr_GetRenderContext();
 //! @param highX, highY Upper-right corner of arena
 void sr_SetArenaBounds(float lowX, float lowY, float highX, float highY);
 
+//! Set camera world position for parallax shader effects
+void sr_SetCameraWorldPos(float x, float y, float z);
+
 #endif // RRENDERERSTATE_H

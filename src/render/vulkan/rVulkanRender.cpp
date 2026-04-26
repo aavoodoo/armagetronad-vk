@@ -53,6 +53,8 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 // Arena bounds for floor shader (set via sr_vkSetArenaBounds before floor rendering)
 static float s_arenaBoundsLow[2]  = {-100.0f, -100.0f};
 static float s_arenaBoundsHigh[2] = { 100.0f,  100.0f};
+// Camera world position (set from eCamera::Render for parallax shader hooks)
+static float s_cameraWorldPos[3] = {0, 0, 5};
 
 // Full render context enum value (set via sr_vkSetRenderContext).
 // Matches rRenderContext in rRendererState.h. Shader code reads this from
@@ -3009,6 +3011,24 @@ void vkRenderer::BuildPushConstants(VkPushConstants& pc,
     // Lighting flag for lit geometry
     if (lit)
         pc.texMatrix[11] = 1.0f;
+
+    // For unlit geometry, pack shader hook data into normalMatrix (unused for unlit):
+    //   column 2 (indices 8-11): camera world position (for parallax)
+    //   column 3 (indices 12-15): arena bounds (for floor/sky effects)
+    // For lit geometry, normalMatrix carries the actual normal matrix and materialDiffuse.
+    if (!lit)
+    {
+        // Camera world position — set directly from eCamera::Render via sr_SetCameraWorldPos
+        pc.normalMatrix[8]  = s_cameraWorldPos[0];
+        pc.normalMatrix[9]  = s_cameraWorldPos[1];
+        pc.normalMatrix[10] = s_cameraWorldPos[2];
+        pc.normalMatrix[11] = 0.0f;
+
+        pc.normalMatrix[12] = s_arenaBoundsLow[0];
+        pc.normalMatrix[13] = s_arenaBoundsLow[1];
+        pc.normalMatrix[14] = s_arenaBoundsHigh[0];
+        pc.normalMatrix[15] = s_arenaBoundsHigh[1];
+    }
 }
 
 // Shared helper: look up texture descriptor, fall back to dummy white.
@@ -3381,6 +3401,7 @@ void vkRenderer::ReloadShaders()
     std::vector<std::string> includePaths;
 
     tString mvHooks = tDirectories::Data().GetReadPath("moviepack/shaders/uber_hooks.glsl");
+    std::cerr << "[Vulkan] ReloadShaders: mvHooks='" << static_cast<const char*>(mvHooks) << "' len=" << mvHooks.Len() << std::endl;
     if (mvHooks.Len() > 1)
     {
         std::string p = static_cast<const char*>(mvHooks);
@@ -3389,6 +3410,7 @@ void vkRenderer::ReloadShaders()
     }
 
     tString sysHooks = tDirectories::Data().GetReadPath("shaders/uber_hooks.glsl");
+    std::cerr << "[Vulkan] ReloadShaders: sysHooks='" << static_cast<const char*>(sysHooks) << "'" << std::endl;
     if (sysHooks.Len() > 1)
     {
         std::string p = static_cast<const char*>(sysHooks);
@@ -3396,7 +3418,7 @@ void vkRenderer::ReloadShaders()
         if (slash != std::string::npos) includePaths.push_back(p.substr(0, slash));
     }
 
-    VK_LOG_INFO("[Vulkan] ReloadShaders: includePaths =");
+    std::cerr << "[Vulkan] ReloadShaders: includePaths =";
     for (const auto& p : includePaths) VK_LOG_INFO(" [" << p << "]");
     VK_LOG_INFO("\n");
 
@@ -3504,6 +3526,13 @@ void sr_vkSetArenaBounds(float lowX, float lowY, float highX, float highY)
     s_arenaBoundsHigh[0] = highX;
     s_arenaBoundsHigh[1] = highY;
     sr_vkPostProcessSetArenaBounds(lowX, lowY, highX, highY);
+}
+
+void sr_vkSetCameraWorldPos(float x, float y, float z)
+{
+    s_cameraWorldPos[0] = x;
+    s_cameraWorldPos[1] = y;
+    s_cameraWorldPos[2] = z;
 }
 
 // Called from sr_SetRenderContext whenever the render context changes.

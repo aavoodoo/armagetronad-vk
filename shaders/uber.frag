@@ -50,11 +50,15 @@ layout(location = 1) out vec4 emissiveOut;
 #endif
 
 // Globals exposed to uber_hooks.glsl — kept stable across engine updates.
-// `uTime` and `uRenderContext` are packed into uTexMatrix[2][0] and [2][1]
-// by the C++ side. `uArenaBBox` comes from the lighting UBO.
+// Packed into push constants by the C++ side (BuildPushConstants):
+//   uTexMatrix[2][0] = time, [2][1] = render context
+//   For unlit geometry only (normalMatrix is free):
+//     uNormalMatrix[2] = camera world position (xyz) — for parallax
+//     uNormalMatrix[3] = arena bbox (minX,minY,maxX,maxY) — for floor effects
 #define uTime          (pc.uTexMatrix[2][0])
 #define uRenderContext (int(pc.uTexMatrix[2][1]))
-#define uArenaBBox     (lighting.arenaBBox)
+#define uCameraPos     (pc.uNormalMatrix[2].xyz)
+#define uArenaBBox     (pc.uNormalMatrix[3])
 
 #include "uber_hooks.glsl"
 

@@ -1,4 +1,4 @@
-Known Issues & Remaining Work — 2026-04-23
+Known Issues & Remaining Work — 2026-04-26
 ============================================
 
 BUGS
@@ -27,17 +27,19 @@ BUG 11 — Cockpit widget positioning on widescreen
   Future: Add top-anchored widget positioning mode so cockpit XMLs can adapt to
   any aspect ratio.
 
-BUG 12 — Shutdown validation warnings (2 remaining)
-  Status: Mostly fixed (down from 10+ to 2)
-  Two vkDestroySampler warnings from post-process system internal descriptor set
-  ordering. Benign — GPU is idle, no data corruption. Fixing requires restructuring
-  the PP Destroy() flow to separate descriptor pool from sampler destruction.
+BUG 14 — About screen blank on first visit (intermittent)
+  Status: Open
+  The SwapBuffers/rRenderFrame nesting causes the first display to sometimes
+  render into a stale frame. Subsequent visits work. Root cause: SwapBuffers
+  calls BeginFrame+EndFrame which creates an empty frame overwriting the
+  rendered content.
 
-BUG 13 — Instanced cycle shadow not rendered
-  Status: Open (minor visual)
-  When USE_BATCHED_CYCLES is enabled (default), the cycle shadow quad is not
-  rendered because the instanced path skips the legacy shadow draw code.
-  Fix: Submit shadow quads separately (they're simple textured quads, not models).
+BUG 15 — Flashing when switching moviepacks mid-game
+  Status: Open
+  Switching between moviepacks during gameplay can cause rapid flashing between
+  game and menu frames. Workaround: restart the game after moviepack change.
+  Cause: ReloadShaders deferred to next BeginFrame interacts with the menu's
+  render frame lifecycle.
 
 FEATURES
 --------
@@ -60,15 +62,8 @@ FR8 — DPI-aware menu scaling
 
 FR9 — Icon system for touch buttons (deferred)
   Current: Buttons display plain text labels (L1, R1, L2, R2).
-  Planned: Icon dictionary system supporting:
-    - Font glyphs: font file path + Unicode codepoint, rendered via existing
-      rFontSTB SDF/MSDF atlas system
-    - Image icons: PNG file path (regular, SDF, MSDF, or MTSDF), rendered via
-      existing SDFTextured/Textured state keys
-  Dictionary format (config file):
-    ICON <name> glyph <font_path> <codepoint>
-    ICON <name> image <image_path> <sdf_mode>
-  Moviepack-overridable. Extensible. Renders through the game's Vulkan pipeline.
+  Planned: Icon dictionary system supporting font glyphs and image icons.
+  Moviepack-overridable. Extensible.
 
 FR10 — Thread pool for async work
   Status: Not started
@@ -80,12 +75,14 @@ MOVIEPACKS
 
 FR3 — Moviepack showcase packages
   Packs in moviepacks/:
-    - customProceduralTexture.aamvp.zip — animated kishimisu floor pattern
-    - customBloom.aamvp.zip — bloom PP on cycles/walls/zones
-    - customCelShading.aamvp.zip — cel-shading PP on cycles/walls only (masked)
-    - customMSDFTexture.aamvp.zip — MSDF textured rim walls with 3-color compositing
+    - customProceduralTexture — parallax neon squares below floor grid (26 layers,
+      hook-based with uCameraPos for per-fragment parallax)
+    - customBloom — bloom PP on cycles/walls/zones via emissive hooks
+    - customCelShading — PP-based cel-shading with ink outlines on cycles/walls,
+      uses SCENE_EMISSIVE as mask + depth edge detection + mask silhouette detection
+    - customMSDFTexture — MSDF textured rim walls with 3-color compositing
+  All moviepacks: rim wall stretch computed from texture aspect ratios (X/Y = texW/texH).
   PP moviepack override path: sg_PPGetReadPath tries moviepack/ first.
-  customCelShading uses SCENE_EMISSIVE as mask.
 
   Moviepack settings management:
     - Activation resets to defaults then applies pack's settings.cfg
@@ -97,87 +94,74 @@ FR3 — Moviepack showcase packages
 RENDERER CODE REVIEW
 --------------------
 
-Pass 1 + Pass 2 completed. Full review document at review_document.md.
+Pass 1 + Pass 2 + Pass 3 completed.
 
-Fixes applied:
+Pass 3 (2026-04-26) fixes:
+  P0: vkEndCommandBuffer/vkQueueSubmit return values checked
+  P1: ReadPixels vkDeviceWaitIdle, descriptor invalidation before view destroy,
+      model mesh cache cleared on reload, mipmap regen after TexSubImage2D,
+      DEFERRED_QUEUE_SLOTS linked to MAX_FRAMES_IN_FLIGHT via static_assert
+  P2: UBO unmap before free, dead code removed (VK_MAX_CLIP_PLANES), constexpr,
+      VK_LOG_INFO macro for informational logging, static_assert for vertex sizes,
+      atomic pipeline cache write, mkdir recursive, clearValueCount fix,
+      duplicate macOS PP logic removed
+  Shader include resolver: moviepack hooks override system defaults
+  uArenaBBox: moved from broken UBO descriptor to push constants (normalMatrix[3])
+  uCameraPos: passed directly from eCamera::Render (normalMatrix[2])
+  ZIP extraction: nested subdirectories created properly
+  uMenu::Message: removed rITexture::UnloadAll (destroyed font atlas in Vulkan)
+
+Previous fixes (Pass 1 + 2):
   P0-1: Fence deadlock on swapchain recreation (vkResetFences after acquire)
   P0-2: Vertex buffer use-after-free (deferred cleanup after fence wait)
   P0-3: FBO deletion timing (deferred per-frame)
   P0-4: Sampler destruction while in-flight (pendingDeleteSamplers_)
   P0-5: maxLod mipmap clobber (uses tex.mipLevels)
   P0-6: Batching consolidation (ExecutePhase removed from walls/lines, centralized flush)
-  P1-1: Lighting UBO dirty flag
-  P1-7: SDF state key full comparison
-  P1-9: mvpDirty_ atomic<bool>
-  P1-10: PP effects cleared on swapchain resize
-  P1-11: TexImage2D reuse rgbaData (no double RGBA conversion)
-  P1-12: RenderbufferStorage return code checks
-  Pass 2: EnsureBufferCapacity helper (3 DrawLitTriangles bugs fixed)
-  Pass 2: VK_DESTROY macro (rVulkanHelpers.h, 20+ sites cleaned)
-  Pass 2: lightModelview_ unused member removed
-  Pass 2: GetPreviewTexture/GetTitleTexture deduplicated (LoadTextureFromZip)
-  Pass 2: rWallGeometryBufferGL3 renamed to rWallGeometryBufferPacked
-  Pass 2: Bucket eviction every 600 frames in BeginFrame
+  P1-1 through P1-12, Pass 2 items (see review_document.md)
 
 Performance: 200-336 FPS with 16 AI (was 47-90 pre-review). 4-7x improvement.
-Dead code removed: ~1,200 lines (rSVGPath, rMSDFShader.h, duplicates).
+Dead code removed: ~1,750 lines total across all passes.
 
-RENDERER ROBUSTNESS (2026-04-23)
----------------------------------
+RENDERER ROBUSTNESS
+-------------------
 
 Phase 1: RAII Matrix Guard — rMatrixGuard for push/pop, eliminated flash bug
 Phase 2: RAII Vulkan Handles — VkHandle<T,Fn> template in rVulkanRAII.h
 Phase 3: Deferred Destruction Queue — DeferredQueue<T> template
 Phase 4: DrawBatch Consolidation — BuildPushConstants + LookupTextureDescriptor helpers
 Phase 5: Slim rRenderer Interface — 27 dead virtuals, 20 dead wrappers removed (~547 lines)
-         Entire dead FBO system removed (GenFramebuffer/DeleteFramebuffer/etc.)
 Phase 6: Pipeline Variant Reduction — 76 → 60 pre-warmed pipelines, key normalization
 
 BUG 7 — Fixed (4 root causes):
   1. Model-space batching: rStaticMesh immediate flush
   2. Wall UV normalization pops: persistent min/max bounds (never shrink)
-  3. Vertex buffer sync race: per-frame HOST_COHERENT buffers (one per MAX_FRAMES_IN_FLIGHT)
-  4. Screen tearing: Auto present mode defaults to FIFO (VSync) instead of IMMEDIATE
+  3. Vertex buffer sync race: per-frame HOST_COHERENT buffers
+  4. Screen tearing: Auto present mode defaults to FIFO (VSync)
 
-BUG 10 — Fixed: floor fan → 2×2 quad grid (eliminates mipmap derivative singularity)
-
-Infinite plane: enabled for Apple GPUs (sr_infinityPlane=true), sr_highRim no longer
-  blocks it. Floor extends 100× arena bounds to horizon.
+BUG 10 — Fixed: floor fan → 2×2 quad grid
+Infinite plane: enabled for Apple GPUs, sr_highRim no longer blocks it
 
 Instanced cycle rendering (USE_BATCHED_CYCLES, enabled by default):
   - Standard 3-part models: 3 draw calls total instead of 3×N (48→3 for 16 AI)
   - Moviepack ASE models: 1 draw call per unique model/texture combo
-  - uber_instanced.vert: per-instance model matrix (mat4) + team color (vec4)
-  - Pipeline: instanced flag, second vertex binding (RATE_INSTANCE, 80 bytes)
-  - Cache priming: first frame renders legacy to populate modelMeshCache_
-  - Limitation: cycle shadows skipped in instanced path (BUG 13)
+  - uber_instanced.vert with per-instance model matrix + team color
+  - Cache priming on first frame via legacy path
 
-Shutdown cleanup ordering:
-  - Vertex buffers destroyed before command pool (eliminates buffer-in-use warnings)
-  - Textures/samplers destroyed before descriptor pool
-  - Viewport FBOs destroyed after descriptor pool
-  - PP descriptor pools destroyed early via DestroyDescriptorPools()
+Shutdown cleanup: command pool destroyed last (Apple driver leak workaround),
+  textures before descriptor pool, viewport FBOs after descriptor pool.
 
 Remaining P2 items (low priority):
-  - P2-3: Redundant macOS PP force-enable logic
   - P2-5/6: Clip space remap and Y-flip documentation comments
-  - P2-16: rVulkanRender.cpp decomposition (3,372 lines, deferred)
-  - Duplicate state cache (rRenderState vs vkRenderer internal) consolidation
+  - P2-16: rVulkanRender.cpp decomposition (3,400 lines, deferred)
 
 NOTES
 -----
 
-- Batching limitation: rStaticMesh (cycle bodies) must flush immediately because
-  vertices are in model space and need the per-cycle transform at draw time.
-  Only wall geometry (world-space vertices) benefits from batched flushing.
-  With instanced rendering enabled, cycle models bypass this limitation entirely.
-- Guard PushMatrix/PopMatrix added around gCycle::Render() to prevent cross-cycle
-  matrix stack contamination. No actual stack underflow detected in testing.
-- RemoveDirectoryRecursive on iOS uses NSFileManager (rScreenIOS.mm).
-- Moviepack settings saved to Documents/moviepack_saved_settings.cfg.
-- MSDF moviepack shader uses msdfgen-recommended screenPxRange calculation
-  with fwidth(texCoord) for safe derivatives (not fwidth(d) which causes NaN
-  on MSDF median discontinuities).
-- Wall rendering: persistent UV bounds prevent texture matrix pops. Line vertex
-  caching avoids per-frame heap allocation. Fingerprint-based skip-conversion
-  was attempted but reverted (boundary segments always change, causing stale data).
+- Shader hooks: uCameraPos (normalMatrix[2]) and uArenaBBox (normalMatrix[3])
+  available for unlit hooks via push constants. For lit hooks (cycles),
+  normalMatrix carries the actual normal matrix + materialDiffuse.
+- Android keyboard offset: only applied when explicitly requested (chat/console),
+  not for generic menu text input. Desktop platforms always return 0.
+- All moviepack leaks from Apple's Vulkan driver (vk_cmd_enqueue_CmdBindDescriptorSets)
+  — not application code. Command pool destroyed last to minimize.

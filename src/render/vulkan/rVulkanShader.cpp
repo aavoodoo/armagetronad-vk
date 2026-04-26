@@ -117,11 +117,13 @@ namespace
 
         shaderc_include_result* GetInclude(
             const char* requested_source,
-            shaderc_include_type /*type*/,
-            const char* /*requesting_source*/,
+            shaderc_include_type type,
+            const char* requesting_source,
             size_t /*include_depth*/) override
         {
             auto* result = new shaderc_include_result{};
+
+            // Search custom include paths FIRST (moviepack overrides system shaders).
             for (const auto& dir : paths_)
             {
                 std::string full = dir;
@@ -143,6 +145,32 @@ namespace
                     return result;
                 }
             }
+
+            // Fallback: try relative to the including file's directory
+            if (type == shaderc_include_type_relative && requesting_source)
+            {
+                std::string reqDir(requesting_source);
+                auto slash = reqDir.find_last_of('/');
+                if (slash != std::string::npos)
+                {
+                    std::string full = reqDir.substr(0, slash + 1) + requested_source;
+                    std::ifstream f(full);
+                    if (f.good())
+                    {
+                        std::stringstream ss;
+                        ss << f.rdbuf();
+                        auto* data = new std::string(ss.str());
+                        auto* name = new std::string(full);
+                        result->source_name = name->c_str();
+                        result->source_name_length = name->size();
+                        result->content = data->c_str();
+                        result->content_length = data->size();
+                        result->user_data = new std::pair<std::string*, std::string*>(name, data);
+                        return result;
+                    }
+                }
+            }
+
             // Not found — return empty result with error message
             auto* err = new std::string("include not found: ");
             *err += requested_source;
