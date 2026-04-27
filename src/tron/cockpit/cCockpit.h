@@ -197,5 +197,9 @@ public:
 extern const std::map<tString, tValue::Callback<cCockpit>::cb_ptr> stc_callbacks;
 extern std::set<tString> stc_forbiddenCallbacks;
 
+//! Render a single player's cockpit into the current viewport FBO.
+//! Called from RenderAllViewports in multi-viewport mode (BUG 17 fix).
+void sr_RenderViewportCockpit(int viewport, int playerID);
+
 #endif
 #endif

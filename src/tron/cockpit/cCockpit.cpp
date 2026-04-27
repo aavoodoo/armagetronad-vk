@@ -738,46 +738,39 @@ static void display_cockpit_lucifer() {
 
     rViewportConfiguration* viewportConfiguration = rViewportConfiguration::CurrentViewportConfiguration();
 
-    for ( int viewport = viewportConfiguration->num_viewports-1; viewport >= 0; --viewport )
+    // In multi-viewport mode, per-player cockpits are rendered inside the
+    // viewport FBO loop (sr_RenderViewportCockpit) so the UV rotation in
+    // the composite pass applies to both 3D and cockpit. (BUG 17 fix)
+    // Only render per-player cockpits here in single-viewport mode.
+    if (viewportConfiguration->num_viewports <= 1)
     {
-        // get the ID of the player in the viewport
-        int playerID = sr_viewportBelongsToPlayer[ viewport ];
-
-        // get the player
-        ePlayer* player = ePlayer::PlayerConfig( playerID );
-
-        rViewport *port = viewportConfiguration->Port( viewport );
-        tCoord dims = port->GetDimensions();
-
-        // select the corrected viewport
-        port->EqualAspectBottom().Select();
-
-        // Apply per-viewport rotation for tablet multi-player.
-        // The 3D scene was rotated via UV remapping in the composite pass;
-        // the cockpit must be rotated to match via a 2D matrix rotation
-        // around the NDC origin (center of the square viewport).
-        // Ensure depth is off for cockpit rendering. ExecutePhase re-enables
-        // depth after each phase flush, so we must re-disable per viewport.
-        RenderDisableState(rCapability::DepthTest);
-        RenderDepthMask(false);
-
-        cCockpit *player_cockpit;
-        if(!(player_cockpit = dynamic_cast<cCockpit *>(player->cockpit.get()))) {
-            player_cockpit = new cCockpit(cCockpit::VIEWPORT_ALL);
-            player->cockpit = player_cockpit;
-        }
-        // Readjust every frame so widget positions update on window resize.
-        // Readjust(void) skips VIEWPORT_ALL types, so compute the factor here.
+        for ( int viewport = viewportConfiguration->num_viewports-1; viewport >= 0; --viewport )
         {
-            float factor = 4./3. / (static_cast<float>(sr_screenWidth)/static_cast<float>(sr_screenHeight));
-            player_cockpit->Readjust(factor * dims.y / dims.x);
+            int playerID = sr_viewportBelongsToPlayer[ viewport ];
+            ePlayer* player = ePlayer::PlayerConfig( playerID );
+
+            rViewport *port = viewportConfiguration->Port( viewport );
+            tCoord dims = port->GetDimensions();
+            port->EqualAspectBottom().Select();
+
+            RenderDisableState(rCapability::DepthTest);
+            RenderDepthMask(false);
+
+            cCockpit *player_cockpit;
+            if(!(player_cockpit = dynamic_cast<cCockpit *>(player->cockpit.get()))) {
+                player_cockpit = new cCockpit(cCockpit::VIEWPORT_ALL);
+                player->cockpit = player_cockpit;
+            }
+            {
+                float factor = 4./3. / (static_cast<float>(sr_screenWidth)/static_cast<float>(sr_screenHeight));
+                player_cockpit->Readjust(factor * dims.y / dims.x);
+            }
+
+            player_cockpit->SetPlayer(player);
+            player_cockpit->Render();
+
+            rRenderQueue::Instance().ExecutePhase(rRenderPhase::HUD);
         }
-
-        player_cockpit->SetPlayer(player);
-        // delegate
-        player_cockpit->Render();
-
-        rRenderQueue::Instance().ExecutePhase(rRenderPhase::HUD);
     }
 
     static_cockpit.Render();
@@ -791,6 +784,49 @@ static void display_cockpit_lucifer() {
 }
 
 static rPerFrameTask dfps(&display_cockpit_lucifer);
+
+// Render a single player's cockpit into the current viewport FBO.
+// Called from RenderAllViewports in multi-viewport mode (BUG 17 fix).
+void sr_RenderViewportCockpit(int viewport, int playerID)
+{
+    if (!(se_mainGameTimer &&
+            se_mainGameTimer->speed > .9 &&
+            se_mainGameTimer->speed < 1.1 &&
+            se_mainGameTimer->IsSynced() )) return;
+
+    rViewportConfiguration* viewportConfiguration = rViewportConfiguration::CurrentViewportConfiguration();
+    ePlayer* player = ePlayer::PlayerConfig(playerID);
+    if (!player) return;
+
+    rViewport *port = viewportConfiguration->Port(viewport);
+    if (!port) return;
+    tCoord dims = port->GetDimensions();
+
+    // Use the FBO's full viewport (not the sub-viewport on the swapchain)
+    // since we're rendering inside the viewport FBO.
+    RenderDisableState(rCapability::DepthTest);
+    RenderDepthMask(false);
+
+    cCockpit *player_cockpit;
+    if(!(player_cockpit = dynamic_cast<cCockpit *>(player->cockpit.get()))) {
+        player_cockpit = new cCockpit(cCockpit::VIEWPORT_ALL);
+        player->cockpit = player_cockpit;
+    }
+    {
+        float factor = 4./3. / (static_cast<float>(sr_screenWidth)/static_cast<float>(sr_screenHeight));
+        player_cockpit->Readjust(factor * dims.y / dims.x);
+    }
+
+    player_cockpit->SetPlayer(player);
+    player_cockpit->Render();
+    rRenderQueue::Instance().ExecutePhase(rRenderPhase::HUD);
+
+    // Also render global cockpit (clock, FPS) into each viewport FBO
+    // so it rotates with the viewport in tablet split-screen.
+    static cCockpit viewport_top_cockpit(cCockpit::VIEWPORT_TOP);
+    viewport_top_cockpit.Render();
+    rRenderQueue::Instance().ExecutePhase(rRenderPhase::HUD);
+}
 
 static uActionGlobal cockpitKey1("COCKPIT_KEY_1");
 static uActionGlobal cockpitKey2("COCKPIT_KEY_2");

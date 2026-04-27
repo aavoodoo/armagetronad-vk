@@ -1460,8 +1460,14 @@ void RenderAllViewports(eGrid *grid){
 					ePlayerNetID::ResetDisplayedScores();
 					ePlayerNetID::DisplayScores();
 
+					// In multi-viewport mode, render per-player cockpit INTO the
+					// viewport FBO so the UV rotation in the composite pass applies
+					// uniformly to both 3D and cockpit. (BUG 17 fix)
 					if (numViewports > 1)
+					{
+						sr_RenderViewportCockpit(i, p);
 						sr_EndViewportFBO();
+					}
 				}
 				else con << "hey! viewport " << i << " does not exist!\n";
 			} else {

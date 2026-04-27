@@ -58,17 +58,19 @@ BUG 16 — SDF/MSDF/MTSDF font glyph rendering regression
      usesMipmapFilter=false.
 
 BUG 17 — Cockpit not rotated in multi-viewport split-screen
-  Status: Open
-  In split-screen mode with viewport rotation (tablet multi-player), the cockpit/HUD
-  widgets are not rotated to match the 3D viewport orientation. The 3D scene is
-  rotated per-viewport via UV remapping in the composite pass, but the cockpit
-  renders after composite onto the unrotated swapchain.
-  Matrix rotation hacks don't work due to the uber shader's Y-flip and aspect ratio
-  changes (90°/270° swaps width/height).
-  Proper fix: render cockpit INTO the viewport FBO (before composite) so the UV
-  rotation applies uniformly to 3D + cockpit. Move display_cockpit_lucifer inside
-  the viewport FBO render loop, before sr_EndViewportFBO. Global overlays
-  (VIEWPORT_TOP) stay after composite on the swapchain.
+  Status: Partially fixed
+  Per-player cockpit and VIEWPORT_TOP (clock, FPS) now render inside the viewport
+  FBO, so they rotate with the 3D scene in the composite pass.
+  Fix: sr_RenderViewportCockpit() called from RenderAllViewports before
+  sr_EndViewportFBO(). display_cockpit_lucifer skips per-player cockpits in
+  multi-viewport mode.
+  Remaining: global overlays not yet rendered per-viewport:
+    - Chat messages, console input
+    - Winning/score messages
+    - In-game menu
+    - Global touch buttons (L1/R1/L2/R2)
+  These render at various points in the frame lifecycle outside the viewport loop
+  and would need to be restructured to render into each FBO.
 
 BUG 18 — Keyboard tutorial shown on touch-only devices
   Status: Open
