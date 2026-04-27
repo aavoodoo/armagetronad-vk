@@ -189,10 +189,56 @@ private:
 
     PhaseData phases_[static_cast<size_t>(rRenderPhase::COUNT)];
 
+public:
+    //! Read-only access to phase data (for shadow pass geometry iteration)
+    const PhaseData& GetPhaseData(rRenderPhase phase) const
+    {
+        return phases_[static_cast<size_t>(phase)];
+    }
+private:
+
     // Current state tracking (for minimizing state changes)
     rRenderStateKey currentState_;
     bool stateInitialized_;
     rRenderPhase currentPhase_;
+
+    // Shadow geometry collection (FR13)
+    // Split into static (rim walls — persisted across frames) and dynamic
+    // (player walls, cycles — collected each frame). The shadow pass draws both.
+    std::vector<rVertex20> shadowStaticVertices_;   // rim walls, persisted
+    std::vector<rVertex20> shadowDynamicVertices_;  // player walls, per-frame
+    bool shadowCollectionEnabled_ = false;
+    bool shadowStaticDirty_ = true;  // true = rebuild static next frame
+
+public:
+    //! Enable/disable shadow geometry collection for current frame
+    void SetShadowCollection(bool enabled) { shadowCollectionEnabled_ = enabled; }
+
+    //! Check if shadow collection is enabled
+    bool IsShadowCollectionEnabled() const { return shadowCollectionEnabled_; }
+
+    //! Get combined shadow vertices (static + dynamic, for shadow pass)
+    const std::vector<rVertex20>& GetShadowStaticVertices() const { return shadowStaticVertices_; }
+    const std::vector<rVertex20>& GetShadowDynamicVertices() const { return shadowDynamicVertices_; }
+
+    //! Get mutable dynamic shadow vertices (for adding lit geometry from DrawBatch)
+    std::vector<rVertex20>& GetShadowDynamicVerticesMut() { return shadowDynamicVertices_; }
+
+    //! Clear dynamic shadow vertices (called after shadow pass consumes them)
+    void ClearShadowDynamic() { shadowDynamicVertices_.clear(); }
+
+    //! Mark static shadow geometry as needing rebuild (e.g., after round start)
+    void InvalidateShadowStatic() { shadowStaticDirty_ = true; }
+
+    //! Check if static shadow geometry needs rebuild
+    bool IsShadowStaticDirty() const { return shadowStaticDirty_; }
+
+    //! Mark static shadow geometry as built
+    void SetShadowStaticClean() { shadowStaticDirty_ = false; }
+
+    //! Clear all shadow vertices
+    void ClearShadowVertices() { shadowDynamicVertices_.clear(); }
+private:
 
     // Frame statistics
     mutable FrameStats frameStats_;

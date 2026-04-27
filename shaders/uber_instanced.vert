@@ -37,7 +37,10 @@ layout(set = 1, binding = 0) uniform LightingUBO {
     vec4 materialDiffuse;
     vec4 materialSpecular;
     int  lightingEnabled;
+    int  shadowEnabled;
+    // 8 bytes implicit std140 padding
     vec4 arenaBBox;
+    mat4 shadowVP[2];
 } lighting;
 
 // Per-vertex (rVertexLit32)

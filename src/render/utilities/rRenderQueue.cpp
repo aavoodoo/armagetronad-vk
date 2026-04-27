@@ -34,6 +34,11 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 
 #include <algorithm>
 #include <cstring>
+#include <cmath>
+
+// Global HUD rotation for tablet multi-player cockpit alignment.
+// Set per-viewport before ExecutePhase(HUD), reset to 0 after.
+int sr_hudRotationDeg = 0;
 
 //=============================================================================
 // Utility: viewport remapping
@@ -119,6 +124,9 @@ void rRenderQueue::BeginFrame()
         phases_[i].sortedBuckets.clear();
     }
 
+    // NOTE: shadowVertices_ is NOT cleared here — the shadow pass in BeginFrame
+    // reads last frame's collected vertices. Cleared after the shadow pass consumes them.
+
     stateInitialized_ = false;
     std::memset(&frameStats_, 0, sizeof(frameStats_));
 }
@@ -168,6 +176,15 @@ void rRenderQueue::Submit(rRenderPhase phase, const rRenderStateKey& state,
 
     rRenderBucket* bucket = GetBucket(phase, state);
     bucket->AddTriangles(vertices, count);
+
+    // Shadow geometry collection: static phase → persistent, dynamic → per-frame
+    if (shadowCollectionEnabled_)
+    {
+        if (phase == rRenderPhase::OpaqueStatic && shadowStaticDirty_)
+            shadowStaticVertices_.insert(shadowStaticVertices_.end(), vertices, vertices + count);
+        else if (phase == rRenderPhase::OpaqueDynamic)
+            shadowDynamicVertices_.insert(shadowDynamicVertices_.end(), vertices, vertices + count);
+    }
 }
 
 void rRenderQueue::SubmitQuad(rRenderPhase phase, const rRenderStateKey& state,
@@ -176,6 +193,25 @@ void rRenderQueue::SubmitQuad(rRenderPhase phase, const rRenderStateKey& state,
 {
     rRenderBucket* bucket = GetBucket(phase, state);
     bucket->AddQuad(v0, v1, v2, v3);
+
+    // Shadow geometry collection: quads → 2 triangles
+    if (shadowCollectionEnabled_)
+    {
+        std::vector<rVertex20>* buf = nullptr;
+        if (phase == rRenderPhase::OpaqueStatic && shadowStaticDirty_)
+            buf = &shadowStaticVertices_;
+        else if (phase == rRenderPhase::OpaqueDynamic)
+            buf = &shadowDynamicVertices_;
+        if (buf)
+        {
+            buf->push_back(v0);
+            buf->push_back(v1);
+            buf->push_back(v2);
+            buf->push_back(v0);
+            buf->push_back(v2);
+            buf->push_back(v3);
+        }
+    }
 }
 
 void rRenderQueue::SubmitTriangleFan(rRenderPhase phase, const rRenderStateKey& state,
@@ -186,6 +222,25 @@ void rRenderQueue::SubmitTriangleFan(rRenderPhase phase, const rRenderStateKey& 
 
     rRenderBucket* bucket = GetBucket(phase, state);
     bucket->AddTriangleFan(vertices, count);
+
+    // Shadow geometry collection: fan → triangles
+    if (shadowCollectionEnabled_)
+    {
+        std::vector<rVertex20>* buf = nullptr;
+        if (phase == rRenderPhase::OpaqueStatic && shadowStaticDirty_)
+            buf = &shadowStaticVertices_;
+        else if (phase == rRenderPhase::OpaqueDynamic)
+            buf = &shadowDynamicVertices_;
+        if (buf)
+        {
+            for (size_t i = 1; i + 1 < count; i++)
+            {
+                buf->push_back(vertices[0]);
+                buf->push_back(vertices[i]);
+                buf->push_back(vertices[i + 1]);
+            }
+        }
+    }
 }
 
 void rRenderQueue::SubmitLines(rRenderPhase phase, const rRenderStateKey& state,
@@ -242,6 +297,11 @@ void rRenderQueue::ApplyPhaseState(rRenderPhase phase)
         IdentityMatrix();
         ProjMatrix();
         IdentityMatrix();
+        // Apply HUD rotation (for multi-viewport cockpit on tablets)
+        // Note: sr_hudRotationDeg is set but NOT applied here.
+        // The proper fix for BUG 17 is to render cockpit INTO the viewport FBO
+        // (before composite), so the UV rotation in the composite pass applies
+        // uniformly to both 3D and cockpit. See known_issues.txt BUG 17.
     }
 
     currentPhase_ = phase;

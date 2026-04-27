@@ -752,6 +752,10 @@ static void display_cockpit_lucifer() {
         // select the corrected viewport
         port->EqualAspectBottom().Select();
 
+        // Apply per-viewport rotation for tablet multi-player.
+        // The 3D scene was rotated via UV remapping in the composite pass;
+        // the cockpit must be rotated to match via a 2D matrix rotation
+        // around the NDC origin (center of the square viewport).
         // Ensure depth is off for cockpit rendering. ExecutePhase re-enables
         // depth after each phase flush, so we must re-disable per viewport.
         RenderDisableState(rCapability::DepthTest);
@@ -773,8 +777,6 @@ static void display_cockpit_lucifer() {
         // delegate
         player_cockpit->Render();
 
-        // Flush cockpit HUD with this viewport's sub-rect active so
-        // the Vulkan viewport maps NDC to the correct screen region.
         rRenderQueue::Instance().ExecutePhase(rRenderPhase::HUD);
     }
 

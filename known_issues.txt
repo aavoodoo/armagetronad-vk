@@ -25,18 +25,25 @@ BUG 11 — Cockpit widget positioning on widescreen
   Future: Add top-anchored widget positioning mode so cockpit XMLs can adapt to
   any aspect ratio.
 
-BUG 14 — About screen always blank
-  Status: Open
-  The uMenu::Message rendering is broken in the Vulkan port. The content is
-  populated (verified via debug) but nothing renders on screen. Root cause:
-  rRenderFrame nesting — uMenu::Message is called from within a menu render
-  callback, causing nested BeginFrame/EndFrame conflicts. SwapBuffers creates
-  empty frames that overwrite the rendered content.
+BUG 20 — Shadow map resource double-destroy on shutdown (low priority)
+  Status: Open (macOS, may be platform-specific)
+  On shutdown, shadow map VkImageView and VkSampler handles trigger "Invalid Object"
+  validation errors. The textures_ map entries are erased before destruction, but
+  the DestroyShadowMaps cleanup still references stale handles. Cosmetic only —
+  no runtime impact, no crashes. Proper fix: track ownership more precisely or
+  null handles after textures_ erase.
 
-BUG 15 — Flashing when switching moviepacks mid-game
+BUG 14 — About screen always blank (low priority)
+  Status: Open
+  The uMenu::Message rendering is broken in the Vulkan port. Root cause:
+  rRenderFrame nesting — nested BeginFrame/EndFrame conflicts.
+
+BUG 15 — Flashing when switching moviepacks mid-game (medium)
   Status: Open
   Switching between moviepacks during gameplay can cause rapid flashing between
   game and menu frames. Workaround: restart the game after moviepack change.
+  Cause: ReloadShaders deferred to next BeginFrame interacts with the menu's
+  render frame lifecycle.
 
 BUG 16 — SDF/MSDF/MTSDF font glyph rendering regression
   Status: Fixed (3 root causes)
@@ -54,7 +61,14 @@ BUG 17 — Cockpit not rotated in multi-viewport split-screen
   Status: Open
   In split-screen mode with viewport rotation (tablet multi-player), the cockpit/HUD
   widgets are not rotated to match the 3D viewport orientation. The 3D scene is
-  rotated per-viewport but the cockpit renders in the default orientation.
+  rotated per-viewport via UV remapping in the composite pass, but the cockpit
+  renders after composite onto the unrotated swapchain.
+  Matrix rotation hacks don't work due to the uber shader's Y-flip and aspect ratio
+  changes (90°/270° swaps width/height).
+  Proper fix: render cockpit INTO the viewport FBO (before composite) so the UV
+  rotation applies uniformly to 3D + cockpit. Move display_cockpit_lucifer inside
+  the viewport FBO render loop, before sr_EndViewportFBO. Global overlays
+  (VIEWPORT_TOP) stay after composite on the swapchain.
 
 BUG 18 — Keyboard tutorial shown on touch-only devices
   Status: Open
@@ -100,15 +114,48 @@ FR11 — LuaJIT scripting (replace Ruby)
   embeddable, and works on all target platforms (iOS, Android, macOS).
 
 FR13 — Shadow mapping (replace shadow quad)
+  Status: Initial implementation complete (needs testing)
+  SHADOW_MODE config: 0=off, 1=legacy quad, 2=shadow map (default: 1)
+  Implementation:
+    - 2 directional shadow maps (2048x2048, D32_SFLOAT) for both scene lights
+    - Depth-only render pass with dedicated shadow pipeline (depth bias for acne)
+    - Comparison sampler (sampler2DShadow) with 4-tap PCF for soft edges
+    - Shadow geometry collected during scene submission, rendered before main pass
+      (one-frame lag — uses previous frame's vertices, imperceptible at 60+ FPS)
+    - Light VP matrices computed from fixed directional lights + arena bounds
+    - Shadow factor applied to both lit (cycles) and unlit (floor, cycle walls)
+    - Ambient preserved in shadow (not pitch black), 50% darkening on unlit surfaces
+    - Border color = white (outside shadow map = fully lit)
+  Files: shadow.vert, shadow.frag, rVulkanRender.cpp/h, uber.frag, uber.vert,
+         uber_instanced.vert, rRenderQueue.cpp/h, rScreen.cpp/h, gCycle.cpp, gMenus.cpp
+  Bugs fixed during implementation:
+    - std140 layout mismatch: int pad[2] in GLSL = 32 bytes (array stride 16), not 8
+    - Shadow vertex collection timing: was cleared before shadow pass read them
+    - SetShadowCollection called in lazy BeginFrame (after geometry submitted)
+    - DrawBatch UBO overwrites: 3 DrawBatch methods zeroed shadowEnabled/shadowVP
+    - NDC→UV remap missing: projCoords.xy in [-1,1] not [0,1] for texture sampling
+    - Backface culling in shadow pipeline: thin walls only cast from one light
+    - Shadow map initial layout UNDEFINED: empty render pass transitions at creation
+  Remaining:
+    - Near-camera wall clipping: walls clipped for cycle visibility are missing
+      from shadow map. Fix: add a flag to disable wall clipping during shadow
+      geometry collection (pre-processing). Static geometry (rim walls) is now
+      persisted and unaffected; dynamic walls still depend on visible submission.
+    - Shutdown validation: shadow staging buffer destroy-while-in-flight
+    - BUG 20: shadow map view/sampler double-destroy on shutdown
+    - Light settings not configurable (hardcoded positions/colors)
+    - Shadow on lit geometry (cycles): uses vModelPos which is model-space, not world-space
+
+FR14 — SDF cockpit HUD system
   Status: Not started
-  Replace the current flat shadow quad projected under cycles with proper shadow
-  mapping. Render the scene from the light's perspective into a depth texture,
-  then sample it during the main pass to compute per-pixel shadows. Benefits:
-    - Shadows from all geometry (cycles, walls, zones), not just a single quad
-    - Correct shadow shape matching actual cycle model silhouette
-    - Shadows on walls and other surfaces, not just the floor
-    - Soft shadow edges via PCF or variance shadow maps
-  Prerequisites: second render pass for shadow depth, shadow sampler in uber.frag
+  Build new cockpit using SDF textures for crisp widgets at any resolution/size.
+  Goals:
+    - SDF-textured gauges, speedometer, score display, minimap frame
+    - Touch-control variant with L/R/brake buttons embedded in the cockpit
+    - New file format: .aahud.zip containing cockpit layout + SDF textures
+    - User-selectable from a cockpit folder (similar to moviepack selection)
+    - Scalable to any screen size without blurring (SDF distance field rendering)
+  Prerequisites: FR6 (SDF textured rendering), cockpit XML parser updates
 
 FR12 — Structured settings system
   Status: Not started

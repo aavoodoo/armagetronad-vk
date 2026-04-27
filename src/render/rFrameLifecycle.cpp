@@ -40,6 +40,7 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 #include "rFont.h"
 #include "rSysdep.h"
 #include "rRender.h"           // For renderer access
+#include "rScreen.h"           // For sr_shadowMode
 
 //=============================================================================
 // Frame lifecycle implementation
@@ -50,7 +51,10 @@ void rBeginFrame()
     // Reset performance statistics first
     rRenderStats::Instance().BeginFrame();
 
-    // Initialize render queue for batched geometry
+    // Initialize render queue for batched geometry.
+    // Shadow collection must be enabled BEFORE geometry submission begins,
+    // not inside vkRenderer::BeginFrame() which triggers lazily on first draw.
+    rRenderQueue::Instance().SetShadowCollection(sr_shadowMode == rSHADOW_MAP);
     rRenderQueue::Instance().BeginFrame();
 
     // Initialize subsystem renderers

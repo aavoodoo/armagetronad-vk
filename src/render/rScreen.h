@@ -118,6 +118,12 @@ extern bool sr_alphaBlend;
 extern bool sr_screenshotIsPlanned;
 extern bool sr_smoothShading;
 
+#define rSHADOW_OFF       0
+#define rSHADOW_LEGACY    1
+#define rSHADOW_MAP       2
+
+extern int sr_shadowMode;
+
 //! Returns the fraction of the screen height occupied by the on-screen keyboard
 //! (0.0 when hidden). Used to shift the rendering viewport upward.
 REAL sr_ScreenKeyboardHeightFraction();

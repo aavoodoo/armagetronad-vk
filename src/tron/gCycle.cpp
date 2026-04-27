@@ -4738,7 +4738,7 @@ void gCycle::Render(const eCamera *cam){
             {
                 sr_DepthOffset(true);
                 RenderEnableState(rCapability::CullFace);
-                if(!blinking && sr_floorDetail>rFLOOR_GRID && rTextureGroups::TextureMode[rTextureGroups::TEX_FLOOR]>0 && sr_alphaBlend){
+                if(!blinking && sr_shadowMode == rSHADOW_LEGACY && sr_floorDetail>rFLOOR_GRID && rTextureGroups::TextureMode[rTextureGroups::TEX_FLOOR]>0 && sr_alphaBlend){
                     cycle_shad.Select();
                     unsigned int texId = RenderGetBoundTexture2D();
 

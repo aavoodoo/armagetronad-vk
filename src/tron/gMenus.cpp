@@ -167,6 +167,7 @@ static tConfItem<bool>    fps("SHOW_FPS",sr_FPSOut);
 // tConfItem<> ("",&);
 static tConfItem<int> fm("FLOOR_MIRROR",sr_floorMirror);
 static tConfItem<int> fd("FLOOR_DETAIL",sr_floorDetail);
+static tConfItem<int> sm("SHADOW_MODE",sr_shadowMode);
 static tConfItem<bool> hr("HIGH_RIM",sr_highRim);
 static tConfItem<bool> dt("DITHER",sr_dither);
 static tConfItem<bool> us("UPPER_SKY",sr_upperSky);

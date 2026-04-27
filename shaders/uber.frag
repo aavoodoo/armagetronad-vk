@@ -13,8 +13,15 @@ layout(set = 1, binding = 0) uniform LightingUBO {
     vec4 materialDiffuse;
     vec4 materialSpecular;
     int  lightingEnabled;
-    vec4 arenaBBox;   // (minX, minY, maxX, maxY)
+    int  shadowEnabled;
+    // 8 bytes implicit std140 padding to next vec4 boundary
+    vec4 arenaBBox;     // (minX, minY, maxX, maxY)
+    mat4 shadowVP[2];   // light view-projection matrices
 } lighting;
+
+// Shadow maps (sampler2DShadow for hardware PCF via comparison sampler)
+layout(set = 1, binding = 1) uniform sampler2DShadow uShadowMap0;
+layout(set = 1, binding = 2) uniform sampler2DShadow uShadowMap1;
 
 layout(push_constant) uniform PushConstants {
     mat4 uMVP;
@@ -64,6 +71,52 @@ layout(location = 1) out vec4 emissiveOut;
 
 float sdfMedian(float r, float g, float b) {
     return max(min(r, g), min(max(r, g), b));
+}
+
+// Shadow mapping: compute shadow factor for a world-space position.
+// Returns 0.0 = fully in shadow, 1.0 = fully lit.
+// Uses 4-tap PCF for soft shadow edges.
+float computeShadow(vec3 worldPos)
+{
+    if (lighting.shadowEnabled == 0) return 1.0;
+
+    float shadow = 0.0;
+    for (int i = 0; i < 2; i++)
+    {
+        vec4 lightSpace = lighting.shadowVP[i] * vec4(worldPos, 1.0);
+        vec3 projCoords = lightSpace.xyz / lightSpace.w;
+        // NDC X,Y are in [-1,1], remap to UV [0,1] for texture sampling.
+        // Z is already [0,1] from the clip matrix.
+        projCoords.xy = projCoords.xy * 0.5 + 0.5;
+
+        // Skip if outside shadow map range
+        if (projCoords.x < 0.0 || projCoords.x > 1.0 ||
+            projCoords.y < 0.0 || projCoords.y > 1.0 ||
+            projCoords.z < 0.0 || projCoords.z > 1.0)
+        {
+            shadow += 0.5; // outside = lit (per light contribution)
+            continue;
+        }
+
+        // 4-tap PCF (2x2 kernel)
+        float texelSize = 1.0 / 2048.0; // SHADOW_MAP_SIZE
+        float pcf = 0.0;
+        for (int x = -1; x <= 0; x++)
+        {
+            for (int y = -1; y <= 0; y++)
+            {
+                vec2 offset = vec2(float(x) + 0.5, float(y) + 0.5) * texelSize;
+                vec3 sampleCoord = vec3(projCoords.xy + offset, projCoords.z);
+                if (i == 0)
+                    pcf += texture(uShadowMap0, sampleCoord);
+                else
+                    pcf += texture(uShadowMap1, sampleCoord);
+            }
+        }
+        shadow += pcf / 4.0 * 0.5; // each light contributes half
+    }
+
+    return shadow;
 }
 
 void main()
@@ -205,13 +258,29 @@ void main()
                 }
             }
 
-            fragColor.rgb = texColor.rgb * vColor.rgb * diffuseLight + specularLight;
+            // Apply shadow mapping: shadow factor attenuates direct lighting but
+            // preserves the ambient base so shadowed areas aren't pitch black.
+            float shadowFactor = computeShadow(vModelPos);
+            vec3 ambient = vec3(0.15);
+            vec3 directDiffuse = diffuseLight - ambient; // separate direct from ambient
+            fragColor.rgb = texColor.rgb * vColor.rgb * (ambient + directDiffuse * shadowFactor) + specularLight * shadowFactor;
             fragColor.a = texColor.a * vColor.a;
         }
         else
         {
             // Normal unlit rendering: vertex color * texture
             fragColor = vColor * texColor;
+
+            // Shadow mapping on unlit surfaces (floor, cycle walls)
+            if (lighting.shadowEnabled != 0)
+            {
+                int ctx = uRenderContext;
+                if (ctx == 5 || ctx == 7) // floor or cycle wall
+                {
+                    float sf = computeShadow(vModelPos);
+                    fragColor.rgb *= mix(0.5, 1.0, sf);
+                }
+            }
         }
 
         // Dispatch to the per-component color hook function. Default hooks

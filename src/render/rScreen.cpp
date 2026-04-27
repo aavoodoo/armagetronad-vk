@@ -1350,6 +1350,7 @@ void sr_GetDrawableSize()
 bool    sr_alphaBlend=true;
 bool    sr_glOut=true;
 bool    sr_smoothShading=true;
+int     sr_shadowMode=rSHADOW_LEGACY;
 
 
 int sr_floorMirror=0;

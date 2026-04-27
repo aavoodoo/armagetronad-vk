@@ -347,8 +347,10 @@ private:
         float materialDiffuse[4];   // 16
         float materialSpecular[4];  // 16
         int   lightingEnabled;      // 4  (normalMatrix moved to push constants)
-        int   pad[3];               // 12 padding to 16-byte alignment (vec4 boundary)
+        int   shadowEnabled;        // 4  — 0=off, 2=shadow map active
+        int   pad[2];               // 8 padding to 16-byte alignment (vec4 boundary)
         float arenaBBox[4];         // 16 — (minX, minY, maxX, maxY) for shader effects
+        float shadowVP[2][16];      // 128 — light view-projection matrices (2 lights)
     };
     // Per-frame buffers: frame N writes to slot N, GPU reads slot N without aliasing
     VkBuffer        lightingUBOBuffer_[MAX_FRAMES_IN_FLIGHT]  = {};
@@ -437,6 +439,36 @@ private:
     // Key: address of the vertex vector's data pointer (stable for the lifetime of rModelMesh)
     std::unordered_map<uintptr_t, ModelMeshEntry> modelMeshCache_;
     uint32_t modelMeshCacheVersion_ = 0;  // Incremented on every cache clear
+
+    // === Shadow map FBOs (FR13: shadow mapping) ===
+    static constexpr int SHADOW_MAP_SIZE = 2048;
+    static constexpr int SHADOW_MAP_COUNT = 2;  // one per directional light
+    struct ShadowMapFBO {
+        VkImage        depthImage  = VK_NULL_HANDLE;
+        VkDeviceMemory depthMemory = VK_NULL_HANDLE;
+        VkImageView    depthView   = VK_NULL_HANDLE;
+        VkSampler      sampler     = VK_NULL_HANDLE;  // comparison sampler for PCF
+        VkFramebuffer  framebuffer = VK_NULL_HANDLE;
+        unsigned int   texId       = 0;  // registered in textures_ for descriptor binding
+    };
+    ShadowMapFBO shadowMaps_[SHADOW_MAP_COUNT];
+    VkRenderPass shadowRenderPass_ = VK_NULL_HANDLE;
+    VkShaderModule shadowVertShader_ = VK_NULL_HANDLE;
+    VkShaderModule shadowFragShader_ = VK_NULL_HANDLE;
+    VkPipeline shadowPipeline_ = VK_NULL_HANDLE;
+    VkPipelineLayout shadowPipelineLayout_ = VK_NULL_HANDLE;
+    bool shadowMapsCreated_ = false;
+    float shadowVP_[2][16] = {};  // cached light VP matrices
+    glm::mat4 shadowViewInverse_ = glm::mat4(1.0f);  // inverse of camera view at Light() time
+    // Per-frame shadow staging buffers (reused, grown as needed)
+    VkBuffer shadowStagingBuf_[MAX_FRAMES_IN_FLIGHT] = {};
+    VkDeviceMemory shadowStagingMem_[MAX_FRAMES_IN_FLIGHT] = {};
+    VkDeviceSize shadowStagingSize_[MAX_FRAMES_IN_FLIGHT] = {};
+
+    bool CreateShadowMaps();
+    void DestroyShadowMaps();
+    void RenderShadowPass(VkCommandBuffer cmd);
+    void ComputeShadowVPMatrices();
 
     // === Per-viewport FBOs (split-screen depth isolation) ===
     static constexpr int MAX_VIEWPORT_FBOS = 4;
