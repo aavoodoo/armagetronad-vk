@@ -28,6 +28,7 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 #include "eEventNotification.h"
 #include "gStuff.h"
 #include "gMoviepack.h"
+#include "gCockpitPack.h"
 #include "eSoundMixer.h"
 #include "eGrid.h"
 #include "eTeam.h"
@@ -2269,23 +2270,23 @@ static void PlayerLogIn()
 }
 
 void sg_DisplayVersionInfo() {
-    tOutput title;
-    title << "About Armagetron Advanced";
+    // Use a regular uMenu (same working render path as all other menus).
+    // uMenu::Message has a broken render lifecycle in the Vulkan port (BUG 14).
+    tString info;
+    info << "Renderer:  " << gl_renderer << "\n"
+         << "Vulkan:    " << gl_version << "\n"
+         << "Game:      " VERSION "\n"
+         << "Website:   armagetronad.net";
 
-    tOutput info;
-    info << "\n--- Renderer ---\n";
-    info << "Vendor:   ";
-    info << gl_vendor;
-    info << "\nDevice:   ";
-    info << gl_renderer;
-    info << "\nVersion:  ";
-    info << gl_version;
-    info << "\n\n--- Game ---\n";
-    info << "Version:  " VERSION "\n";
-    info << "\nWebsite:  https://armagetronad.net/\n";
-    info << "Forums:   https://forums3.armagetronad.net/\n";
+    tString title;
+    title << "About Armagetron Advanced\n\n"
+          << "Renderer:  " << gl_renderer << "\n"
+          << "Vulkan:    " << gl_version << "\n"
+          << "Game:      " VERSION "\n"
+          << "Website:   armagetronad.net";
 
-    sg_ClientFullscreenMessage(title, info, 1000);
+    uMenu aboutMenu(title);
+    aboutMenu.Enter();
 }
 
 void sg_StartupPlayerMenu();
@@ -2647,6 +2648,8 @@ void MainMenu(bool ingame){
 
 
 #ifndef DEDICATED
+    // Cockpit pack selection
+    gCockpitPackMenuItem cp(&misc);
     // Moviepack selection menu (replaces old toggle)
     gMoviepackMenuItem mp(&misc);
 #else

@@ -34,9 +34,17 @@ BUG 20 — Shadow map resource double-destroy on shutdown (low priority)
   null handles after textures_ erase.
 
 BUG 14 — About screen always blank (low priority)
-  Status: Open
-  The uMenu::Message rendering is broken in the Vulkan port. Root cause:
-  rRenderFrame nesting — nested BeginFrame/EndFrame conflicts.
+  Status: Workaround applied
+  uMenu::Message rendering is broken in the Vulkan port. The original GL code
+  used immediate-mode draws (BeginQuads/Vertex/RenderEnd) between ClearGL/SwapGL.
+  The Vulkan port wrapped this in rRenderFrame but the lazy BeginFrame never
+  triggers inside the callback — geometry is submitted to the HUD queue but
+  drawn into no active render pass. Matching the original ClearGL/SwapGL flow
+  still fails (SwapGL was missing from the sr_glOut branch, causing freeze;
+  after fixing, text still blank for unknown reason).
+  Workaround: About screen uses a regular uMenu (same render path as all
+  working menus) with version info in the title. uMenu::Message remains broken
+  for other callers (fullscreen server messages, etc.).
 
 BUG 15 — Flashing when switching moviepacks (medium)
   Status: Fixed

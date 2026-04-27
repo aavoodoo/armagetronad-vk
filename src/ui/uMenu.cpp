@@ -2107,95 +2107,73 @@ bool uMenu::Message(const tOutput& message, const tOutput& interpretation, REAL 
             }
             if ( sr_glOut )
             {
-                rRenderFrame([&]() {
-                    sr_ResetRenderState(true);
-                    rViewport::s_viewportFullscreen.Select();
+                // Match original GL flow: ClearGL → draw → SwapGL.
+                // NOT rRenderFrame — that wrapper doesn't work for Message
+                // because the Vulkan render pass lifecycle differs from GL.
+                sr_ResetRenderState(true);
+                rViewport::s_viewportFullscreen.Select();
 
-                    // GenericBackground();
-                    static rFileTexture background( rTextureGroups::TEX_FONT, "textures/message_background.png" );
-                    background.Select();
+                rSysDep::ClearGL();
 
-                    // Batch render background quad
-                    unsigned int textureId = RenderGetBoundTexture2D();
+                static rFileTexture background( rTextureGroups::TEX_FONT, "textures/message_background.png" );
+                background.Select();
+                unsigned int textureId = RenderGetBoundTexture2D();
 
-                    std::vector<rVertex20> bgVerts;
-                    bgVerts.reserve(6);
-                    // Triangle 1: top-left, top-right, bottom-right
-                    bgVerts.push_back(rVertex20(-1.0f, 1.0f, 0.0f, 255, 255, 255, 255, 0.0f, 0.0f));
-                    bgVerts.push_back(rVertex20(1.0f, 1.0f, 0.0f, 255, 255, 255, 255, 1.0f, 0.0f));
-                    bgVerts.push_back(rVertex20(1.0f, -1.0f, 0.0f, 255, 255, 255, 255, 1.0f, 1.0f));
-                    // Triangle 2: top-left, bottom-right, bottom-left
-                    bgVerts.push_back(rVertex20(-1.0f, 1.0f, 0.0f, 255, 255, 255, 255, 0.0f, 0.0f));
-                    bgVerts.push_back(rVertex20(1.0f, -1.0f, 0.0f, 255, 255, 255, 255, 1.0f, 1.0f));
-                    bgVerts.push_back(rVertex20(-1.0f, -1.0f, 0.0f, 255, 255, 255, 255, 0.0f, 1.0f));
+                rVertex20 v0(-1, 1, 0, 255,255,255,255, 0,0);
+                rVertex20 v1( 1, 1, 0, 255,255,255,255, 1,0);
+                rVertex20 v2( 1,-1, 0, 255,255,255,255, 1,1);
+                rVertex20 v3(-1,-1, 0, 255,255,255,255, 0,1);
+                rRenderQueue::Instance().SubmitQuad(rRenderPhase::HUD,
+                    rRenderStateKey::Textured(textureId, rBlendMode::Alpha), v0, v1, v2, v3);
 
-                    rRenderStateKey bgState = rRenderStateKey::Textured(textureId, rBlendMode::Alpha);
-                    rRenderQueue::Instance().Submit(rRenderPhase::HUD, bgState, bgVerts.data(), bgVerts.size());
-
-                //16*3/640.0, 32*3/480.0
                 REAL w=0.1*(REAL(sr_screenHeight)/sr_screenWidth),h=0.2;
+                tString m(message);
+                int len = tColoredString::RemoveColors(m).Len();
+                float maxWidth = 4.8;
+                if (w * len > maxWidth)
+                {
+                    h = h * maxWidth / (w * len);
+                    w = maxWidth / len;
+                }
 
-                    //REAL middle=-.6;
+                Color(1,1,1);
+                DisplayText(0,.8,w,message,sr_fontError);
 
-                    tString m(message);
-                    int len = tColoredString::RemoveColors(m).Len();
-                    float maxWidth = 4.8;
-                    if (w * len > maxWidth)
-                    {
-                        h = h * maxWidth / (w * len);
-                        w = maxWidth / len;
-                    }
+                w = 1/30.0*(REAL(sr_screenHeight)/sr_screenWidth);
+                h = 32/480.0;
 
-                    Color(1,1,1);
-                    DisplayText(0,.8,w,message,sr_fontError);
+                REAL center = .4;
+                if (offset >= lines.size()) offset = lines.size() - 1;
+                {
+                    rTextField c(-.9,.6, h, sr_fontError);
+                    c.EnableLineWrap();
+                    c.SetWidth(1.8);
+                    for (unsigned i = offset; i < lines.size(); ++i)
+                        c << lines[i] << "\n";
+                    center = (c.GetBottom()+1)/4;
+                }
 
-                    //16/640.0
-                    w = 1/30.0*(REAL(sr_screenHeight)/sr_screenWidth);
-                    h = 32/480.0;
-
-                    REAL center = .4;
-                    if (offset >= lines.size()) offset = lines.size() - 1;
-                    {
-                        rTextField c(-.9,.6, h, sr_fontError);
-                        c.EnableLineWrap();
-                        c.SetWidth(1.8);
-
-                        for (unsigned i = offset; i < lines.size(); ++i)
-                            c << lines[i] << "\n";
-
-                        center = (c.GetBottom()+1)/4;
-                    }
-
-                    // determite best display size for animation, asuming it is 64 pixels high
-                    {
-                        int middleY = int( sr_screenHeight * center );
-                        int maxHeight = middleY - 5 - sr_screenHeight/20;
-                        int maxWidth = sr_screenWidth/2 - 10;
-                        int height = 32;
-                        int width = height*2;
-                        int scale = 1;
-                        while( ( scale + 1) * height + 1 < maxHeight && ( scale + 1 ) * width < maxWidth )
-                        {
-                            scale++;
-                        }
-                        height *= scale;
-                        width  *= scale;
-                        REAL wr = 2*width/REAL(sr_screenWidth);
-                        REAL hr = 2*height/REAL(sr_screenHeight);
-                        REAL c = (center*2)-1;
-
-                        tRectangle ani = tRectangle( tCoord(-wr, c-hr), tCoord(wr, c+hr) );
-                        player.Render( ani );
-                    }
-
-                    // Execute HUD phase to render all batched geometry
-                    rRenderQueue::Instance().ExecutePhase(rRenderPhase::HUD);
-                });
+                {
+                    int middleY = int( sr_screenHeight * center );
+                    int maxHeight = middleY - 5 - sr_screenHeight/20;
+                    int maxWidth2 = sr_screenWidth/2 - 10;
+                    int height = 32;
+                    int width = height*2;
+                    int scale = 1;
+                    while( ( scale + 1) * height + 1 < maxHeight && ( scale + 1 ) * width < maxWidth2 )
+                        scale++;
+                    height *= scale;
+                    width  *= scale;
+                    REAL wr = 2*width/REAL(sr_screenWidth);
+                    REAL hr = 2*height/REAL(sr_screenHeight);
+                    REAL c = (center*2)-1;
+                    tRectangle ani = tRectangle( tCoord(-wr, c-hr), tCoord(wr, c+hr) );
+                    player.Render( ani );
+                }
             }
-            else
-            {
-                rSysDep::SwapGL();
-            }
+            // SwapGL must ALWAYS be called — handles present + per-frame tasks.
+            // (Original GL code had this outside the if/else too.)
+            rSysDep::SwapGL();
             tAdvanceFrame();
         }
     }
