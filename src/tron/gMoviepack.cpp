@@ -340,12 +340,9 @@ void gMoviepackManager::SetActiveIndex(int index)
 {
     if (index >= 0 && index < moviepacks_.Len() && index != activeIndex_)
     {
-        // Prevent moviepack changes during gameplay to avoid crashes
-        if (sg_GameRunning())
-        {
-            con << "[Moviepack] Blocked — game is running\n";
-            return;
-        }
+        // Moviepack changes during gameplay are now safe — shader reload is
+        // deferred to next BeginFrame (after GPU idle), and texture unload
+        // waits for GPU idle before freeing resources.
 
         // Deactivate old moviepack
         DeactivateMoviepack();
@@ -571,6 +568,12 @@ bool gMoviepackManager::ActivateMoviepack()
     // Only reload if OpenGL context is available (sr_glOut)
     if (sr_glOut)
     {
+        // Wait for GPU to finish all in-flight work before unloading
+        // textures/models. Without this, in-flight command buffers may
+        // still reference resources we're about to free.
+        extern void sr_vkWaitIdle();
+        sr_vkWaitIdle();
+
         gLogo::ResetTexture();
         rSurfaceCache::ClearCache();
         rITexture::UnloadAll();
@@ -935,18 +938,21 @@ void gMoviepackMenuItem::RenderBackground()
 void gMoviepackMenuItem::LeftRight(int lr)
 {
     uMenuItemSelection<int>::LeftRight(lr);
-    // Activation is deferred to LeftRightRelease (key-up) so the user can scroll
-    // freely through the list without triggering a full reload on every step.
+    // Preview images (title.jpg, preview.png) are loaded lazily in RenderBackground
+    // via GetTitleTexture/GetPreviewTexture. No activation here — just browse.
 }
 
 void gMoviepackMenuItem::LeftRightRelease()
 {
-    gMoviepackManager::Get().SetActiveIndex(selectionIndex_);
+    // Browse only — preview images are displayed, but the moviepack is NOT activated.
+    // Activation (shader reload, texture unload, settings change) only happens on Enter.
+    // This eliminates the flashing caused by rapid activate/deactivate cycles (BUG 15).
 }
 
 void gMoviepackMenuItem::Enter()
 {
-    // Activate the selected pack (no title screen — just apply it)
+    // Activate the selected moviepack (extract ZIP, apply settings, reload shaders).
+    // This is the only place that triggers the heavy resource reload.
     gMoviepackManager::Get().SetActiveIndex(selectionIndex_);
 }
 

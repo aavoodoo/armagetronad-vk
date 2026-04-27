@@ -894,12 +894,12 @@ void vkRenderer::BeginFrame()
     // kill the app and display a black-screen transition animation.
     if (appInBackground_) return;
 
-    // Honour deferred shader reload requested while a frame was in progress.
+    // Honour deferred shader reload. Multiple requests (moviepack deactivate +
+    // activate) are coalesced into one rebuild here at the frame boundary.
     if (pendingShaderReload_)
     {
         pendingShaderReload_ = false;
-        ReloadShaders();
-        // ReloadShaders may call vkDeviceWaitIdle, so re-check initialization.
+        DoReloadShaders();
         if (!IsInitialized()) return;
     }
 
@@ -4103,13 +4103,17 @@ void vkRenderer::ReloadShaders()
         VK_LOG_INFO("[Vulkan] ReloadShaders: not initialized, ignoring" << std::endl);
         return;
     }
-    if (frameStarted_)
-    {
-        // Called from inside a render frame (e.g. LeftRight menu event). Defer to next BeginFrame.
-        VK_LOG_INFO("[Vulkan] ReloadShaders: frame in progress — deferring to next BeginFrame" << std::endl);
-        pendingShaderReload_ = true;
-        return;
-    }
+    // Always defer to the next BeginFrame boundary. This coalesces multiple
+    // rapid reload requests (e.g. moviepack deactivate + activate = 2 calls)
+    // into a single pipeline rebuild at a clean frame boundary.
+    pendingShaderReload_ = true;
+    VK_LOG_INFO("[Vulkan] ReloadShaders: deferred to next BeginFrame" << std::endl);
+}
+
+void vkRenderer::DoReloadShaders()
+{
+    VK_LOG_INFO("[Vulkan] DoReloadShaders: executing" << std::endl);
+    if (!IsInitialized()) return;
 
     // Load new shader modules first — do NOT touch the live shaders until
     // we have valid replacements.
@@ -4320,6 +4324,19 @@ void sr_vkRendererReloadShaders()
 {
     if (s_vkRenderer)
         s_vkRenderer->ReloadShaders();
+}
+
+void sr_vkWaitIdle()
+{
+    if (s_vkRenderer && s_vkRenderer->IsInitialized())
+    {
+        // End the current frame if one is in progress, then wait for GPU idle.
+        // This ensures no in-flight command buffers reference resources that
+        // are about to be freed (textures, models, etc.).
+        if (s_vkRenderer->IsFrameStarted())
+            s_vkRenderer->EndFrame();
+        vkDeviceWaitIdle(s_vkRenderer->GetDevice());
+    }
 }
 
 //! Called from gMoviepackManager::ActivateMoviepack after resources have

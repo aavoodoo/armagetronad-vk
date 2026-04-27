@@ -106,6 +106,7 @@ public:
 
     //! Check if a frame is in progress
     bool IsFrameStarted() const { return frameStarted_; }
+    VkDevice GetDevice() const { return context_.GetDevice(); }
 
     //! Check if Vulkan is initialized
     bool IsInitialized() const { return context_.IsValid(); }
@@ -327,6 +328,7 @@ private:
     uint32_t        acquireSemaphoreIndex_;
     bool            frameStarted_;
     bool            pendingShaderReload_;
+    void DoReloadShaders();  // actual reload logic, called from BeginFrame
 
 
     // Lighting state (stored for shader-side lighting via UBO)

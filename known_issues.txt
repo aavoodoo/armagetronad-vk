@@ -38,12 +38,18 @@ BUG 14 — About screen always blank (low priority)
   The uMenu::Message rendering is broken in the Vulkan port. Root cause:
   rRenderFrame nesting — nested BeginFrame/EndFrame conflicts.
 
-BUG 15 — Flashing when switching moviepacks mid-game (medium)
-  Status: Open
-  Switching between moviepacks during gameplay can cause rapid flashing between
-  game and menu frames. Workaround: restart the game after moviepack change.
-  Cause: ReloadShaders deferred to next BeginFrame interacts with the menu's
-  render frame lifecycle.
+BUG 15 — Flashing when switching moviepacks (medium)
+  Status: Fixed
+  Root cause: LeftRightRelease activated moviepacks on every scroll, triggering
+  full resource reload (shader recompile, texture unload, settings change) 2x per
+  scroll (deactivate + activate). Pipeline destruction + rebuild caused visual flash.
+  Fix (3 parts):
+    1. Browse/activate separation: LeftRight/LeftRightRelease only browse (preview
+       images loaded lazily from ZIP). Enter activates (full resource reload).
+    2. Debounced shader reload: ReloadShaders always defers to next BeginFrame via
+       pendingShaderReload_ flag. DoReloadShaders runs once at frame boundary.
+    3. Mid-game switching enabled: removed sg_GameRunning() guard. sr_vkWaitIdle()
+       ends current frame + waits for GPU idle before texture/model unloading.
 
 BUG 16 — SDF/MSDF/MTSDF font glyph rendering regression
   Status: Fixed (3 root causes)
