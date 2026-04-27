@@ -184,6 +184,11 @@ class gCycle: public gCycleMovement
 
     REAL timeCameIntoView;
 
+    // Saved view+projection matrices from the start of Render(), before cycle
+    // transforms are pushed. Used by RenderName() for stable screen projection.
+    float savedViewMatrix_[16] = {};
+    float savedProjMatrix_[16] = {};
+
     friend class gCycleChatBot;
     std::unique_ptr< gCycleChatBot > chatBot_;
 

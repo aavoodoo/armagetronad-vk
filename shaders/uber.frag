@@ -102,8 +102,11 @@ void main()
 
         vec4 texSample = texture(uTexture, vTexCoord);
 
-        // SDF from alpha (RGBA texture) or red (single-channel SDF)
-        float sd = (useTexture > 0.5) ? texSample.a : texSample.r;
+        // SDF distance field. Single-channel textures are stored as (V,V,V,V)
+        // in the Vulkan renderer — all channels have the same value.
+        // For RGBA textures with SDF in alpha, .a works. For single-channel, .r works.
+        // Using .a covers both cases since V is in all channels.
+        float sd = texSample.a;
         if (invertSDF > 0.5) sd = 1.0 - sd;
 
         float dist = screenPxRange * (sd - 0.5);

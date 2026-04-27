@@ -1,23 +1,21 @@
-Known Issues & Remaining Work — 2026-04-26
+Known Issues & Remaining Work — 2026-04-27
 ============================================
 
 BUGS
 ----
 
 BUG 3 — Multi-viewport first-round flickering
-  Status: Open
-  Symptom: First round in multi-viewport mode flickers, then stabilizes.
-  Cause: FBO creation overhead (8 GPU allocations on first multi-viewport frame).
-  Fix: Pre-create viewport FBOs before the first frame.
+  Status: Closed
 
-BUG 5 — Cycle name/cockpit rendering in multi-viewport on macOS
-  Status: Open
-  Symptom: On macOS with 3-attachment FBOs (emissive variant), fonts/text are
-  invisible. With 2-attachment FBOs (plain variant), fonts work but z-fighting
-  returns.
-  Cause: Unknown — the emissive fragment shader variant breaks font/text rendering
-  through some mechanism specific to Metal/MoltenVK. Needs Metal GPU frame capture.
-  Single viewport: fixed. iPad: works with 2-attachment FBOs.
+BUG 5/19 — Player names drift away from cycles
+  Status: Fixed
+  Player names and cockpit text rendered beside cycles sometimes appear far from
+  the actual cycle position or invisible. Likely a matrix stack issue — the name
+  rendering reads a stale or wrong modelview transform. Similar root cause to the
+  original BUG 7 flash (matrix stack contamination between cycle renders).
+  On macOS multi-viewport with 3-attachment FBOs (emissive variant), fonts can
+  become completely invisible. With 2-attachment FBOs fonts work but z-fighting
+  returns. iPad works with 2-attachment FBOs.
 
 BUG 11 — Cockpit widget positioning on widescreen
   Status: Matches original GL behavior (by design)
@@ -27,17 +25,43 @@ BUG 11 — Cockpit widget positioning on widescreen
   Future: Add top-anchored widget positioning mode so cockpit XMLs can adapt to
   any aspect ratio.
 
-BUG 14 — About screen blank on first visit (intermittent)
+BUG 14 — About screen always blank
   Status: Open
-  The SwapBuffers/rRenderFrame nesting causes the first display to sometimes
-  render into a stale frame. Subsequent visits work. Root cause: SwapBuffers
-  calls BeginFrame+EndFrame which creates an empty frame overwriting the
-  rendered content.
+  The uMenu::Message rendering is broken in the Vulkan port. The content is
+  populated (verified via debug) but nothing renders on screen. Root cause:
+  rRenderFrame nesting — uMenu::Message is called from within a menu render
+  callback, causing nested BeginFrame/EndFrame conflicts. SwapBuffers creates
+  empty frames that overwrite the rendered content.
 
 BUG 15 — Flashing when switching moviepacks mid-game
   Status: Open
   Switching between moviepacks during gameplay can cause rapid flashing between
   game and menu frames. Workaround: restart the game after moviepack change.
+
+BUG 16 — SDF/MSDF/MTSDF font glyph rendering regression
+  Status: Fixed (3 root causes)
+  1. Single-channel texture mapping: SDF data stored as (255,255,255,A) but shader
+     reads .r. Fixed: store as (V,V,V,V) in all channels — works for both legacy
+     (reads .a for alpha blend) and SDF (reads .a for distance field).
+  2. Atlas grow UV mismatch: when atlas doubles in size, cached glyph UVs were
+     computed with old dimensions, pointing 2x too far. Fixed: rescale all cached
+     UVs after grow (packOrGrow helper, single implementation for SDF/MSDF/MTSDF).
+  3. Sampler maxLod: font atlas uses GL_LINEAR (no mipmap) but Vulkan sampler had
+     maxLod=9, sampling stale higher mip levels. Fixed: clamp maxLod to 0.25 when
+     usesMipmapFilter=false.
+
+BUG 17 — Cockpit not rotated in multi-viewport split-screen
+  Status: Open
+  In split-screen mode with viewport rotation (tablet multi-player), the cockpit/HUD
+  widgets are not rotated to match the 3D viewport orientation. The 3D scene is
+  rotated per-viewport but the cockpit renders in the default orientation.
+
+BUG 18 — Keyboard tutorial shown on touch-only devices
+  Status: Open
+  The keyboard control tutorial messages reference physical keys that don't exist
+  on touch devices. Should be disabled when no physical keyboard is available
+  (iOS/Android touch mode).
+
   Cause: ReloadShaders deferred to next BeginFrame interacts with the menu's
   render frame lifecycle.
 
@@ -69,6 +93,33 @@ FR10 — Thread pool for async work
   Status: Not started
   Goal: Reduce jerkiness with many AI players by offloading non-frame-critical
   work to background threads. Needs priority/deadline management.
+
+FR11 — LuaJIT scripting (replace Ruby)
+  Status: Not started
+  Replace the Ruby scripting dependency with LuaJIT. LuaJIT is lighter, faster,
+  embeddable, and works on all target platforms (iOS, Android, macOS).
+
+FR13 — Shadow mapping (replace shadow quad)
+  Status: Not started
+  Replace the current flat shadow quad projected under cycles with proper shadow
+  mapping. Render the scene from the light's perspective into a depth texture,
+  then sample it during the main pass to compute per-pixel shadows. Benefits:
+    - Shadows from all geometry (cycles, walls, zones), not just a single quad
+    - Correct shadow shape matching actual cycle model silhouette
+    - Shadows on walls and other surfaces, not just the floor
+    - Soft shadow edges via PCF or variance shadow maps
+  Prerequisites: second render pass for shadow depth, shadow sampler in uber.frag
+
+FR12 — Structured settings system
+  Status: Not started
+  Replace the flat tConfItem/tSettingItem mechanism with a structured tree of
+  settings. Goals:
+    - Hierarchical organization (renderer.vulkan.vsync, game.speed, etc.)
+    - Color as a single setting type (not 3 separate R/G/B floats)
+    - Type-safe values (int, float, bool, color, enum, string)
+    - Backward compatibility layer for reading old flat config files
+    - Support for per-moviepack setting overrides (current save/restore is fragile)
+    - Settings schema for validation and UI generation
 
 MOVIEPACKS
 ----------

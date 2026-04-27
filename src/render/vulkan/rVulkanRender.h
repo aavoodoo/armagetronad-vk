@@ -373,6 +373,7 @@ private:
         VkFilter      magFilter = VK_FILTER_LINEAR;
         VkSamplerAddressMode wrapS = VK_SAMPLER_ADDRESS_MODE_REPEAT;
         VkSamplerAddressMode wrapT = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+        bool usesMipmapFilter = true;  // false = GL_LINEAR/GL_NEAREST (no mip)
         VkImageLayout descriptorLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
         // CPU-side RGBA copy for TexSubImage2D (update CPU, then re-upload full image)
         std::vector<uint8_t> cpuData;

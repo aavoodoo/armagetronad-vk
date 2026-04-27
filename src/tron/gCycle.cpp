@@ -4607,6 +4607,12 @@ void gCycle::Render(const eCamera *cam){
 
 
         ModelMatrix();
+
+        // Save the clean view + projection matrices BEFORE any cycle transforms.
+        // Used by RenderName() for matrix-stack-independent screen projection.
+        RenderGetModelviewMatrix(savedViewMatrix_);
+        RenderGetProjectionMatrix(savedProjMatrix_);
+
         PushMatrix();
         eCoord p = PredictPosition();
         TranslateMatrix(p.x,p.y,0);
@@ -5197,26 +5203,34 @@ void gCycle::RenderName( const eCamera* cam ) {
     if ( !cam->RenderingMain() ) return;
     if ( !showOwnName && cam->Player() == this->player ) return;
 
-    // Compute name screen position using the original matrix approach.
-    // Push/translate/read/pop is safe here because it only adds one level.
-    PushMatrix();
-    TranslateMatrix(0.8, 0, 2.0);
-    float modelviewMatrix[16], projectionMatrix[16];
-    RenderGetModelviewMatrix(modelviewMatrix);
-    RenderGetProjectionMatrix(projectionMatrix);
-    PopMatrix();
+    // Compute name world position directly from cycle data — no matrix stack
+    // dependency. This is robust regardless of batched/legacy rendering path
+    // and avoids matrix stack contamination issues.
+    //
+    // The name offset (0.8, 0, 2.0) is in cycle-local space, scaled by 0.5:
+    //   - local X 0.8 → 0.4 world units forward along cycle direction
+    //   - local Z 2.0 → 1.0 world units above floor
+    eCoord pos = PredictPosition();
+    eCoord d = Direction();
+    float nameWorldX = pos.x + 0.5f * d.x * 0.8f;
+    float nameWorldY = pos.y + 0.5f * d.y * 0.8f;
+    float nameWorldZ = 0.5f * 2.0f;
 
-    float x = modelviewMatrix[12];
-    float y = modelviewMatrix[13];
-    float z = modelviewMatrix[14];
-    float w = modelviewMatrix[15];
+    // Use the view + projection matrices saved at the START of Render(),
+    // before any cycle transforms were pushed onto the stack.
+    const float* V = savedViewMatrix_;
+    const float* P = savedProjMatrix_;
 
-    xp = projectionMatrix[0]*x + projectionMatrix[4]*y +
-         projectionMatrix[8]*z + projectionMatrix[12]*w;
-    yp = projectionMatrix[1]*x + projectionMatrix[5]*y +
-         projectionMatrix[9]*z + projectionMatrix[13]*w;
-    wp = projectionMatrix[3]*x + projectionMatrix[7]*y +
-         projectionMatrix[11]*z + projectionMatrix[15]*w;
+    // view_pos = V * world_pos
+    float vx = V[0]*nameWorldX + V[4]*nameWorldY + V[8]*nameWorldZ + V[12];
+    float vy = V[1]*nameWorldX + V[5]*nameWorldY + V[9]*nameWorldZ + V[13];
+    float vz = V[2]*nameWorldX + V[6]*nameWorldY + V[10]*nameWorldZ + V[14];
+    float vw = V[3]*nameWorldX + V[7]*nameWorldY + V[11]*nameWorldZ + V[15];
+
+    // clip_pos = P * view_pos
+    xp = P[0]*vx + P[4]*vy + P[8]*vz + P[12]*vw;
+    yp = P[1]*vx + P[5]*vy + P[9]*vz + P[13]*vw;
+    wp = P[3]*vx + P[7]*vy + P[11]*vz + P[15]*vw;
 
     if (wp <= 0) {
         /* behind camera */

@@ -1657,7 +1657,11 @@ void vkRenderer::TexParameter(int target, int pname, int param)
         VkFilter f = (param == rGLConst::Nearest || param == rGLConst::NearestMipmapNearest
                       || param == rGLConst::NearestMipmapLinear)
             ? VK_FILTER_NEAREST : VK_FILTER_LINEAR;
-        if (tex.minFilter != f) { tex.minFilter = f; needsRecreate = true; }
+        bool mip = (param == rGLConst::LinearMipmapLinear || param == rGLConst::LinearMipmapNearest
+                 || param == rGLConst::NearestMipmapLinear || param == rGLConst::NearestMipmapNearest);
+        if (tex.minFilter != f || tex.usesMipmapFilter != mip) {
+            tex.minFilter = f; tex.usesMipmapFilter = mip; needsRecreate = true;
+        }
     } else if (pname == rGLConst::TextureMagFilter) {
         VkFilter f = (param == rGLConst::Nearest) ? VK_FILTER_NEAREST : VK_FILTER_LINEAR;
         if (tex.magFilter != f) { tex.magFilter = f; needsRecreate = true; }
@@ -1698,7 +1702,13 @@ void vkRenderer::TexParameter(int target, int pname, int param)
         si.addressModeU = tex.wrapS;
         si.addressModeV = tex.wrapT;
         si.addressModeW = VK_SAMPLER_ADDRESS_MODE_REPEAT;
-        si.maxLod = (tex.mipLevels > 1) ? static_cast<float>(tex.mipLevels - 1) : 1.0f;
+        // If the min filter doesn't request mipmapping (GL_LINEAR or GL_NEAREST
+        // without _MIPMAP_), clamp maxLod to 0 to prevent sampling stale higher
+        // mip levels. This is critical for font atlases that use TexSubImage2D
+        // to update only mip level 0 — higher levels contain stale/zero data.
+        si.maxLod = tex.usesMipmapFilter
+            ? ((tex.mipLevels > 1) ? static_cast<float>(tex.mipLevels - 1) : 1.0f)
+            : 0.25f;
         vkCreateSampler(device, &si, nullptr, &tex.sampler);
     }
 }
@@ -1816,9 +1826,11 @@ void vkRenderer::TexImage2D(int target, int level, int /*internalFormat*/,
                     rgbaData[i*4+2] = swapRB ? src[i*3+0] : src[i*3+2];
                     rgbaData[i*4+3] = 255;
                 } else if (srcChannels == 1) {
-                    rgbaData[i*4+0] = 255;
-                    rgbaData[i*4+1] = 255;
-                    rgbaData[i*4+2] = 255;
+                    // Store in ALL channels: legacy fonts read .a (alpha blend),
+                    // SDF fonts read .r (distance field). Both work with V=V=V=V.
+                    rgbaData[i*4+0] = src[i];
+                    rgbaData[i*4+1] = src[i];
+                    rgbaData[i*4+2] = src[i];
                     rgbaData[i*4+3] = src[i];
                 } else if (srcChannels == 2) {
                     rgbaData[i*4+0] = 255;
@@ -1929,6 +1941,7 @@ void vkRenderer::TexImage2D(int target, int level, int /*internalFormat*/,
     VkFilter savedMagFilter = VK_FILTER_LINEAR;
     VkSamplerAddressMode savedWrapS = VK_SAMPLER_ADDRESS_MODE_REPEAT;
     VkSamplerAddressMode savedWrapT = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+    bool savedUsesMipmap = true;
     {
         auto it2 = textures_.find(texId);
         if (it2 != textures_.end())
@@ -1937,6 +1950,7 @@ void vkRenderer::TexImage2D(int target, int level, int /*internalFormat*/,
             savedMagFilter = it2->second.magFilter;
             savedWrapS = it2->second.wrapS;
             savedWrapT = it2->second.wrapT;
+            savedUsesMipmap = it2->second.usesMipmapFilter;
         }
     }
 
@@ -1948,7 +1962,9 @@ void vkRenderer::TexImage2D(int target, int level, int /*internalFormat*/,
     samplerInfo.addressModeU = savedWrapS;
     samplerInfo.addressModeV = savedWrapT;
     samplerInfo.addressModeW = VK_SAMPLER_ADDRESS_MODE_REPEAT;
-    samplerInfo.maxLod = static_cast<float>(mipLevels - 1);
+    samplerInfo.maxLod = savedUsesMipmap
+        ? static_cast<float>(mipLevels - 1)
+        : 0.25f;
     if (vkCreateSampler(device, &samplerInfo, nullptr, &newSampler) != VK_SUCCESS)
     {
         std::cerr << "[Vulkan] Failed to create texture sampler for texId=" << texId << std::endl;
@@ -1971,6 +1987,7 @@ void vkRenderer::TexImage2D(int target, int level, int /*internalFormat*/,
     newInfo.magFilter = savedMagFilter;
     newInfo.wrapS = savedWrapS;
     newInfo.wrapT = savedWrapT;
+    newInfo.usesMipmapFilter = savedUsesMipmap;
     // Reuse the already-converted RGBA data from the staging upload (avoids double conversion)
     newInfo.cpuData = std::move(rgbaData);
     textures_[texId] = std::move(newInfo);
@@ -2019,9 +2036,9 @@ void vkRenderer::TexSubImage2D(int /*target*/, int /*level*/,
             if (dstIdx < 0 || dstIdx >= texW * texH) continue;
 
             if (srcChannels == 1) {
-                tex.cpuData[dstIdx*4+0] = 255;
-                tex.cpuData[dstIdx*4+1] = 255;
-                tex.cpuData[dstIdx*4+2] = 255;
+                tex.cpuData[dstIdx*4+0] = src[srcIdx];
+                tex.cpuData[dstIdx*4+1] = src[srcIdx];
+                tex.cpuData[dstIdx*4+2] = src[srcIdx];
                 tex.cpuData[dstIdx*4+3] = src[srcIdx];
             } else if (srcChannels == 3) {
                 tex.cpuData[dstIdx*4+0] = src[srcIdx*3+0];
@@ -2089,10 +2106,11 @@ void vkRenderer::TexSubImage2D(int /*target*/, int /*level*/,
     rVulkanBufferManager::DestroyBuffer(device, staging);
     tex.dirty = false;
 
-    // Regenerate mipmaps if this texture has them — the sub-image update only
-    // wrote mip level 0, leaving higher levels stale.
-    if (tex.mipLevels > 1)
-        GenerateMipmap(0);
+    // Note: mipmap regeneration after sub-image updates was removed because it
+    // causes synchronization issues with font atlas textures (glyphs go missing).
+    // Font atlases use GL_LINEAR with no mip filtering, so stale higher mip levels
+    // are never sampled. For non-font textures that use TexSubImage2D (rare),
+    // the caller should explicitly call GenerateMipmap if needed.
 }
 void vkRenderer::GenerateMipmap(int /*target*/)
 {

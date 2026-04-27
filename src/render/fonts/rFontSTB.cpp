@@ -602,6 +602,27 @@ bool rFontSTB::LoadMSDFGlyph(unsigned int codepoint)
         return false;  // Glyph not ready yet, will be available next frame
     }
 
+    // Helper: try to pack into atlas, growing if needed. On grow, rescale
+    // all cached glyph UVs so previously-packed glyphs remain correct.
+    auto packOrGrow = [&](auto& atlas, int cellSize, int& outX, int& outY) -> bool {
+        bool ok = atlas->pack(cellSize, cellSize, outX, outY);
+        if (!ok) {
+            int oldW = atlas->width(), oldH = atlas->height();
+            if (atlas->grow()) {
+                float sx = static_cast<float>(oldW) / atlas->width();
+                float sy = static_cast<float>(oldH) / atlas->height();
+                for (auto& [cp, g] : glyphCache_) {
+                    if (g.state == GlyphState::LOADED && g.metrics.textureId == atlas->textureId()) {
+                        g.metrics.texU0 *= sx; g.metrics.texU1 *= sx;
+                        g.metrics.texV0 *= sy; g.metrics.texV1 *= sy;
+                    }
+                }
+                ok = atlas->pack(cellSize, cellSize, outX, outY);
+            }
+        }
+        return ok;
+    };
+
     // Sync path: generate and upload immediately (used during initialization)
     // Pack into atlas — 1-pixel margin on each side prevents bilinear filtering
     // from bleeding across cell boundaries. UVs cover the full glyph cell
@@ -613,15 +634,7 @@ bool rFontSTB::LoadMSDFGlyph(unsigned int codepoint)
 
     if (mode_ == FontMode::SDF && atlasSDF_)
     {
-        packed = atlasSDF_->pack(cellWithMargin, cellWithMargin, atlasX, atlasY);
-        if (!packed)
-        {
-            // Try to grow atlas
-            if (atlasSDF_->grow())
-            {
-                packed = atlasSDF_->pack(cellWithMargin, cellWithMargin, atlasX, atlasY);
-            }
-        }
+        packed = packOrGrow(atlasSDF_, cellWithMargin, atlasX, atlasY);
 
         if (packed)
         {
@@ -639,14 +652,7 @@ bool rFontSTB::LoadMSDFGlyph(unsigned int codepoint)
     }
     else if (mode_ == FontMode::MSDF && atlasMSDF_)
     {
-        packed = atlasMSDF_->pack(cellWithMargin, cellWithMargin, atlasX, atlasY);
-        if (!packed)
-        {
-            if (atlasMSDF_->grow())
-            {
-                packed = atlasMSDF_->pack(cellWithMargin, cellWithMargin, atlasX, atlasY);
-            }
-        }
+        packed = packOrGrow(atlasMSDF_, cellWithMargin, atlasX, atlasY);
 
         if (packed)
         {
@@ -665,14 +671,7 @@ bool rFontSTB::LoadMSDFGlyph(unsigned int codepoint)
     }
     else if (mode_ == FontMode::MTSDF && atlasMTSDF_)
     {
-        packed = atlasMTSDF_->pack(cellWithMargin, cellWithMargin, atlasX, atlasY);
-        if (!packed)
-        {
-            if (atlasMTSDF_->grow())
-            {
-                packed = atlasMTSDF_->pack(cellWithMargin, cellWithMargin, atlasX, atlasY);
-            }
-        }
+        packed = packOrGrow(atlasMTSDF_, cellWithMargin, atlasX, atlasY);
 
         if (packed)
         {
