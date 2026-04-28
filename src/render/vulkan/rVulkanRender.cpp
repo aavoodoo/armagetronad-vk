@@ -4326,6 +4326,11 @@ void sr_vkRendererReloadShaders()
         s_vkRenderer->ReloadShaders();
 }
 
+bool sr_vkIsFrameStarted()
+{
+    return s_vkRenderer && s_vkRenderer->IsFrameStarted();
+}
+
 void sr_vkWaitIdle()
 {
     if (s_vkRenderer && s_vkRenderer->IsInitialized())

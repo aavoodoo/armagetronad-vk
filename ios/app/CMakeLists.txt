@@ -272,6 +272,7 @@ file(GLOB TRON_SRCS
     "${SRC}/tron/gLogo.cpp"
     "${SRC}/tron/gMenus.cpp"
     "${SRC}/tron/gMoviepack.cpp"
+    "${SRC}/tron/gCockpitPack.cpp"
     "${SRC}/tron/gParser.cpp"
     "${SRC}/tron/gParticles.cpp"
     "${SRC}/tron/gRotation.cpp"
@@ -634,6 +635,17 @@ set_source_files_properties(
 # ============================================================================
 # Compiler flags
 # ============================================================================
+# ============================================================================
+# Copy moviepacks and cockpits into the app bundle
+# ============================================================================
+add_custom_command(TARGET armagetronad POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_BUNDLE_DIR:armagetronad>/moviepacks"
+    COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_BUNDLE_DIR:armagetronad>/cockpits"
+    COMMAND ${CMAKE_COMMAND} -E copy_directory "${REPO_ROOT}/ios/app/assets/moviepacks" "$<TARGET_BUNDLE_DIR:armagetronad>/moviepacks"
+    COMMAND ${CMAKE_COMMAND} -E copy_directory "${REPO_ROOT}/ios/app/assets/cockpits" "$<TARGET_BUNDLE_DIR:armagetronad>/cockpits"
+    COMMENT "Copying moviepacks and cockpits to app bundle"
+)
+
 target_compile_options(armagetronad PRIVATE
     -Wall
     -Wno-unused-parameter

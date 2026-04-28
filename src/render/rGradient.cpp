@@ -79,7 +79,7 @@ float rGradient::GetGradientPt(tCoord const &where) {
 
 rColor rGradient::GetColor(float where) {
 #ifndef DEDICATED
-    if(empty()) return rColor();
+    if(empty()) return m_tex.Valid() ? rColor(1,1,1,1) : rColor();
     if(begin()->first >= where) return begin()->second;
     iterator upper, lower;
     iterator i=begin();
@@ -253,17 +253,36 @@ rRenderStateKey rGradient::GetRenderStateKey(rBlendMode blendMode) {
         // Query the bound texture ID
         unsigned int textureId = RenderGetBoundTexture2D();
 
-        // Create textured state
-        key = rRenderStateKey::Textured(textureId, blendMode);
+        if (m_sdfMode > 0) {
+            // SDF/MSDF/MTSDF rendering: use SDFTextured state key
+            // screenPxRange = spread * (outputPixels / texturePixels).
+            // For 256px textures with spread=24 at typical HUD sizes (~150px),
+            // this gives ~14. Higher = sharper edges.
+            float screenPxRange = 14.0f;
+            key = rRenderStateKey::SDFTextured(
+                textureId,
+                false,             // useTexture=false: inside color from push constants
+                screenPxRange,
+                m_sdfOutlineWidth,
+                m_sdfOutlineR, m_sdfOutlineG, m_sdfOutlineB,
+                1.0f, 1.0f, 1.0f, 1.0f,  // inside color: white (modulated by vColor)
+                false,             // invert
+                m_texScale.x != 1.0f ? 1.0f / m_texScale.x : 0.0f,
+                m_texScale.y != 1.0f ? 1.0f / m_texScale.y : 0.0f
+            );
+        } else {
+            // Normal textured rendering
+            key = rRenderStateKey::Textured(textureId, blendMode);
 
-        // Apply texture scale via texture matrix (avoids int16 UV overflow)
-        if (m_texScale.x != 1.0f || m_texScale.y != 1.0f) {
-            float texMatrix[16] = {0};
-            texMatrix[0]  = 1.0f / m_texScale.x;
-            texMatrix[5]  = 1.0f / m_texScale.y;
-            texMatrix[10] = 1.0f;
-            texMatrix[15] = 1.0f;
-            key.SetTexMatrix(texMatrix);
+            // Apply texture scale via texture matrix (avoids int16 UV overflow)
+            if (m_texScale.x != 1.0f || m_texScale.y != 1.0f) {
+                float texMatrix[16] = {0};
+                texMatrix[0]  = 1.0f / m_texScale.x;
+                texMatrix[5]  = 1.0f / m_texScale.y;
+                texMatrix[10] = 1.0f;
+                texMatrix[15] = 1.0f;
+                key.SetTexMatrix(texMatrix);
+            }
         }
     } else {
         // Untextured gradient (vertex color only)

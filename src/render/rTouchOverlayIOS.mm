@@ -420,7 +420,7 @@ typedef NS_ENUM(NSInteger, AAButtonSide) {
 
 - (NSArray<NSString*>*)dropdownItems {
     if (_side == AAButtonSideLeft) {
-        return @[ @"Touch Mode 1  (steer L/R)",
+        return @[ @"Touch Mode 1  (tap zones)",
                   @"Touch Mode 2  (swipe)",
                   @"Touch Mode 3  (buttons)" ];
     } else {

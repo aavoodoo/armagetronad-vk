@@ -54,6 +54,9 @@ class rGradient: public std::map<float, rColor> {
     rColor GetColor(float where);
 
     rResourceTexture m_tex;
+    int m_sdfMode = 0;          // 0=normal, 1=SDF, 2=MSDF, 3=MTSDF
+    float m_sdfOutlineWidth = 0.0f;
+    float m_sdfOutlineR = 0.0f, m_sdfOutlineG = 0.0f, m_sdfOutlineB = 0.0f;
 public:
     rGradient(); //!< Constructor
     ~rGradient(); //!< Destructor
@@ -76,6 +79,17 @@ public:
     //! Set the texture to be overlaid with the gradient
     void SetTexture(rResourceTexture const &tex) {m_tex = tex;}
     void SetTextureScale(tCoord const &scale) {m_texScale = scale;}
+
+    //! Check if the gradient has any content (colors or texture)
+    bool HasContent() { return !empty() || m_tex.Valid() || m_sdfMode > 0; }
+
+    //! SDF rendering mode (0=normal, 1=SDF, 2=MSDF, 3=MTSDF)
+    void SetSDFMode(int mode) { m_sdfMode = mode; }
+    int GetSDFMode() const { return m_sdfMode; }
+    void SetSDFOutline(float width, float outR, float outG, float outB) {
+        m_sdfOutlineWidth = width;
+        m_sdfOutlineR = outR; m_sdfOutlineG = outG; m_sdfOutlineB = outB;
+    }
 
     //! Generate vertices for a rectangle with gradient colors (batch rendering)
     //! @param edge1 First corner

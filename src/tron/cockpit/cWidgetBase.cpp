@@ -458,6 +458,22 @@ void WithColorFunctions::ProcessImage(tXmlParser::node cur, rGradient &gradient,
                 cur.GetProp("uri")
             );
             gradient.SetTexture(rResourceTexture(path, repeat & 1, repeat & 2));
+
+            // SDF rendering mode: sdf="sdf|msdf|mtsdf"
+            if (cur.HasProp("sdf")) {
+                tString mode = cur.GetProp("sdf");
+                if (mode == "sdf")       gradient.SetSDFMode(1);
+                else if (mode == "msdf") gradient.SetSDFMode(2);
+                else if (mode == "mtsdf") gradient.SetSDFMode(3);
+
+                // Optional outline parameters
+                float outW = 0.0f, outR = 0.0f, outG = 0.0f, outB = 0.0f;
+                cur.GetProp("outline", outW);
+                cur.GetProp("outlineR", outR);
+                cur.GetProp("outlineG", outG);
+                cur.GetProp("outlineB", outB);
+                gradient.SetSDFOutline(outW, outR, outG, outB);
+            }
         }
     }
 }

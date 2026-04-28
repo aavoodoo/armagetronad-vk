@@ -58,7 +58,11 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 
 #include <time.h>
 
+// Forward: ensure cockpit pack ZIP is extracted before loading
+extern void sr_EnsureCockpitPackExtracted();
+
 static void parsecockpit () {
+    sr_EnsureCockpitPackExtracted();
     FOREACH_COCKPIT(i) {
         (*i)->ProcessCockpit();
     }
@@ -72,7 +76,7 @@ static void readjust_cockpit () {
 
 static rCallbackAfterScreenModeChange reloadft(&readjust_cockpit);
 
-static tString cockpit_file("Anonymous/standard-0.0.1.aacockpit.xml");
+tString cockpit_file("Anonymous/standard-0.0.1.aacockpit.xml");
 static tConfItem<tString> cf("COCKPIT_FILE",cockpit_file,&parsecockpit);
 
 typedef std::pair<tString, tValue::Callback<cCockpit>::cb_ptr> cbpair;
@@ -434,7 +438,22 @@ cCockpit* cCockpit::_instance = 0;
 void cCockpit::ProcessCockpit(void) {
     ClearWidgets();
 
-    if (!LoadWithParsing(cockpit_file)) return;
+    if (!LoadWithParsing(cockpit_file))
+    {
+        // If loading fails and it's not the default cockpit, fall back to default
+        // and try to extract the pack on next menu access.
+        static const char* defaultCockpit = "Anonymous/standard-0.0.1.aacockpit.xml";
+        if (strcmp(static_cast<const char*>(cockpit_file), defaultCockpit) != 0)
+        {
+            con << "[Cockpit] Failed to load '" << cockpit_file
+                << "', falling back to default. Re-select from System Setup.\n";
+            cockpit_file = defaultCockpit;
+            if (!LoadWithParsing(cockpit_file))
+                return;
+        }
+        else
+            return;
+    }
     node cur = GetFileContents();
     if(!cur) {
         tERR_WARN("No Cockpit node found!");
@@ -916,7 +935,7 @@ bool cCockpit::ProcessTouch(float x, float y, uint32_t type, int64_t fingerId) {
     if (type == SDL_EVENT_FINGER_DOWN) {
         FOREACH_COCKPIT(cockpit) {
             for (cWidget::TouchButton* btn : (*cockpit)->m_TouchButtons) {
-                if (btn->activeFinger_ == -1 && btn->HitTest(hx, hy)) {
+                if (btn->IsActiveInCurrentMode() && btn->activeFinger_ == -1 && btn->HitTest(hx, hy)) {
                     btn->activeFinger_ = fingerId;
                     s_activeFingers[fingerId] = btn;
                     btn->Activate(true);

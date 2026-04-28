@@ -454,6 +454,7 @@ bool tXmlParser::ValidateXml(FILE* docfd, const char* uri, const char* filepath)
         /* check if validation suceeded */
         if (ctxt->valid == 0) {
             fprintf(stderr, "Failed to validate \n");
+            std::cerr << "[XML] Validation failed for: " << filepath << std::endl;
             xmlFreeDoc(m_Doc);
             m_Doc=NULL;
         }

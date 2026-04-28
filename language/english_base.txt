@@ -2002,6 +2002,8 @@ misc_textout_help		Toggles the display of text messages (chat, status info...) o
 
 misc_moviepack_text		Moviepack:
 misc_moviepack_help		Select a moviepack to use movie-like graphics. Choose None to use the default graphics.
+cockpit_pack_text		Cockpit:
+cockpit_pack_help		Select a cockpit HUD pack. Choose Default to use the standard cockpit.
 
 misc_initial_menu_title Redo First Setup
 misc_initial_menu_help Restarts the first setup menu where you can select color and keyboard layout templates.

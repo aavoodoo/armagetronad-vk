@@ -163,15 +163,37 @@ FR13 — Shadow mapping (replace shadow quad)
     - Shadow on lit geometry (cycles): uses vModelPos which is model-space, not world-space
 
 FR14 — SDF cockpit HUD system
+  Status: Cockpit pack infrastructure done, SDF textures pending
+  .aacockpit.zip format implemented:
+    - gCockpitPackManager scans cockpits/ for .aacockpit.zip files
+    - ZIP contains cockpit XML + textures + optional preview.png
+    - Activation extracts to resource/included/<author>/<category>/ with proper
+      resource naming (<name>-<version>.aacockpit.xml)
+    - Cockpit selector in System Setup menu (browse/activate pattern)
+    - Config persistence via COCKPIT_PACK setting
+    - Two sample packs: cadillac.aacockpit.zip, essentialRemix.aacockpit.zip
+  Remaining:
+    - SDF attribute on <Graphic> elements (sdf="sdf|msdf|mtsdf")
+    - Touch cockpit with TouchButton widgets for tap zones
+    - Touch mode 1 rename to "Tap Zones"
+  Prerequisites: FR6 (SDF textured rendering) for SDF widget textures
+
+FR15 — Moviepack SPIR-V pre-compilation for iOS
   Status: Not started
-  Build new cockpit using SDF textures for crisp widgets at any resolution/size.
-  Goals:
-    - SDF-textured gauges, speedometer, score display, minimap frame
-    - Touch-control variant with L/R/brake buttons embedded in the cockpit
-    - New file format: .aahud.zip containing cockpit layout + SDF textures
-    - User-selectable from a cockpit folder (similar to moviepack selection)
-    - Scalable to any screen size without blurring (SDF distance field rendering)
-  Prerequisites: FR6 (SDF textured rendering), cockpit XML parser updates
+  iOS has no runtime shaderc (Apple forbids JIT/dynamic code generation).
+  Moviepack shader overrides (uber_hooks.glsl, post-process shaders) only work
+  on macOS/desktop where shaderc compiles GLSL at runtime.
+  Solution: add a --compile-moviepack CLI option to the desktop client:
+    armagetronad_main --compile-moviepack path/to/pack.aamvp.zip
+  This would:
+    1. Extract the ZIP to a temp directory
+    2. Compile all .glsl/.vert/.frag files to SPIR-V using shaderc
+       (same include paths and defines as the runtime compiler)
+    3. Store the .spv files alongside the GLSL sources in the ZIP
+       (e.g., shaders/uber_hooks.glsl → shaders/uber_hooks.glsl.spv)
+    4. On iOS, the renderer loads .spv from the moviepack instead of compiling
+  Affects: uber_hooks.glsl overrides, post-process effect shaders (bloom,
+  celshading, etc.), any future moviepack shader customizations.
 
 FR12 — Structured settings system
   Status: Not started

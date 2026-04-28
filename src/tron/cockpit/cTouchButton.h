@@ -49,7 +49,7 @@ namespace cWidget {
 //!     <Size width="0.20" height="0.20"/>
 //!     <Caption>◀</Caption>
 //!   </TouchButton>
-class TouchButton : public WithCoordinates, public WithCaption {
+class TouchButton : public WithCoordinates, public WithCaption, public WithBackground {
 public:
     TouchButton();
     ~TouchButton() override = default;
@@ -68,6 +68,12 @@ public:
     uAction* action_       = nullptr; //!< Resolved action pointer (lazy)
     int64_t  activeFinger_ = -1; //!< Finger currently holding this button (-1 = none)
     bool     pressed_      = false;
+    uint8_t  touchModeMask_ = 0x08; //!< Bitmask of touch modes where this button is active.
+                                    //!< Default 0x08 = mode 3 only. Bit 1=mode1, 2=mode2, 4=mode3.
+                                    //!< Parsed from touchMode="1,3" or touchMode="all".
+
+    //! Check if this button is active in the current touch mode
+    bool IsActiveInCurrentMode() const;
 
 private:
     void ResolveAction();

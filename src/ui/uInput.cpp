@@ -45,8 +45,8 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 
 // Touch devices support (touchscreen or touchpad)
 // 0:disabled
-// 1:touch control by left/right touches
-// 2:touch control by swipes and drawing
+// 1:tap zones (left=turn left, center=brake, right=turn right)
+// 2:swipe gestures
 // 3:cockpit widget buttons
 static int su_enableTouch = 0;
 static tSettingItem< int > su_enableTouchConf( "ENABLE_TOUCH", su_enableTouch );
@@ -54,7 +54,7 @@ static tSettingItem< int > su_enableTouchConf( "ENABLE_TOUCH", su_enableTouch );
 void su_EnableTouchDefault() {
 #if defined(__ANDROID__) || (defined(__APPLE__) && TARGET_OS_IOS)
     if (su_enableTouch == 0)
-        su_enableTouch = 1;   // default to left/right touch steering on mobile
+        su_enableTouch = 1;   // default to tap zones (L/R/brake) on mobile
 #endif
 }
 
@@ -1137,6 +1137,13 @@ static void su_TransformEvent( SDL_Event & e, std::vector< uTransformEventInfo >
     case SDL_EVENT_FINGER_DOWN:
     case SDL_EVENT_FINGER_UP:
     case SDL_EVENT_FINGER_MOTION:
+        // Try cockpit touch buttons first (any mode). Buttons with
+        // touchMode="1,3" etc. check IsActiveInCurrentMode() internally.
+        if (su_enableTouch >= 1 &&
+            cCockpit_ProcessTouch(e.tfinger.x, e.tfinger.y, e.type, e.tfinger.fingerID))
+        {
+            break; // consumed by a cockpit button
+        }
         if (su_enableTouch==1)
         {
             static SDL_FingerID finger = 0;
@@ -1269,11 +1276,7 @@ static void su_TransformEvent( SDL_Event & e, std::vector< uTransformEventInfo >
                 }
             }
         }
-        else if (su_enableTouch==3)
-        {
-            // Mode 3: cockpit widget buttons — forward to cCockpit
-            cCockpit_ProcessTouch(e.tfinger.x, e.tfinger.y, e.type, e.tfinger.fingerID);
-        }
+        // Mode 3 with no button hit falls through here (no zone/swipe handling)
         break;
     // SDL3: SDL_KEYDOWN → SDL_EVENT_KEY_DOWN, keysym → direct key access
     case SDL_EVENT_KEY_DOWN:

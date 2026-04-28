@@ -43,16 +43,39 @@ TouchButton::TouchButton()
 
 bool TouchButton::Process(tXmlParser::node cur)
 {
-    // Handle root <TouchButton action="" player=""> attributes
+    // Handle root <TouchButton action="" player="" touchMode="1,3"> attributes
     if (cur.IsOfType("TouchButton")) {
         actionName_ = cur.GetProp("action");
         cur.GetProp("player", player_);
+
+        // Parse touchMode: comma-separated list of mode numbers, or "all"
+        if (cur.HasProp("touchMode")) {
+            tString modes = cur.GetProp("touchMode");
+            if (modes == "all") {
+                touchModeMask_ = 0x0E; // modes 1,2,3
+            } else {
+                touchModeMask_ = 0;
+                for (int i = 0; i < modes.Len(); i++) {
+                    char c = modes[i];
+                    if (c >= '1' && c <= '3')
+                        touchModeMask_ |= (1 << (c - '0'));
+                }
+                if (touchModeMask_ == 0) touchModeMask_ = 0x08; // fallback to mode 3
+            }
+        }
         return true;
     }
-    if (WithCoordinates::Process(cur) || WithCaption::Process(cur))
+    if (WithCoordinates::Process(cur) || WithCaption::Process(cur) || WithBackground::Process(cur))
         return true;
     DisplayError(cur);
     return false;
+}
+
+bool TouchButton::IsActiveInCurrentMode() const
+{
+    int mode = su_GetEnableTouch();
+    if (mode < 1 || mode > 3) return false;
+    return (touchModeMask_ & (1 << mode)) != 0;
 }
 
 void TouchButton::ResolveAction()
@@ -78,28 +101,40 @@ void TouchButton::Activate(bool on)
 
 void TouchButton::Render()
 {
-    if (su_GetEnableTouch() != 3) return;
-
-    // Semi-transparent blue-ish quad: dim idle (alpha ~64), bright when pressed (alpha ~153)
-    const uint8_t alpha = pressed_ ? 153 : 64;
-    const uint8_t r = 80, g = 100, b = 220;
+    if (!IsActiveInCurrentMode()) return;
 
     const float x0 = m_position.x - m_size.x;
     const float x1 = m_position.x + m_size.x;
     const float y0 = m_position.y - m_size.y;
     const float y1 = m_position.y + m_size.y;
 
-    // Build quad (top-left, top-right, bottom-right, bottom-left) in [-1,1] HUD space
-    rVertex20 verts[4] = {
-        rVertex20(x0, y1, 0, r, g, b, alpha, 0, 0),  // top-left
-        rVertex20(x1, y1, 0, r, g, b, alpha, 0, 0),  // top-right
-        rVertex20(x1, y0, 0, r, g, b, alpha, 0, 0),  // bottom-right
-        rVertex20(x0, y0, 0, r, g, b, alpha, 0, 0),  // bottom-left
-    };
+    const uint8_t alpha = pressed_ ? 200 : 128;
 
-    rRenderStateKey state = rRenderStateKey::HUD(0, rBlendMode::Alpha);
-    rRenderQueue::Instance().SubmitQuad(rRenderPhase::HUD, state,
-                                        verts[0], verts[1], verts[2], verts[3]);
+    if (m_background.HasContent())
+    {
+        // Use Background gradient/texture from XML (supports SDF via Graphic sdf= attribute)
+        m_background.SetGradientEdges(tCoord(x0, y0), tCoord(x1, y1));
+        auto verts = m_background.GenerateRectVertices(tCoord(x0, y0), tCoord(x1, y1));
+        // Apply press alpha modulation
+        for (auto& v : verts)
+        {
+            uint8_t va = v.color[3];
+            v.color[3] = static_cast<uint8_t>(va * alpha / 255);
+        }
+        rRenderStateKey state = m_background.GetRenderStateKey(rBlendMode::Alpha);
+        rRenderQueue::Instance().Submit(rRenderPhase::HUD, state, verts.data(), verts.size());
+    }
+    else
+    {
+        // Default: semi-transparent blue quad
+        const uint8_t r = 80, g = 100, b = 220;
+        rVertex20 v0(x0, y1, 0, r, g, b, alpha, 0, 0);
+        rVertex20 v1(x1, y1, 0, r, g, b, alpha, 0, 0);
+        rVertex20 v2(x1, y0, 0, r, g, b, alpha, 0, 0);
+        rVertex20 v3(x0, y0, 0, r, g, b, alpha, 0, 0);
+        rRenderStateKey state = rRenderStateKey::HUD(0, rBlendMode::Alpha);
+        rRenderQueue::Instance().SubmitQuad(rRenderPhase::HUD, state, v0, v1, v2, v3);
+    }
 
     // Render caption text centered in button
     if (!m_caption.empty()) {
