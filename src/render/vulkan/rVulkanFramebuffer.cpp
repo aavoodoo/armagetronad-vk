@@ -62,7 +62,7 @@ bool rVulkanFramebuffer::Create(rVulkanContext& ctx, rVulkanSwapchain& swapchain
 bool rVulkanFramebuffer::Recreate(rVulkanContext& ctx, rVulkanSwapchain& swapchain)
 {
     DestroyFramebuffers(ctx.GetDevice());
-    DestroyDepthResources(ctx.GetDevice());
+    DestroyDepthResources(ctx);
 
     if (!CreateDepthResources(ctx, swapchain.GetExtent().width, swapchain.GetExtent().height))
         return false;
@@ -73,14 +73,14 @@ bool rVulkanFramebuffer::Recreate(rVulkanContext& ctx, rVulkanSwapchain& swapcha
     return true;
 }
 
-void rVulkanFramebuffer::Destroy(VkDevice device)
+void rVulkanFramebuffer::Destroy(rVulkanContext& ctx)
 {
-    DestroyFramebuffers(device);
-    DestroyDepthResources(device);
+    DestroyFramebuffers(ctx.GetDevice());
+    DestroyDepthResources(ctx);
 
     if (renderPass_ != VK_NULL_HANDLE)
     {
-        vkDestroyRenderPass(device, renderPass_, nullptr);
+        vkDestroyRenderPass(ctx.GetDevice(), renderPass_, nullptr);
         renderPass_ = VK_NULL_HANDLE;
     }
 }
@@ -189,7 +189,7 @@ bool rVulkanFramebuffer::CreateDepthResources(rVulkanContext& ctx, uint32_t widt
 {
     VkDevice device = ctx.GetDevice();
 
-    // Create depth image
+    // Create depth image via VMA
     VkImageCreateInfo imageInfo{};
     imageInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
     imageInfo.imageType = VK_IMAGE_TYPE_2D;
@@ -210,35 +210,14 @@ bool rVulkanFramebuffer::CreateDepthResources(rVulkanContext& ctx, uint32_t widt
     imageInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
     imageInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
 
-    if (vkCreateImage(device, &imageInfo, nullptr, &depthImage_) != VK_SUCCESS)
+    VmaAllocationCreateInfo vmaAllocCI{};
+    vmaAllocCI.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
+    if (vmaCreateImage(ctx.GetAllocator(), &imageInfo, &vmaAllocCI,
+                       &depthImage_, &depthAllocation_, nullptr) != VK_SUCCESS)
     {
-        std::cerr << "[Vulkan] Failed to create depth image" << std::endl;
+        std::cerr << "[Vulkan] VMA: failed to create depth image" << std::endl;
         return false;
     }
-
-    // Allocate memory
-    VkMemoryRequirements memReqs;
-    vkGetImageMemoryRequirements(device, depthImage_, &memReqs);
-
-    uint32_t memType = ctx.FindMemoryType(memReqs.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
-    if (memType == UINT32_MAX)
-    {
-        std::cerr << "[Vulkan] Failed to find depth memory type" << std::endl;
-        return false;
-    }
-
-    VkMemoryAllocateInfo allocInfo{};
-    allocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
-    allocInfo.allocationSize = memReqs.size;
-    allocInfo.memoryTypeIndex = memType;
-
-    if (vkAllocateMemory(device, &allocInfo, nullptr, &depthMemory_) != VK_SUCCESS)
-    {
-        std::cerr << "[Vulkan] Failed to allocate depth memory" << std::endl;
-        return false;
-    }
-
-    vkBindImageMemory(device, depthImage_, depthMemory_, 0);
 
     // Create image view
     VkImageViewCreateInfo viewInfo{};
@@ -289,22 +268,18 @@ bool rVulkanFramebuffer::CreateFramebuffers(VkDevice device, rVulkanSwapchain& s
     return true;
 }
 
-void rVulkanFramebuffer::DestroyDepthResources(VkDevice device)
+void rVulkanFramebuffer::DestroyDepthResources(rVulkanContext& ctx)
 {
     if (depthView_ != VK_NULL_HANDLE)
     {
-        vkDestroyImageView(device, depthView_, nullptr);
+        vkDestroyImageView(ctx.GetDevice(), depthView_, nullptr);
         depthView_ = VK_NULL_HANDLE;
     }
     if (depthImage_ != VK_NULL_HANDLE)
     {
-        vkDestroyImage(device, depthImage_, nullptr);
-        depthImage_ = VK_NULL_HANDLE;
-    }
-    if (depthMemory_ != VK_NULL_HANDLE)
-    {
-        vkFreeMemory(device, depthMemory_, nullptr);
-        depthMemory_ = VK_NULL_HANDLE;
+        vmaDestroyImage(ctx.GetAllocator(), depthImage_, depthAllocation_);
+        depthImage_      = VK_NULL_HANDLE;
+        depthAllocation_ = VK_NULL_HANDLE;
     }
 }
 

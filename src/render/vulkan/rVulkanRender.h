@@ -44,6 +44,7 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 #include "rVulkanShader.h"
 #include "rVulkanRenderQueue.h"
 #include "rVulkanPostProcess.h"
+#include "rVulkanStagingPool.h"
 #include <vector>
 #include <unordered_map>
 #include "rCycleRenderer.h"
@@ -356,7 +357,7 @@ private:
     };
     // Per-frame buffers: frame N writes to slot N, GPU reads slot N without aliasing
     VkBuffer        lightingUBOBuffer_[MAX_FRAMES_IN_FLIGHT]  = {};
-    VkDeviceMemory  lightingUBOMemory_[MAX_FRAMES_IN_FLIGHT]  = {};
+    VmaAllocation   lightingUBOAlloc_[MAX_FRAMES_IN_FLIGHT]   = {};
     void*           lightingUBOMapped_[MAX_FRAMES_IN_FLIGHT]  = {};
     VkDescriptorSet lightingDescSet_[MAX_FRAMES_IN_FLIGHT]    = {};
     // Set 1 descriptor layout + pool (UBO-only, separate from the texture pool in set 0)
@@ -366,9 +367,9 @@ private:
     // Texture management
     struct VkTextureInfo
     {
-        VkImage       image = VK_NULL_HANDLE;
-        VkDeviceMemory memory = VK_NULL_HANDLE;
-        VkImageView   view = VK_NULL_HANDLE;
+        VkImage       image           = VK_NULL_HANDLE;
+        VmaAllocation imageAllocation = VK_NULL_HANDLE;
+        VkImageView   view            = VK_NULL_HANDLE;
         VkSampler     sampler = VK_NULL_HANDLE;
         int width = 0, height = 0;
         uint32_t mipLevels = 1;
@@ -379,6 +380,8 @@ private:
         VkSamplerAddressMode wrapT = VK_SAMPLER_ADDRESS_MODE_REPEAT;
         bool usesMipmapFilter = true;  // false = GL_LINEAR/GL_NEAREST (no mip)
         VkImageLayout descriptorLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        // Tracked actual image layout (updated on every barrier / render pass transition)
+        VkImageLayout currentLayout    = VK_IMAGE_LAYOUT_UNDEFINED;
         // CPU-side RGBA copy for TexSubImage2D (update CPU, then re-upload full image)
         std::vector<uint8_t> cpuData;
         bool dirty = false;
@@ -411,11 +414,71 @@ private:
     // Textures pending destruction, deferred by MAX_FRAMES_IN_FLIGHT frames
     // so in-flight frames can finish sampling before resources are freed.
     DeferredQueue<VkTextureInfo> pendingDeleteTextures_;
-    // Samplers pending destruction (deferred for same reason as textures)
-    DeferredQueue<VkSampler> pendingDeleteSamplers_;
+
+    // Sampler cache: maps sampler parameters → shared VkSampler.
+    // Samplers are never destroyed until device shutdown (Destroy()).
+    // This eliminates per-TexParameter sampler recreation and reduces the
+    // total number of VkSampler objects from O(texture count) to
+    // O(unique parameter sets) — typically 3-5 samplers for the whole game.
+    struct SamplerKey {
+        VkFilter             minFilter;
+        VkFilter             magFilter;
+        VkSamplerAddressMode wrapS;
+        VkSamplerAddressMode wrapT;
+        float                maxLod; // computed from usesMipmapFilter + mipLevels
+        bool operator==(const SamplerKey& o) const {
+            return minFilter == o.minFilter && magFilter == o.magFilter &&
+                   wrapS == o.wrapS && wrapT == o.wrapT && maxLod == o.maxLod;
+        }
+    };
+    struct SamplerKeyHash {
+        size_t operator()(const SamplerKey& k) const {
+            size_t h = static_cast<size_t>(k.minFilter);
+            h = h * 31 + static_cast<size_t>(k.magFilter);
+            h = h * 31 + static_cast<size_t>(k.wrapS);
+            h = h * 31 + static_cast<size_t>(k.wrapT);
+            // float hash: reinterpret as uint32
+            uint32_t lodBits;
+            static_assert(sizeof(float) == sizeof(uint32_t), "float size assumption");
+            __builtin_memcpy(&lodBits, &k.maxLod, sizeof(lodBits));
+            h = h * 31 + lodBits;
+            return h;
+        }
+    };
+    std::unordered_map<SamplerKey, VkSampler, SamplerKeyHash> samplerCache_;
+
+    //! Get or create a cached sampler. Never returns VK_NULL_HANDLE on success.
+    VkSampler GetOrCreateSampler(VkFilter minFilter, VkFilter magFilter,
+                                 VkSamplerAddressMode wrapS, VkSamplerAddressMode wrapT,
+                                 float maxLod);
+
+    //! Emit a pipeline barrier that transitions `image` from `oldLayout` to `newLayout`.
+    //! aspectMask: VK_IMAGE_ASPECT_COLOR_BIT or DEPTH_STENCIL_BIT.
+    //! mipLevels: number of mip levels to cover (usually all of them).
+    //! src/dstStage: pipeline stages for the barrier (caller knows the context).
+    static void TransitionImageLayout(VkCommandBuffer cmd, VkImage image,
+                                      VkImageLayout oldLayout, VkImageLayout newLayout,
+                                      VkImageAspectFlags aspectMask,
+                                      uint32_t mipLevels = 1,
+                                      VkPipelineStageFlags srcStage = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                                      VkPipelineStageFlags dstStage = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
 
     // Vulkan render queue (draw command recording)
     rVulkanRenderQueue vulkanQueue_;
+
+    // Staging pool: per-frame ring buffers for texture sub-image uploads deferred to EndFrame.
+    rVulkanStagingPool stagingPool_;
+
+    // Texture uploads queued mid-frame (inside render pass) — flushed in EndFrame after
+    // vkCmdEndRenderPass, where transfer commands are valid.
+    struct PendingTexUpload {
+        VkBuffer      srcBuffer;
+        VkDeviceSize  srcOffset;
+        VkImage       dstImage;
+        VkBufferImageCopy region;
+        VkImageLayout srcLayout;
+    };
+    std::vector<PendingTexUpload> pendingTexUploads_;
 
     // SDL window (retained for size queries on swapchain recreation)
     SDL_Window* window_ = nullptr;
@@ -446,9 +509,9 @@ private:
     static constexpr int SHADOW_MAP_SIZE = 2048;
     static constexpr int SHADOW_MAP_COUNT = 2;  // one per directional light
     struct ShadowMapFBO {
-        VkImage        depthImage  = VK_NULL_HANDLE;
-        VkDeviceMemory depthMemory = VK_NULL_HANDLE;
-        VkImageView    depthView   = VK_NULL_HANDLE;
+        VkImage       depthImage = VK_NULL_HANDLE;
+        VmaAllocation depthAlloc = VK_NULL_HANDLE;
+        VkImageView   depthView  = VK_NULL_HANDLE;
         VkSampler      sampler     = VK_NULL_HANDLE;  // comparison sampler for PCF
         VkFramebuffer  framebuffer = VK_NULL_HANDLE;
         unsigned int   texId       = 0;  // registered in textures_ for descriptor binding
@@ -462,10 +525,8 @@ private:
     bool shadowMapsCreated_ = false;
     float shadowVP_[2][16] = {};  // cached light VP matrices
     glm::mat4 shadowViewInverse_ = glm::mat4(1.0f);  // inverse of camera view at Light() time
-    // Per-frame shadow staging buffers (reused, grown as needed)
-    VkBuffer shadowStagingBuf_[MAX_FRAMES_IN_FLIGHT] = {};
-    VkDeviceMemory shadowStagingMem_[MAX_FRAMES_IN_FLIGHT] = {};
-    VkDeviceSize shadowStagingSize_[MAX_FRAMES_IN_FLIGHT] = {};
+    // Per-frame shadow vertex staging buffers (VMA-backed, persistently mapped, grown as needed)
+    rVulkanBuffer shadowStagingBuf_[MAX_FRAMES_IN_FLIGHT];
 
     bool CreateShadowMaps();
     void DestroyShadowMaps();
@@ -475,15 +536,15 @@ private:
     // === Per-viewport FBOs (split-screen depth isolation) ===
     static constexpr int MAX_VIEWPORT_FBOS = 4;
     struct ViewportFBO {
-        VkImage        colorImage  = VK_NULL_HANDLE;
-        VkDeviceMemory colorMemory = VK_NULL_HANDLE;
-        VkImageView    colorView   = VK_NULL_HANDLE;
-        VkImage        emissiveImage  = VK_NULL_HANDLE;  // dummy emissive (matches PP 3-attachment layout)
-        VkDeviceMemory emissiveMemory = VK_NULL_HANDLE;
-        VkImageView    emissiveView   = VK_NULL_HANDLE;
-        VkImage        depthImage  = VK_NULL_HANDLE;
-        VkDeviceMemory depthMemory = VK_NULL_HANDLE;
-        VkImageView    depthView   = VK_NULL_HANDLE;
+        VkImage       colorImage   = VK_NULL_HANDLE;
+        VmaAllocation colorAlloc   = VK_NULL_HANDLE;
+        VkImageView   colorView    = VK_NULL_HANDLE;
+        VkImage       emissiveImage = VK_NULL_HANDLE;  // dummy emissive (matches PP 3-attachment layout)
+        VmaAllocation emissiveAlloc = VK_NULL_HANDLE;
+        VkImageView   emissiveView  = VK_NULL_HANDLE;
+        VkImage       depthImage   = VK_NULL_HANDLE;
+        VmaAllocation depthAlloc   = VK_NULL_HANDLE;
+        VkImageView   depthView    = VK_NULL_HANDLE;
         VkFramebuffer  framebuffer   = VK_NULL_HANDLE;
         VkSampler      sampler       = VK_NULL_HANDLE;  // for color texture
         VkSampler      depthSampler  = VK_NULL_HANDLE;  // for depth texture (separate to avoid double-destroy)

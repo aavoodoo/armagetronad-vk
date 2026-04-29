@@ -222,12 +222,7 @@ vkRenderer::~vkRenderer()
         DestroyShadowMaps();
         // Destroy shadow staging buffers
         for (int i = 0; i < MAX_FRAMES_IN_FLIGHT; i++)
-        {
-            if (shadowStagingBuf_[i]) vkDestroyBuffer(device, shadowStagingBuf_[i], nullptr);
-            if (shadowStagingMem_[i]) vkFreeMemory(device, shadowStagingMem_[i], nullptr);
-            shadowStagingBuf_[i] = VK_NULL_HANDLE;
-            shadowStagingMem_[i] = VK_NULL_HANDLE;
-        }
+            rVulkanBufferManager::DestroyBuffer(context_.GetAllocator(), shadowStagingBuf_[i]);
 
         // Erase viewport FBO texture entries from textures_ map so the texture
         // loop below doesn't double-destroy resources owned by ViewportFBO structs.
@@ -238,46 +233,64 @@ vkRenderer::~vkRenderer()
                 if (vfbo.depthTexId) textures_.erase(vfbo.depthTexId);
             }
 
-        // Descriptor sets are gone; safe to destroy textures and their samplers.
+        // Descriptor sets are gone; safe to destroy textures.
+        // Samplers are owned by samplerCache_ (destroyed separately below) — do NOT destroy here.
         for (auto& [id, tex] : textures_)
         {
-            VK_DESTROY(vkDestroySampler, device, tex.sampler);
             VK_DESTROY(vkDestroyImageView, device, tex.view);
-            VK_DESTROY(vkDestroyImage, device, tex.image);
-            VK_FREE_MEMORY(device, tex.memory);
+            if (tex.image != VK_NULL_HANDLE)
+            {
+                vmaDestroyImage(context_.GetAllocator(), tex.image, tex.imageAllocation);
+                tex.image           = VK_NULL_HANDLE;
+                tex.imageAllocation = VK_NULL_HANDLE;
+            }
         }
 
-        // Flush deferred texture deletions
-        auto destroyTexInfo = [](VkDevice dev, VkTextureInfo& tex) {
-            VK_DESTROY(vkDestroySampler, dev, tex.sampler);
+        // Flush deferred texture deletions (samplers owned by cache — not destroyed here)
+        VmaAllocator vmaAlloc = context_.GetAllocator();
+        auto destroyTexInfo = [vmaAlloc](VkDevice dev, VkTextureInfo& tex) {
             VK_DESTROY(vkDestroyImageView, dev, tex.view);
-            VK_DESTROY(vkDestroyImage, dev, tex.image);
-            VK_FREE_MEMORY(dev, tex.memory);
+            if (tex.image != VK_NULL_HANDLE)
+            {
+                vmaDestroyImage(vmaAlloc, tex.image, tex.imageAllocation);
+                tex.image           = VK_NULL_HANDLE;
+                tex.imageAllocation = VK_NULL_HANDLE;
+            }
         };
         pendingDeleteTextures_.drainAllWith(device, destroyTexInfo);
 
         // Destroy dummy texture
         VK_DESTROY(vkDestroySampler, device, dummyTexture_.sampler);
         VK_DESTROY(vkDestroyImageView, device, dummyTexture_.view);
-        VK_DESTROY(vkDestroyImage, device, dummyTexture_.image);
-        VK_FREE_MEMORY(device, dummyTexture_.memory);
+        if (dummyTexture_.image != VK_NULL_HANDLE)
+        {
+            vmaDestroyImage(context_.GetAllocator(), dummyTexture_.image, dummyTexture_.imageAllocation);
+            dummyTexture_.image           = VK_NULL_HANDLE;
+            dummyTexture_.imageAllocation = VK_NULL_HANDLE;
+        }
 
-        // Drain any remaining deferred sampler deletions
-        pendingDeleteSamplers_.drainAll<vkDestroySampler>(device);
+        // Destroy all cached samplers
+        for (auto& [key, sampler] : samplerCache_)
+            if (sampler != VK_NULL_HANDLE)
+                vkDestroySampler(device, sampler, nullptr);
+        samplerCache_.clear();
 
         // Destroy per-frame lighting UBO buffers (layouts/pools already destroyed above)
         for (int i = 0; i < MAX_FRAMES_IN_FLIGHT; i++)
         {
-            if (lightingUBOMapped_[i]) {
-                vkUnmapMemory(device, lightingUBOMemory_[i]);
-                lightingUBOMapped_[i] = nullptr;
+            lightingUBOMapped_[i] = nullptr;  // VMA manages unmap via vmaDestroyBuffer
+            if (lightingUBOBuffer_[i])
+            {
+                vmaDestroyBuffer(context_.GetAllocator(), lightingUBOBuffer_[i], lightingUBOAlloc_[i]);
+                lightingUBOBuffer_[i] = VK_NULL_HANDLE;
+                lightingUBOAlloc_[i]  = VK_NULL_HANDLE;
             }
-            VK_DESTROY(vkDestroyBuffer, device, lightingUBOBuffer_[i]);
-            VK_FREE_MEMORY(device, lightingUBOMemory_[i]);
         }
 
         DestroyViewportFBOs();
         vulkanQueue_.Destroy();
+        stagingPool_.Destroy();
+        pendingTexUploads_.clear();
 
         rVulkanShader::Destroy(device, vertShader_);
         rVulkanShader::Destroy(device, vertShaderInstanced_);
@@ -293,7 +306,7 @@ vkRenderer::~vkRenderer()
         if (commandPool_)
             vkDestroyCommandPool(device, commandPool_, nullptr);
 
-        framebuffer_.Destroy(device);
+        framebuffer_.Destroy(context_);
         swapchain_.Destroy(device);
         context_.Shutdown();
     }
@@ -482,7 +495,8 @@ bool vkRenderer::Init(SDL_Window* window)
     VkPipelineLayout layout;
     if (!pipelineManager_.Init(context_.GetDevice(), framebuffer_.GetRenderPass(),
                                vertShader_, fragShader_, fragShaderEmissive_,
-                               pipelineSetLayouts, 2, &layout))
+                               pipelineSetLayouts, 2, &layout,
+                               &context_.GetDeviceProperties()))
         return false;
     pipelineManager_.SetInstancedVertShader(vertShaderInstanced_);
 
@@ -559,6 +573,9 @@ bool vkRenderer::Init(SDL_Window* window)
     if (!vulkanQueue_.Init(context_, commandPool_))
         return false;
 
+    // Init staging pool (lazy allocation — no GPU memory until first Acquire)
+    stagingPool_.Init(context_);
+
     // Create dummy 1x1 white texture for non-textured draws
     if (!CreateDummyTexture())
         return false;
@@ -604,20 +621,20 @@ bool vkRenderer::Init(SDL_Window* window)
 
         for (int i = 0; i < MAX_FRAMES_IN_FLIGHT; i++)
         {
-            if (vkCreateBuffer(context_.GetDevice(), &bufInfo, nullptr, &lightingUBOBuffer_[i]) != VK_SUCCESS)
+            VmaAllocationCreateInfo vmaAllocCI{};
+            vmaAllocCI.usage = VMA_MEMORY_USAGE_AUTO;
+            vmaAllocCI.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT
+                             | VMA_ALLOCATION_CREATE_MAPPED_BIT;
+            VmaAllocationInfo vmaAllocInfo{};
+            if (vmaCreateBuffer(context_.GetAllocator(), &bufInfo, &vmaAllocCI,
+                                &lightingUBOBuffer_[i], &lightingUBOAlloc_[i], &vmaAllocInfo) != VK_SUCCESS)
                 return false;
-
-            VkMemoryRequirements memReqs;
-            vkGetBufferMemoryRequirements(context_.GetDevice(), lightingUBOBuffer_[i], &memReqs);
-            VkMemoryAllocateInfo memAlloc{};
-            memAlloc.sType           = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
-            memAlloc.allocationSize  = memReqs.size;
-            memAlloc.memoryTypeIndex = context_.FindMemoryType(memReqs.memoryTypeBits,
-                VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
-            if (vkAllocateMemory(context_.GetDevice(), &memAlloc, nullptr, &lightingUBOMemory_[i]) != VK_SUCCESS)
+            lightingUBOMapped_[i] = vmaAllocInfo.pMappedData;
+            if (!lightingUBOMapped_[i])
+            {
+                std::cerr << "[Vulkan] VMA persistent map failed for lightingUBO[" << i << "]\n";
                 return false;
-            vkBindBufferMemory(context_.GetDevice(), lightingUBOBuffer_[i], lightingUBOMemory_[i], 0);
-            vkMapMemory(context_.GetDevice(), lightingUBOMemory_[i], 0, sizeof(LightingUBO), 0, &lightingUBOMapped_[i]);
+            }
             memcpy(lightingUBOMapped_[i], &initUBO, sizeof(initUBO));
 
             // Point this frame's descriptor set to its own buffer + dummy shadow maps
@@ -685,7 +702,7 @@ bool vkRenderer::RecreateSwapchain(int width, int height)
     // may hold the same handle that framebuffer_.Destroy() is about to free.
     postProcess_.ClearRenderPassRefs(oldRenderPass);
 
-    framebuffer_.Destroy(context_.GetDevice());
+    framebuffer_.Destroy(context_);
 
     if (!swapchain_.Recreate(context_, width, height))
     {
@@ -761,6 +778,107 @@ bool vkRenderer::RecreateSwapchain(int width, int height)
     return true;
 }
 
+VkSampler vkRenderer::GetOrCreateSampler(VkFilter minFilter, VkFilter magFilter,
+                                          VkSamplerAddressMode wrapS, VkSamplerAddressMode wrapT,
+                                          float maxLod)
+{
+    SamplerKey key{minFilter, magFilter, wrapS, wrapT, maxLod};
+    auto it = samplerCache_.find(key);
+    if (it != samplerCache_.end())
+        return it->second;
+
+    VkSamplerCreateInfo si{};
+    si.sType        = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+    si.magFilter    = magFilter;
+    si.minFilter    = minFilter;
+    si.mipmapMode   = VK_SAMPLER_MIPMAP_MODE_LINEAR;
+    si.addressModeU = wrapS;
+    si.addressModeV = wrapT;
+    si.addressModeW = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+    si.maxLod       = maxLod;
+
+    VkSampler sampler = VK_NULL_HANDLE;
+    if (vkCreateSampler(context_.GetDevice(), &si, nullptr, &sampler) != VK_SUCCESS)
+    {
+        std::cerr << "[Vulkan] GetOrCreateSampler: vkCreateSampler failed\n";
+        return VK_NULL_HANDLE;
+    }
+    samplerCache_[key] = sampler;
+    return sampler;
+}
+
+void vkRenderer::TransitionImageLayout(VkCommandBuffer cmd, VkImage image,
+                                        VkImageLayout oldLayout, VkImageLayout newLayout,
+                                        VkImageAspectFlags aspectMask,
+                                        uint32_t mipLevels,
+                                        VkPipelineStageFlags srcStage,
+                                        VkPipelineStageFlags dstStage)
+{
+    VkImageMemoryBarrier barrier{};
+    barrier.sType               = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+    barrier.oldLayout           = oldLayout;
+    barrier.newLayout           = newLayout;
+    barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    barrier.image               = image;
+    barrier.subresourceRange    = {aspectMask, 0, mipLevels, 0, 1};
+
+    // Derive access masks from layouts
+    switch (oldLayout)
+    {
+    case VK_IMAGE_LAYOUT_UNDEFINED:
+        barrier.srcAccessMask = 0;
+        break;
+    case VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL:
+        barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        break;
+    case VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL:
+        barrier.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+        break;
+    case VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL:
+        barrier.srcAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+        break;
+    case VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL:
+    case VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL:
+        barrier.srcAccessMask = VK_ACCESS_SHADER_READ_BIT;
+        break;
+    default:
+        barrier.srcAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
+        break;
+    }
+
+    switch (newLayout)
+    {
+    case VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL:
+        barrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        break;
+    case VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL:
+        barrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+        break;
+    case VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL:
+        barrier.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+        break;
+    case VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL:
+        barrier.dstAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+        break;
+    case VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL:
+    case VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL:
+        barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+        break;
+    case VK_IMAGE_LAYOUT_PRESENT_SRC_KHR:
+        barrier.dstAccessMask = 0;
+        break;
+    default:
+        barrier.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
+        break;
+    }
+
+    vkCmdPipelineBarrier(cmd, srcStage, dstStage, 0,
+                         0, nullptr,
+                         0, nullptr,
+                         1, &barrier);
+}
+
 bool vkRenderer::CreateDummyTexture()
 {
     VkDevice device = context_.GetDevice();
@@ -779,24 +897,14 @@ bool vkRenderer::CreateDummyTexture()
     imageInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
     imageInfo.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
     imageInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-    if (vkCreateImage(device, &imageInfo, nullptr, &dummyTexture_.image) != VK_SUCCESS)
-        return false;
-
-    VkMemoryRequirements memReqs;
-    vkGetImageMemoryRequirements(device, dummyTexture_.image, &memReqs);
-    uint32_t memType = context_.FindMemoryType(memReqs.memoryTypeBits,
-        VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
-    VkMemoryAllocateInfo allocInfo{};
-    allocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
-    allocInfo.allocationSize = memReqs.size;
-    allocInfo.memoryTypeIndex = memType;
-    if (vkAllocateMemory(device, &allocInfo, nullptr, &dummyTexture_.memory) != VK_SUCCESS)
+    VmaAllocationCreateInfo vmaAllocCI{};
+    vmaAllocCI.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
+    if (vmaCreateImage(context_.GetAllocator(), &imageInfo, &vmaAllocCI,
+                       &dummyTexture_.image, &dummyTexture_.imageAllocation, nullptr) != VK_SUCCESS)
     {
-        vkDestroyImage(device, dummyTexture_.image, nullptr);
-        dummyTexture_.image = VK_NULL_HANDLE;
+        std::cerr << "[Vulkan] VMA: failed to create dummy texture image\n";
         return false;
     }
-    vkBindImageMemory(device, dummyTexture_.image, dummyTexture_.memory, 0);
 
     // Upload via staging buffer
     rVulkanBuffer staging;
@@ -804,19 +912,10 @@ bool vkRenderer::CreateDummyTexture()
 
     VkCommandBuffer cmd = rVulkanBufferManager::BeginSingleTimeCommands(device, commandPool_);
 
-    VkImageMemoryBarrier barrier{};
-    barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-    barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    barrier.image = dummyTexture_.image;
-    barrier.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
-
-    barrier.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-    barrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-    barrier.srcAccessMask = 0;
-    barrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
-                         0, 0, nullptr, 0, nullptr, 1, &barrier);
+    TransitionImageLayout(cmd, dummyTexture_.image,
+        VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+        VK_IMAGE_ASPECT_COLOR_BIT, 1,
+        VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
 
     VkBufferImageCopy region{};
     region.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
@@ -824,15 +923,14 @@ bool vkRenderer::CreateDummyTexture()
     vkCmdCopyBufferToImage(cmd, staging.buffer, dummyTexture_.image,
                            VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
 
-    barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-    barrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-    barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-    barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
-                         0, 0, nullptr, 0, nullptr, 1, &barrier);
+    TransitionImageLayout(cmd, dummyTexture_.image,
+        VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+        VK_IMAGE_ASPECT_COLOR_BIT, 1,
+        VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
 
     rVulkanBufferManager::EndSingleTimeCommands(device, commandPool_, context_.GetGraphicsQueue(), cmd);
-    rVulkanBufferManager::DestroyBuffer(device, staging);
+    rVulkanBufferManager::DestroyBuffer(context_.GetAllocator(), staging);
+    dummyTexture_.currentLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 
     // Image view
     VkImageViewCreateInfo viewInfo{};
@@ -844,10 +942,9 @@ bool vkRenderer::CreateDummyTexture()
     if (vkCreateImageView(device, &viewInfo, nullptr, &dummyTexture_.view) != VK_SUCCESS)
     {
         std::cerr << "[Vulkan] Failed to create dummy texture image view" << std::endl;
-        vkFreeMemory(device, dummyTexture_.memory, nullptr);
-        vkDestroyImage(device, dummyTexture_.image, nullptr);
-        dummyTexture_.memory = VK_NULL_HANDLE;
-        dummyTexture_.image  = VK_NULL_HANDLE;
+        vmaDestroyImage(context_.GetAllocator(), dummyTexture_.image, dummyTexture_.imageAllocation);
+        dummyTexture_.image           = VK_NULL_HANDLE;
+        dummyTexture_.imageAllocation = VK_NULL_HANDLE;
         return false;
     }
 
@@ -862,12 +959,10 @@ bool vkRenderer::CreateDummyTexture()
     if (vkCreateSampler(device, &samplerInfo, nullptr, &dummyTexture_.sampler) != VK_SUCCESS)
     {
         std::cerr << "[Vulkan] Failed to create dummy texture sampler" << std::endl;
-        vkDestroyImageView(device, dummyTexture_.view, nullptr);
-        vkFreeMemory(device, dummyTexture_.memory, nullptr);
-        vkDestroyImage(device, dummyTexture_.image, nullptr);
-        dummyTexture_.view   = VK_NULL_HANDLE;
-        dummyTexture_.memory = VK_NULL_HANDLE;
-        dummyTexture_.image  = VK_NULL_HANDLE;
+        VK_DESTROY(vkDestroyImageView, device, dummyTexture_.view);
+        vmaDestroyImage(context_.GetAllocator(), dummyTexture_.image, dummyTexture_.imageAllocation);
+        dummyTexture_.image           = VK_NULL_HANDLE;
+        dummyTexture_.imageAllocation = VK_NULL_HANDLE;
         return false;
     }
 
@@ -999,6 +1094,8 @@ void vkRenderer::BeginFrame()
     // GPU work for this slot is now complete — safe to free deferred resources.
     // Vertex buffers replaced mid-frame (P0-2 fix)
     vulkanQueue_.CleanupOldBuffers();
+    // Reset staging pool ring for this slot — fence guarantees GPU is done reading it
+    stagingPool_.Reset(currentFrame_);
 
     // Acquire next swapchain image — use rotating semaphore index for acquire,
     // then index render-finished semaphore by the acquired image index.
@@ -1033,17 +1130,17 @@ void vkRenderer::BeginFrame()
 
     // Drain textures deferred for deletion — this slot's previous frame has now completed.
     pendingDeleteTextures_.drainWith(device, currentFrame_, [this](VkDevice dev, VkTextureInfo& tex) {
-        // Invalidate cached descriptor sets first — they reference the
-        // sampler and view.
+        // Invalidate cached descriptor sets first — they reference the view.
+        // Sampler is owned by samplerCache_ — do NOT destroy it here.
         if (tex.view) descriptorManager_.InvalidateCache(tex.view);
-        VK_DESTROY(vkDestroySampler, dev, tex.sampler);
         VK_DESTROY(vkDestroyImageView, dev, tex.view);
-        VK_DESTROY(vkDestroyImage, dev, tex.image);
-        VK_FREE_MEMORY(dev, tex.memory);
+        if (tex.image != VK_NULL_HANDLE)
+        {
+            vmaDestroyImage(context_.GetAllocator(), tex.image, tex.imageAllocation);
+            tex.image           = VK_NULL_HANDLE;
+            tex.imageAllocation = VK_NULL_HANDLE;
+        }
     });
-
-    // Drain deferred sampler deletions (from TexParameter sampler changes)
-    pendingDeleteSamplers_.drain<vkDestroySampler>(device, currentFrame_);
 
     // Cache per-frame values to avoid per-draw system calls
     cachedFrameTime_ = static_cast<float>(tSysTimeFloat());
@@ -1129,6 +1226,11 @@ void vkRenderer::BeginFrame()
     {
         rRenderQueue::Instance().ClearShadowDynamic();
     }
+
+    // Track offscreen image layouts: render pass declares initialLayout=UNDEFINED,
+    // so content is discarded — record this so we know the images are not readable.
+    if (postProcessActive)
+        postProcess_.NotifySceneRenderPassBeginning();
 
     vkCmdBeginRenderPass(cmd, &rpInfo, VK_SUBPASS_CONTENTS_INLINE);
     vulkanQueue_.InvalidateBindingCache();  // new render pass — force pipeline/descriptor rebind
@@ -1245,12 +1347,68 @@ void vkRenderer::EndFrame()
 
     vkCmdEndRenderPass(cmd);
 
+    // Flush deferred texture sub-image uploads — these were queued by TexSubImage2D
+    // while a render pass was active, where transfer commands are not allowed.
+    // Now that the render pass has ended, the command buffer accepts transfers.
+    // Uploads are sorted by dstImage so each image only pays 2 barriers (open/close)
+    // regardless of how many sub-regions were updated in the frame (e.g. font atlas
+    // glyph additions: N glyph updates → 2 barriers total, not 2N).
+    if (!pendingTexUploads_.empty())
+    {
+        std::sort(pendingTexUploads_.begin(), pendingTexUploads_.end(),
+                  [](const PendingTexUpload& a, const PendingTexUpload& b){
+                      return a.dstImage < b.dstImage;
+                  });
+
+        VkImage activeImage = VK_NULL_HANDLE;
+        for (size_t i = 0; i <= pendingTexUploads_.size(); ++i)
+        {
+            VkImage nextImage = (i < pendingTexUploads_.size())
+                                ? pendingTexUploads_[i].dstImage
+                                : VK_NULL_HANDLE;
+            if (nextImage != activeImage)
+            {
+                // Close previous image (transition back to shader-readable)
+                if (activeImage != VK_NULL_HANDLE)
+                    TransitionImageLayout(cmd, activeImage,
+                        VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                        VK_IMAGE_ASPECT_COLOR_BIT, 1,
+                        VK_PIPELINE_STAGE_TRANSFER_BIT,
+                        VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
+
+                activeImage = nextImage;
+
+                // Open new image (transition to transfer-writable)
+                if (activeImage != VK_NULL_HANDLE)
+                    TransitionImageLayout(cmd, activeImage,
+                        pendingTexUploads_[i].srcLayout,
+                        VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                        VK_IMAGE_ASPECT_COLOR_BIT, 1,
+                        VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+                        VK_PIPELINE_STAGE_TRANSFER_BIT);
+            }
+            if (i < pendingTexUploads_.size())
+            {
+                auto& up = pendingTexUploads_[i];
+                vkCmdCopyBufferToImage(cmd, up.srcBuffer, up.dstImage,
+                                       VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &up.region);
+            }
+        }
+        pendingTexUploads_.clear();
+    }
+
+    // Track offscreen image layouts after scene render pass: finalLayout transitions
+    // color/emissive to SHADER_READ_ONLY, depth to DEPTH_STENCIL_READ_ONLY.
+    const bool postProcessActive = postProcess_.IsEnabled() && s_lastFrameWasInGame;
+    if (postProcessActive)
+        postProcess_.NotifySceneRenderPassEnded();
+
     // Run the post-process pass ONLY if the scene actually rendered into the
     // offscreen target this frame. BeginFrame sets this based on
     // s_lastFrameWasInGame — we must use the same gate here so menu/title
     // frames that rendered straight to the swapchain don't also try to run
     // post-process (which would sample an uninitialized offscreen image).
-    const bool postProcessActive = postProcess_.IsEnabled() && s_lastFrameWasInGame;
     if (postProcessActive)
     {
         postProcess_.Execute(cmd, currentFrame_,
@@ -1762,32 +1920,19 @@ void vkRenderer::TexParameter(int target, int pname, int param)
 
     if (needsRecreate)
     {
-        VkDevice device = context_.GetDevice();
-
-        // Invalidate cached descriptor set that references the old sampler
-        if (tex.view != VK_NULL_HANDLE)
-            descriptorManager_.InvalidateCache(tex.view);
-
-        // Defer sampler destruction — in-flight command buffers may still reference it
-        if (tex.sampler != VK_NULL_HANDLE)
-            pendingDeleteSamplers_.queue(tex.sampler, currentFrame_);
-
-        VkSamplerCreateInfo si{};
-        si.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
-        si.magFilter = tex.magFilter;
-        si.minFilter = tex.minFilter;
-        si.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
-        si.addressModeU = tex.wrapS;
-        si.addressModeV = tex.wrapT;
-        si.addressModeW = VK_SAMPLER_ADDRESS_MODE_REPEAT;
-        // If the min filter doesn't request mipmapping (GL_LINEAR or GL_NEAREST
-        // without _MIPMAP_), clamp maxLod to 0 to prevent sampling stale higher
-        // mip levels. This is critical for font atlases that use TexSubImage2D
-        // to update only mip level 0 — higher levels contain stale/zero data.
-        si.maxLod = tex.usesMipmapFilter
+        float maxLod = tex.usesMipmapFilter
             ? ((tex.mipLevels > 1) ? static_cast<float>(tex.mipLevels - 1) : 1.0f)
             : 0.25f;
-        vkCreateSampler(device, &si, nullptr, &tex.sampler);
+        VkSampler newSampler = GetOrCreateSampler(tex.minFilter, tex.magFilter,
+                                                   tex.wrapS, tex.wrapT, maxLod);
+        if (newSampler != tex.sampler)
+        {
+            // Invalidate cached descriptor set — the (view, sampler) pair has changed
+            if (tex.view != VK_NULL_HANDLE)
+                descriptorManager_.InvalidateCache(tex.view);
+            // Sampler is owned by samplerCache_ — no deferred destroy needed
+            tex.sampler = newSampler;
+        }
     }
 }
 
@@ -1823,10 +1968,10 @@ void vkRenderer::TexImage2D(int target, int level, int /*internalFormat*/,
     }
 
     // Build all Vulkan resources into LOCAL variables (not map references)
-    VkImage newImage = VK_NULL_HANDLE;
-    VkDeviceMemory newMemory = VK_NULL_HANDLE;
-    VkImageView newView = VK_NULL_HANDLE;
-    VkSampler newSampler = VK_NULL_HANDLE;
+    VkImage       newImage      = VK_NULL_HANDLE;
+    VmaAllocation newAllocation = VK_NULL_HANDLE;
+    VkImageView   newView       = VK_NULL_HANDLE;
+    VkSampler     newSampler    = VK_NULL_HANDLE;
 
     VkFormat vkFormat = VK_FORMAT_R8G8B8A8_UNORM;
     bool swapRB = (format == rGLConst::BGRA || format == rGLConst::BGR);
@@ -1853,22 +1998,16 @@ void vkRenderer::TexImage2D(int target, int level, int /*internalFormat*/,
     imageInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
     imageInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
 
-    if (vkCreateImage(device, &imageInfo, nullptr, &newImage) != VK_SUCCESS)
-        return;
-
-    VkMemoryRequirements memReqs;
-    vkGetImageMemoryRequirements(device, newImage, &memReqs);
-    uint32_t memType = context_.FindMemoryType(memReqs.memoryTypeBits,
-        VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
-    if (memType == UINT32_MAX) { vkDestroyImage(device, newImage, nullptr); return; }
-
-    VkMemoryAllocateInfo allocInfo{};
-    allocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
-    allocInfo.allocationSize = memReqs.size;
-    allocInfo.memoryTypeIndex = memType;
-    if (vkAllocateMemory(device, &allocInfo, nullptr, &newMemory) != VK_SUCCESS)
-    { vkDestroyImage(device, newImage, nullptr); return; }
-    vkBindImageMemory(device, newImage, newMemory, 0);
+    {
+        VmaAllocationCreateInfo vmaAllocCI{};
+        vmaAllocCI.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
+        if (vmaCreateImage(context_.GetAllocator(), &imageInfo, &vmaAllocCI,
+                           &newImage, &newAllocation, nullptr) != VK_SUCCESS)
+        {
+            std::cerr << "[Vulkan] VMA: failed to create texture image\n";
+            return;
+        }
+    }
 
     // RGBA conversion buffer — declared at function scope so it can be moved into cpuData later
     std::vector<uint8_t> rgbaData;
@@ -1926,19 +2065,11 @@ void vkRenderer::TexImage2D(int target, int level, int /*internalFormat*/,
 
         VkCommandBuffer cmd = rVulkanBufferManager::BeginSingleTimeCommands(device, commandPool_);
 
-        // Transition ALL mip levels UNDEFINED → TRANSFER_DST
-        VkImageMemoryBarrier barrier{};
-        barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-        barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        barrier.image = newImage;
-        barrier.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, mipLevels, 0, 1};
-        barrier.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-        barrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-        barrier.srcAccessMask = 0;
-        barrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
-                             0, 0, nullptr, 0, nullptr, 1, &barrier);
+        // Transition ALL mip levels UNDEFINED → TRANSFER_DST (upload destination)
+        TransitionImageLayout(cmd, newImage,
+            VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+            VK_IMAGE_ASPECT_COLOR_BIT, mipLevels,
+            VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
 
         // Copy staging buffer → mip level 0
         VkBufferImageCopy region{};
@@ -1946,7 +2077,16 @@ void vkRenderer::TexImage2D(int target, int level, int /*internalFormat*/,
         region.imageExtent = {static_cast<uint32_t>(width), static_cast<uint32_t>(height), 1};
         vkCmdCopyBufferToImage(cmd, staging.buffer, newImage, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
 
-        // Generate mip levels by blitting each level from the previous
+        // Generate mip levels by blitting each level from the previous.
+        // Per-mip barriers use fine-grained subresource ranges — inline is clearest here.
+        VkImageMemoryBarrier barrier{};
+        barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+        barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        barrier.image = newImage;
+        barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        barrier.subresourceRange.baseArrayLayer = 0;
+        barrier.subresourceRange.layerCount = 1;
         barrier.subresourceRange.levelCount = 1;
         int32_t mipW = width, mipH = height;
         for (uint32_t i = 1; i < mipLevels; i++)
@@ -1996,7 +2136,7 @@ void vkRenderer::TexImage2D(int target, int level, int /*internalFormat*/,
                              0, 0, nullptr, 0, nullptr, 1, &barrier);
 
         rVulkanBufferManager::EndSingleTimeCommands(device, commandPool_, context_.GetGraphicsQueue(), cmd);
-        rVulkanBufferManager::DestroyBuffer(device, staging);
+        rVulkanBufferManager::DestroyBuffer(context_.GetAllocator(), staging);
     }
 
     // Create image view covering all mip levels
@@ -2009,8 +2149,7 @@ void vkRenderer::TexImage2D(int target, int level, int /*internalFormat*/,
     if (vkCreateImageView(device, &viewInfo, nullptr, &newView) != VK_SUCCESS)
     {
         std::cerr << "[Vulkan] Failed to create texture image view for texId=" << texId << std::endl;
-        vkDestroyImage(device, newImage, nullptr);
-        vkFreeMemory(device, newMemory, nullptr);
+        vmaDestroyImage(context_.GetAllocator(), newImage, newAllocation);
         return;
     }
 
@@ -2032,30 +2171,20 @@ void vkRenderer::TexImage2D(int target, int level, int /*internalFormat*/,
         }
     }
 
-    VkSamplerCreateInfo samplerInfo{};
-    samplerInfo.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
-    samplerInfo.magFilter = savedMagFilter;
-    samplerInfo.minFilter = savedMinFilter;
-    samplerInfo.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
-    samplerInfo.addressModeU = savedWrapS;
-    samplerInfo.addressModeV = savedWrapT;
-    samplerInfo.addressModeW = VK_SAMPLER_ADDRESS_MODE_REPEAT;
-    samplerInfo.maxLod = savedUsesMipmap
-        ? static_cast<float>(mipLevels - 1)
-        : 0.25f;
-    if (vkCreateSampler(device, &samplerInfo, nullptr, &newSampler) != VK_SUCCESS)
+    float maxLod = savedUsesMipmap ? static_cast<float>(mipLevels - 1) : 0.25f;
+    newSampler = GetOrCreateSampler(savedMinFilter, savedMagFilter, savedWrapS, savedWrapT, maxLod);
+    if (newSampler == VK_NULL_HANDLE)
     {
-        std::cerr << "[Vulkan] Failed to create texture sampler for texId=" << texId << std::endl;
+        std::cerr << "[Vulkan] Failed to get/create texture sampler for texId=" << texId << std::endl;
         vkDestroyImageView(device, newView, nullptr);
-        vkDestroyImage(device, newImage, nullptr);
-        vkFreeMemory(device, newMemory, nullptr);
+        vmaDestroyImage(context_.GetAllocator(), newImage, newAllocation);
         return;
     }
 
     // NOW write everything to the map with a FRESH lookup (safe from rehash)
     VkTextureInfo newInfo{};
-    newInfo.image = newImage;
-    newInfo.memory = newMemory;
+    newInfo.image           = newImage;
+    newInfo.imageAllocation = newAllocation;
     newInfo.view = newView;
     newInfo.sampler = newSampler;
     newInfo.width = width;
@@ -2066,17 +2195,18 @@ void vkRenderer::TexImage2D(int target, int level, int /*internalFormat*/,
     newInfo.wrapS = savedWrapS;
     newInfo.wrapT = savedWrapT;
     newInfo.usesMipmapFilter = savedUsesMipmap;
+    // After upload + barrier: image is in SHADER_READ_ONLY_OPTIMAL
+    newInfo.currentLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
     // Reuse the already-converted RGBA data from the staging upload (avoids double conversion)
     newInfo.cpuData = std::move(rgbaData);
     textures_[texId] = std::move(newInfo);
 }
 
-// Known limitation: TexSubImage2D re-uploads the entire texture even for small
-// sub-region updates. It patches cpuData_ then stages and transfers the full image.
-// This is acceptable for the current use cases (font atlas pages, small UI textures)
-// where sub-updates are infrequent. If truly dynamic textures are ever needed,
-// replace this with a proper sub-region staging copy using VkBufferImageCopy with
-// the exact imageOffset/imageExtent matching the dirty rectangle.
+// TexSubImage2D uploads only the dirty sub-region (not the full texture).
+// When called while a frame is recording (frameStarted_), the copy is deferred
+// into the per-frame staging ring and flushed in EndFrame after the render pass
+// ends. Multiple updates to the same image in one frame share a single pair of
+// layout transitions (sorted+grouped in EndFrame).
 void vkRenderer::TexSubImage2D(int /*target*/, int /*level*/,
                                int xoffset, int yoffset,
                                int width, int height,
@@ -2138,51 +2268,54 @@ void vkRenderer::TexSubImage2D(int /*target*/, int /*level*/,
     VkDevice device = context_.GetDevice();
     VkDeviceSize subSize = static_cast<VkDeviceSize>(width) * height * 4;
 
-    // Extract the updated sub-region into a tightly-packed staging buffer.
-    std::vector<uint8_t> subData(subSize);
-    for (int row = 0; row < height; ++row)
-        memcpy(&subData[row * width * 4],
-               &tex.cpuData[((yoffset + row) * texW + xoffset) * 4],
-               static_cast<size_t>(width) * 4);
-
-    rVulkanBuffer staging;
-    if (!rVulkanBufferManager::CreateStagingBuffer(context_, subData.data(), subSize, staging))
-        return;
-
-    VkCommandBuffer cmd = rVulkanBufferManager::BeginSingleTimeCommands(device, commandPool_);
-
-    VkImageMemoryBarrier barrier{};
-    barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-    barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    barrier.image = tex.image;
-    barrier.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
-    barrier.oldLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-    barrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-    barrier.srcAccessMask = VK_ACCESS_SHADER_READ_BIT;
-    barrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
-                         VK_PIPELINE_STAGE_TRANSFER_BIT,
-                         0, 0, nullptr, 0, nullptr, 1, &barrier);
-
     VkBufferImageCopy region{};
     region.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
     region.imageOffset = {xoffset, yoffset, 0};
     region.imageExtent = {static_cast<uint32_t>(width), static_cast<uint32_t>(height), 1};
-    vkCmdCopyBufferToImage(cmd, staging.buffer, tex.image,
-                           VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
 
-    barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-    barrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-    barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-    barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
-                         VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
-                         0, 0, nullptr, 0, nullptr, 1, &barrier);
+    if (frameStarted_)
+    {
+        // Deferred path: stage into the per-frame ring, flush transfers in EndFrame
+        // (after vkCmdEndRenderPass, where transfer commands are valid). The updated
+        // texture takes effect the same frame (transfers happen before submit).
+        rVulkanStagingPool::Allocation stg;
+        if (!stagingPool_.Acquire(currentFrame_, subSize, stg) || !stg.mapped) return;
+        for (int row = 0; row < height; ++row)
+            memcpy(static_cast<char*>(stg.mapped) + row * width * 4,
+                   &tex.cpuData[((yoffset + row) * texW + xoffset) * 4],
+                   static_cast<size_t>(width) * 4);
+        region.bufferOffset = stg.offset;
+        pendingTexUploads_.push_back({stg.buffer, stg.offset, tex.image, region, tex.currentLayout});
+    }
+    else
+    {
+        // Blocking path (initialization / outside frame): one-shot command buffer + vkQueueWaitIdle.
+        std::vector<uint8_t> subData(subSize);
+        for (int row = 0; row < height; ++row)
+            memcpy(&subData[row * width * 4],
+                   &tex.cpuData[((yoffset + row) * texW + xoffset) * 4],
+                   static_cast<size_t>(width) * 4);
 
-    rVulkanBufferManager::EndSingleTimeCommands(device, commandPool_, context_.GetGraphicsQueue(), cmd);
-    rVulkanBufferManager::DestroyBuffer(device, staging);
+        rVulkanBuffer staging;
+        if (!rVulkanBufferManager::CreateStagingBuffer(context_, subData.data(), subSize, staging))
+            return;
+
+        VkCommandBuffer cmd = rVulkanBufferManager::BeginSingleTimeCommands(device, commandPool_);
+        TransitionImageLayout(cmd, tex.image,
+            tex.currentLayout, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+            VK_IMAGE_ASPECT_COLOR_BIT, 1,
+            VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
+        vkCmdCopyBufferToImage(cmd, staging.buffer, tex.image,
+                               VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+        TransitionImageLayout(cmd, tex.image,
+            VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+            VK_IMAGE_ASPECT_COLOR_BIT, 1,
+            VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
+        rVulkanBufferManager::EndSingleTimeCommands(device, commandPool_, context_.GetGraphicsQueue(), cmd);
+        rVulkanBufferManager::DestroyBuffer(context_.GetAllocator(), staging);
+    }
     tex.dirty = false;
+    tex.currentLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 
     // Note: mipmap regeneration after sub-image updates was removed because it
     // causes synchronization issues with font atlas textures (glyphs go missing).
@@ -2320,30 +2453,21 @@ void vkRenderer::ReadPixels(int x, int y, int width, int height,
     VkImage srcImage = swapchain_.GetImages()[currentImageIndex_];
     VkFormat srcFormat = swapchain_.GetFormat();
 
-    // Create staging buffer
+    // Create readback staging buffer (CPU-readable, persistently mapped)
     VkDeviceSize bufferSize = width * height * 4; // RGBA
-    VkBuffer stagingBuffer;
-    VkDeviceMemory stagingMemory;
     VkBufferCreateInfo bufInfo{};
     bufInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
     bufInfo.size = bufferSize;
     bufInfo.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
     bufInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-    if (vkCreateBuffer(device, &bufInfo, nullptr, &stagingBuffer) != VK_SUCCESS) return;
-
-    VkMemoryRequirements memReqs;
-    vkGetBufferMemoryRequirements(device, stagingBuffer, &memReqs);
-    VkMemoryAllocateInfo allocInfo{};
-    allocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
-    allocInfo.allocationSize = memReqs.size;
-    allocInfo.memoryTypeIndex = context_.FindMemoryType(memReqs.memoryTypeBits,
-        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
-    if (vkAllocateMemory(device, &allocInfo, nullptr, &stagingMemory) != VK_SUCCESS)
-    {
-        vkDestroyBuffer(device, stagingBuffer, nullptr);
-        return;
-    }
-    vkBindBufferMemory(device, stagingBuffer, stagingMemory, 0);
+    VmaAllocationCreateInfo vmaCI{};
+    vmaCI.usage = VMA_MEMORY_USAGE_AUTO;
+    vmaCI.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT;
+    VmaAllocationInfo vmaInfo{};
+    VkBuffer stagingBuffer;
+    VmaAllocation stagingAlloc;
+    if (vmaCreateBuffer(context_.GetAllocator(), &bufInfo, &vmaCI,
+                        &stagingBuffer, &stagingAlloc, &vmaInfo) != VK_SUCCESS) return;
 
     // Record copy command
     VkCommandBuffer cmd = rVulkanBufferManager::BeginSingleTimeCommands(device, commandPool_);
@@ -2380,9 +2504,13 @@ void vkRenderer::ReadPixels(int x, int y, int width, int height,
     rVulkanBufferManager::EndSingleTimeCommands(device, commandPool_, context_.GetGraphicsQueue(), cmd);
 
     // Map and convert BGRA→RGB (Vulkan swapchain is typically BGRA, caller expects RGB)
-    void* mapped;
-    vkMapMemory(device, stagingMemory, 0, bufferSize, 0, &mapped);
-    const uint8_t* src = static_cast<const uint8_t*>(mapped);
+    const uint8_t* src = static_cast<const uint8_t*>(vmaInfo.pMappedData);
+    if (!src)
+    {
+        std::cerr << "[Vulkan] VMA persistent map failed for screenshot staging buffer\n";
+        vmaDestroyBuffer(context_.GetAllocator(), stagingBuffer, stagingAlloc);
+        return;
+    }
     uint8_t* dst = static_cast<uint8_t*>(data);
     bool isBGR = (srcFormat == VK_FORMAT_B8G8R8A8_UNORM || srcFormat == VK_FORMAT_B8G8R8A8_SRGB);
 
@@ -2406,10 +2534,7 @@ void vkRenderer::ReadPixels(int x, int y, int width, int height,
             dstRow += 3;
         }
     }
-    vkUnmapMemory(device, stagingMemory);
-
-    vkDestroyBuffer(device, stagingBuffer, nullptr);
-    vkFreeMemory(device, stagingMemory, nullptr);
+    vmaDestroyBuffer(context_.GetAllocator(), stagingBuffer, stagingAlloc);
 }
 const char* vkRenderer::GetRendererString(int name)
 {
@@ -2465,15 +2590,12 @@ bool vkRenderer::CreateViewportFBO(int frame, int index, int w, int h)
 
     // Destroy old resources if resizing
     if (vfbo.framebuffer) { vkDestroyFramebuffer(device, vfbo.framebuffer, nullptr); vfbo.framebuffer = VK_NULL_HANDLE; }
-    if (vfbo.colorView)   { vkDestroyImageView(device, vfbo.colorView, nullptr);   vfbo.colorView = VK_NULL_HANDLE; }
-    if (vfbo.colorImage)  { vkDestroyImage(device, vfbo.colorImage, nullptr);       vfbo.colorImage = VK_NULL_HANDLE; }
-    if (vfbo.colorMemory) { vkFreeMemory(device, vfbo.colorMemory, nullptr);        vfbo.colorMemory = VK_NULL_HANDLE; }
-    if (vfbo.emissiveView)   { vkDestroyImageView(device, vfbo.emissiveView, nullptr);   vfbo.emissiveView = VK_NULL_HANDLE; }
-    if (vfbo.emissiveImage)  { vkDestroyImage(device, vfbo.emissiveImage, nullptr);       vfbo.emissiveImage = VK_NULL_HANDLE; }
-    if (vfbo.emissiveMemory) { vkFreeMemory(device, vfbo.emissiveMemory, nullptr);        vfbo.emissiveMemory = VK_NULL_HANDLE; }
-    if (vfbo.depthView)   { vkDestroyImageView(device, vfbo.depthView, nullptr);   vfbo.depthView = VK_NULL_HANDLE; }
-    if (vfbo.depthImage)  { vkDestroyImage(device, vfbo.depthImage, nullptr);       vfbo.depthImage = VK_NULL_HANDLE; }
-    if (vfbo.depthMemory) { vkFreeMemory(device, vfbo.depthMemory, nullptr);        vfbo.depthMemory = VK_NULL_HANDLE; }
+    if (vfbo.colorView)  { vkDestroyImageView(device, vfbo.colorView, nullptr);  vfbo.colorView = VK_NULL_HANDLE; }
+    if (vfbo.colorImage) { vmaDestroyImage(context_.GetAllocator(), vfbo.colorImage, vfbo.colorAlloc); vfbo.colorImage = VK_NULL_HANDLE; vfbo.colorAlloc = VK_NULL_HANDLE; }
+    if (vfbo.emissiveView)  { vkDestroyImageView(device, vfbo.emissiveView, nullptr);  vfbo.emissiveView = VK_NULL_HANDLE; }
+    if (vfbo.emissiveImage) { vmaDestroyImage(context_.GetAllocator(), vfbo.emissiveImage, vfbo.emissiveAlloc); vfbo.emissiveImage = VK_NULL_HANDLE; vfbo.emissiveAlloc = VK_NULL_HANDLE; }
+    if (vfbo.depthView)  { vkDestroyImageView(device, vfbo.depthView, nullptr);  vfbo.depthView = VK_NULL_HANDLE; }
+    if (vfbo.depthImage) { vmaDestroyImage(context_.GetAllocator(), vfbo.depthImage, vfbo.depthAlloc); vfbo.depthImage = VK_NULL_HANDLE; vfbo.depthAlloc = VK_NULL_HANDLE; }
     if (vfbo.sampler)      { vkDestroySampler(device, vfbo.sampler, nullptr);      vfbo.sampler = VK_NULL_HANDLE; }
     if (vfbo.depthSampler) { vkDestroySampler(device, vfbo.depthSampler, nullptr); vfbo.depthSampler = VK_NULL_HANDLE; }
 
@@ -2492,16 +2614,11 @@ bool vkRenderer::CreateViewportFBO(int frame, int index, int w, int h)
     colorInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
     colorInfo.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
     colorInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-    if (vkCreateImage(device, &colorInfo, nullptr, &vfbo.colorImage) != VK_SUCCESS) return false;
-
-    VkMemoryRequirements memReqs;
-    vkGetImageMemoryRequirements(device, vfbo.colorImage, &memReqs);
-    VkMemoryAllocateInfo allocInfo{};
-    allocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
-    allocInfo.allocationSize = memReqs.size;
-    allocInfo.memoryTypeIndex = context_.FindMemoryType(memReqs.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
-    if (vkAllocateMemory(device, &allocInfo, nullptr, &vfbo.colorMemory) != VK_SUCCESS) return false;
-    vkBindImageMemory(device, vfbo.colorImage, vfbo.colorMemory, 0);
+    {
+        VmaAllocationCreateInfo vmaCI{}; vmaCI.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
+        if (vmaCreateImage(context_.GetAllocator(), &colorInfo, &vmaCI,
+                           &vfbo.colorImage, &vfbo.colorAlloc, nullptr) != VK_SUCCESS) return false;
+    }
 
     VkImageViewCreateInfo viewInfo{};
     viewInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
@@ -2514,12 +2631,9 @@ bool vkRenderer::CreateViewportFBO(int frame, int index, int w, int h)
     // --- Emissive image (dummy — matches PP offscreen 3-attachment layout) ---
     {
         VkImageCreateInfo emInfo = colorInfo;  // same format/size as color
-        if (vkCreateImage(device, &emInfo, nullptr, &vfbo.emissiveImage) != VK_SUCCESS) return false;
-        vkGetImageMemoryRequirements(device, vfbo.emissiveImage, &memReqs);
-        allocInfo.allocationSize = memReqs.size;
-        allocInfo.memoryTypeIndex = context_.FindMemoryType(memReqs.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
-        if (vkAllocateMemory(device, &allocInfo, nullptr, &vfbo.emissiveMemory) != VK_SUCCESS) return false;
-        vkBindImageMemory(device, vfbo.emissiveImage, vfbo.emissiveMemory, 0);
+        VmaAllocationCreateInfo vmaCI{}; vmaCI.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
+        if (vmaCreateImage(context_.GetAllocator(), &emInfo, &vmaCI,
+                           &vfbo.emissiveImage, &vfbo.emissiveAlloc, nullptr) != VK_SUCCESS) return false;
         VkImageViewCreateInfo emViewInfo = viewInfo;
         emViewInfo.image = vfbo.emissiveImage;
         if (vkCreateImageView(device, &emViewInfo, nullptr, &vfbo.emissiveView) != VK_SUCCESS) return false;
@@ -2537,13 +2651,11 @@ bool vkRenderer::CreateViewportFBO(int frame, int index, int w, int h)
     depthInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
     depthInfo.usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
     depthInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-    if (vkCreateImage(device, &depthInfo, nullptr, &vfbo.depthImage) != VK_SUCCESS) return false;
-
-    vkGetImageMemoryRequirements(device, vfbo.depthImage, &memReqs);
-    allocInfo.allocationSize = memReqs.size;
-    allocInfo.memoryTypeIndex = context_.FindMemoryType(memReqs.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
-    if (vkAllocateMemory(device, &allocInfo, nullptr, &vfbo.depthMemory) != VK_SUCCESS) return false;
-    vkBindImageMemory(device, vfbo.depthImage, vfbo.depthMemory, 0);
+    {
+        VmaAllocationCreateInfo vmaCI{}; vmaCI.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
+        if (vmaCreateImage(context_.GetAllocator(), &depthInfo, &vmaCI,
+                           &vfbo.depthImage, &vfbo.depthAlloc, nullptr) != VK_SUCCESS) return false;
+    }
 
     viewInfo.image = vfbo.depthImage;
     viewInfo.format = framebuffer_.GetDepthFormat();
@@ -2684,16 +2796,13 @@ void vkRenderer::DestroyViewportFBOs()
         for (int i = 0; i < MAX_VIEWPORT_FBOS; i++)
         {
             ViewportFBO& vfbo = viewportFBOs_[f][i];
-            if (vfbo.framebuffer) vkDestroyFramebuffer(device, vfbo.framebuffer, nullptr);
-            if (vfbo.colorView)   vkDestroyImageView(device, vfbo.colorView, nullptr);
-            if (vfbo.colorImage)  vkDestroyImage(device, vfbo.colorImage, nullptr);
-            if (vfbo.colorMemory) vkFreeMemory(device, vfbo.colorMemory, nullptr);
-            if (vfbo.emissiveView)   vkDestroyImageView(device, vfbo.emissiveView, nullptr);
-            if (vfbo.emissiveImage)  vkDestroyImage(device, vfbo.emissiveImage, nullptr);
-            if (vfbo.emissiveMemory) vkFreeMemory(device, vfbo.emissiveMemory, nullptr);
-            if (vfbo.depthView)   vkDestroyImageView(device, vfbo.depthView, nullptr);
-            if (vfbo.depthImage)  vkDestroyImage(device, vfbo.depthImage, nullptr);
-            if (vfbo.depthMemory) vkFreeMemory(device, vfbo.depthMemory, nullptr);
+            if (vfbo.framebuffer)   vkDestroyFramebuffer(device, vfbo.framebuffer, nullptr);
+            if (vfbo.colorView)     vkDestroyImageView(device, vfbo.colorView, nullptr);
+            if (vfbo.colorImage)    vmaDestroyImage(context_.GetAllocator(), vfbo.colorImage, vfbo.colorAlloc);
+            if (vfbo.emissiveView)  vkDestroyImageView(device, vfbo.emissiveView, nullptr);
+            if (vfbo.emissiveImage) vmaDestroyImage(context_.GetAllocator(), vfbo.emissiveImage, vfbo.emissiveAlloc);
+            if (vfbo.depthView)     vkDestroyImageView(device, vfbo.depthView, nullptr);
+            if (vfbo.depthImage)    vmaDestroyImage(context_.GetAllocator(), vfbo.depthImage, vfbo.depthAlloc);
             if (vfbo.sampler)      vkDestroySampler(device, vfbo.sampler, nullptr);
             if (vfbo.depthSampler) vkDestroySampler(device, vfbo.depthSampler, nullptr);
             if (vfbo.colorTexId) {
@@ -2960,17 +3069,11 @@ bool vkRenderer::CreateShadowMaps()
         imgInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
         imgInfo.usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
         imgInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-        if (vkCreateImage(device, &imgInfo, nullptr, &sm.depthImage) != VK_SUCCESS) return false;
-
-        VkMemoryRequirements memReqs;
-        vkGetImageMemoryRequirements(device, sm.depthImage, &memReqs);
-        VkMemoryAllocateInfo allocInfo{};
-        allocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
-        allocInfo.allocationSize = memReqs.size;
-        allocInfo.memoryTypeIndex = context_.FindMemoryType(memReqs.memoryTypeBits,
-            VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
-        if (vkAllocateMemory(device, &allocInfo, nullptr, &sm.depthMemory) != VK_SUCCESS) return false;
-        vkBindImageMemory(device, sm.depthImage, sm.depthMemory, 0);
+        {
+            VmaAllocationCreateInfo vmaCI{}; vmaCI.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
+            if (vmaCreateImage(context_.GetAllocator(), &imgInfo, &vmaCI,
+                               &sm.depthImage, &sm.depthAlloc, nullptr) != VK_SUCCESS) return false;
+        }
 
         // Depth image view
         VkImageViewCreateInfo viewInfo{};
@@ -3033,7 +3136,11 @@ bool vkRenderer::CreateShadowMaps()
         allocCmdInfo.commandPool = commandPool_;
         allocCmdInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
         allocCmdInfo.commandBufferCount = 1;
-        vkAllocateCommandBuffers(device, &allocCmdInfo, &transCmd);
+        if (vkAllocateCommandBuffers(device, &allocCmdInfo, &transCmd) != VK_SUCCESS)
+        {
+            std::cerr << "[Vulkan] vkAllocateCommandBuffers failed for shadow map initialization\n";
+            return false;
+        }
 
         VkCommandBufferBeginInfo beginInfo{};
         beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
@@ -3105,8 +3212,7 @@ void vkRenderer::DestroyShadowMaps()
         }
         if (sm.framebuffer) { vkDestroyFramebuffer(device, sm.framebuffer, nullptr); sm.framebuffer = VK_NULL_HANDLE; }
         if (sm.depthView)   { vkDestroyImageView(device, sm.depthView, nullptr);     sm.depthView = VK_NULL_HANDLE; }
-        if (sm.depthImage)  { vkDestroyImage(device, sm.depthImage, nullptr);         sm.depthImage = VK_NULL_HANDLE; }
-        if (sm.depthMemory) { vkFreeMemory(device, sm.depthMemory, nullptr);          sm.depthMemory = VK_NULL_HANDLE; }
+        if (sm.depthImage)  { vmaDestroyImage(context_.GetAllocator(), sm.depthImage, sm.depthAlloc); sm.depthImage = VK_NULL_HANDLE; sm.depthAlloc = VK_NULL_HANDLE; }
         if (sm.sampler)     { vkDestroySampler(device, sm.sampler, nullptr);          sm.sampler = VK_NULL_HANDLE; }
     }
 
@@ -3202,52 +3308,41 @@ void vkRenderer::RenderShadowPass(VkCommandBuffer cmd)
     VkDevice device = context_.GetDevice();
     uint32_t frame = currentFrame_;
 
-    if (shadowStagingSize_[frame] < bufSize)
+    if (shadowStagingBuf_[frame].size < bufSize)
     {
-        // Destroy old buffer (safe: fence for this frame slot was waited on in BeginFrame)
-        if (shadowStagingBuf_[frame]) vkDestroyBuffer(device, shadowStagingBuf_[frame], nullptr);
-        if (shadowStagingMem_[frame]) vkFreeMemory(device, shadowStagingMem_[frame], nullptr);
-        shadowStagingBuf_[frame] = VK_NULL_HANDLE;
-        shadowStagingMem_[frame] = VK_NULL_HANDLE;
+        // Destroy old (safe: fence for this frame slot was waited on in BeginFrame)
+        rVulkanBufferManager::DestroyBuffer(context_.GetAllocator(), shadowStagingBuf_[frame]);
 
         VkBufferCreateInfo bufInfo{};
-        bufInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
-        bufInfo.size = bufSize;
-        bufInfo.usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT;
+        bufInfo.sType     = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+        bufInfo.size      = bufSize;
+        bufInfo.usage     = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT;
         bufInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-        if (vkCreateBuffer(device, &bufInfo, nullptr, &shadowStagingBuf_[frame]) != VK_SUCCESS) return;
 
-        VkMemoryRequirements memReqs;
-        vkGetBufferMemoryRequirements(device, shadowStagingBuf_[frame], &memReqs);
-        VkMemoryAllocateInfo allocInfo{};
-        allocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
-        allocInfo.allocationSize = memReqs.size;
-        allocInfo.memoryTypeIndex = context_.FindMemoryType(memReqs.memoryTypeBits,
-            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
-        if (vkAllocateMemory(device, &allocInfo, nullptr, &shadowStagingMem_[frame]) != VK_SUCCESS)
-        {
-            vkDestroyBuffer(device, shadowStagingBuf_[frame], nullptr);
-            shadowStagingBuf_[frame] = VK_NULL_HANDLE;
-            return;
-        }
-        vkBindBufferMemory(device, shadowStagingBuf_[frame], shadowStagingMem_[frame], 0);
-        shadowStagingSize_[frame] = bufSize;
+        VmaAllocationCreateInfo vmaAllocCI{};
+        vmaAllocCI.usage  = VMA_MEMORY_USAGE_AUTO;
+        vmaAllocCI.flags  = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT
+                          | VMA_ALLOCATION_CREATE_MAPPED_BIT;
+        VmaAllocationInfo vmaAllocInfo{};
+        if (vmaCreateBuffer(context_.GetAllocator(), &bufInfo, &vmaAllocCI,
+                            &shadowStagingBuf_[frame].buffer,
+                            &shadowStagingBuf_[frame].allocation,
+                            &vmaAllocInfo) != VK_SUCCESS) return;
+        shadowStagingBuf_[frame].size   = bufSize;
+        shadowStagingBuf_[frame].mapped = vmaAllocInfo.pMappedData;
     }
 
-    // Copy vertex data (static first, then dynamic)
-    void* mapped;
-    vkMapMemory(device, shadowStagingMem_[frame], 0, bufSize, 0, &mapped);
-    size_t staticBytes = staticVerts.size() * sizeof(rVertex20);
+    // Copy vertex data (static first, then dynamic) — persistent mapping, no map/unmap needed
+    void* mapped = shadowStagingBuf_[frame].mapped;
+    if (!mapped) return;
+    size_t staticBytes  = staticVerts.size()  * sizeof(rVertex20);
     size_t dynamicBytes = dynamicVerts.size() * sizeof(rVertex20);
-    if (staticBytes > 0)
-        memcpy(mapped, staticVerts.data(), staticBytes);
-    if (dynamicBytes > 0)
-        memcpy(static_cast<char*>(mapped) + staticBytes, dynamicVerts.data(), dynamicBytes);
-    vkUnmapMemory(device, shadowStagingMem_[frame]);
+    if (staticBytes  > 0) memcpy(mapped, staticVerts.data(), staticBytes);
+    if (dynamicBytes > 0) memcpy(static_cast<char*>(mapped) + staticBytes, dynamicVerts.data(), dynamicBytes);
 
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, shadowPipeline_);
     VkDeviceSize offset = 0;
-    vkCmdBindVertexBuffers(cmd, 0, 1, &shadowStagingBuf_[frame], &offset);
+    vkCmdBindVertexBuffers(cmd, 0, 1, &shadowStagingBuf_[frame].buffer, &offset);
 
     for (int i = 0; i < SHADOW_MAP_COUNT; i++)
     {
@@ -4230,7 +4325,8 @@ void vkRenderer::DoReloadShaders()
     VkPipelineLayout layout;
     bool initOk = pipelineManager_.Init(device, framebuffer_.GetRenderPass(),
                                vertShader_, fragShader_, fragShaderEmissive_,
-                               reloadSetLayouts, 2, &layout);
+                               reloadSetLayouts, 2, &layout,
+                               &context_.GetDeviceProperties());
     if (!initOk)
     {
         std::cerr << "[Vulkan] ReloadShaders: pipelineManager_.Init failed" << std::endl;

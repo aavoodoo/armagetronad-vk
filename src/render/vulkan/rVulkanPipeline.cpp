@@ -36,6 +36,7 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 #include <fstream>
 #include <vector>
 #include <cstdlib>
+#include <cstring>
 #include <sys/stat.h>
 
 static std::string GetPipelineCachePath()
@@ -64,7 +65,8 @@ bool rVulkanPipelineManager::Init(VkDevice device, VkRenderPass renderPass,
                                   VkShaderModule vertShader, VkShaderModule fragShader,
                                   VkShaderModule fragShaderEmissive,
                                   const VkDescriptorSetLayout* setLayouts, uint32_t setLayoutCount,
-                                  VkPipelineLayout* outLayout)
+                                  VkPipelineLayout* outLayout,
+                                  const VkPhysicalDeviceProperties* deviceProps)
 {
     device_ = device;
     renderPass_ = renderPass;
@@ -94,23 +96,69 @@ bool rVulkanPipelineManager::Init(VkDevice device, VkRenderPass renderPass,
     if (outLayout)
         *outLayout = layout_;
 
-    // Load pipeline cache from disk (on-disk blob is validated by the driver)
+    // Load pipeline cache from disk.
+    // Header format (24 bytes): pipelineCacheUUID[16] + driverVersion(4) + vendorID(4)
+    // If the header doesn't match the current device, the blob is stale and discarded.
+    // This prevents undefined behavior when loading caches from a different driver version.
+    struct CacheFileHeader {
+        uint8_t  uuid[VK_UUID_SIZE]; // VK_UUID_SIZE = 16
+        uint32_t driverVersion;
+        uint32_t vendorID;
+    };
+    static_assert(sizeof(CacheFileHeader) == 24, "CacheFileHeader size mismatch");
+
     std::vector<uint8_t> cacheData;
     std::string cachePath = GetPipelineCachePath();
-    if (!cachePath.empty())
+    if (!cachePath.empty() && deviceProps != nullptr)
     {
         std::ifstream f(cachePath, std::ios::binary | std::ios::ate);
         if (f.is_open())
         {
             auto sz = f.tellg();
-            if (sz > 0)
+            if (sz > static_cast<std::streamoff>(sizeof(CacheFileHeader)))
             {
-                cacheData.resize(static_cast<size_t>(sz));
+                std::vector<uint8_t> fileData(static_cast<size_t>(sz));
                 f.seekg(0);
-                f.read(reinterpret_cast<char*>(cacheData.data()), sz);
+                f.read(reinterpret_cast<char*>(fileData.data()), sz);
+
+                // Validate header against current device
+                const CacheFileHeader* hdr = reinterpret_cast<const CacheFileHeader*>(fileData.data());
+                bool uuidMatch = (memcmp(hdr->uuid, deviceProps->pipelineCacheUUID, VK_UUID_SIZE) == 0);
+                bool driverMatch = (hdr->driverVersion == deviceProps->driverVersion);
+                bool vendorMatch = (hdr->vendorID == deviceProps->vendorID);
+
+                if (uuidMatch && driverMatch && vendorMatch)
+                {
+                    // Strip header — pass only the raw VkPipelineCache blob to the driver
+                    size_t blobOffset = sizeof(CacheFileHeader);
+                    cacheData.assign(fileData.begin() + blobOffset, fileData.end());
+                }
+                else
+                {
+                    std::cerr << "[Vulkan] Pipeline cache stale (device/driver mismatch) — discarding\n";
+                }
             }
         }
     }
+    else if (!cachePath.empty())
+    {
+        // No device props supplied — load without validation (legacy / reload path)
+        std::ifstream f(cachePath, std::ios::binary | std::ios::ate);
+        if (f.is_open())
+        {
+            auto sz = f.tellg();
+            if (sz > static_cast<std::streamoff>(sizeof(CacheFileHeader)))
+            {
+                cacheData.resize(static_cast<size_t>(sz) - sizeof(CacheFileHeader));
+                f.seekg(sizeof(CacheFileHeader));
+                f.read(reinterpret_cast<char*>(cacheData.data()), static_cast<std::streamsize>(cacheData.size()));
+            }
+        }
+    }
+
+    // Store device props for use during Destroy() when writing the cache file
+    if (deviceProps)
+        deviceProps_ = *deviceProps;
 
     VkPipelineCacheCreateInfo cacheInfo{};
     cacheInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO;
@@ -528,7 +576,9 @@ void rVulkanPipelineManager::Destroy()
 
     if (pipelineCache_ != VK_NULL_HANDLE)
     {
-        // Persist the cache blob to disk so next launch can reuse it
+        // Persist the cache blob to disk so next launch can reuse it.
+        // Prepend a 24-byte header (UUID + driverVersion + vendorID) so we can
+        // detect stale caches after a driver update and discard them safely.
         std::string cachePath = GetPipelineCachePath();
         if (!cachePath.empty())
         {
@@ -538,11 +588,24 @@ void rVulkanPipelineManager::Destroy()
             {
                 std::vector<uint8_t> data(dataSize);
                 vkGetPipelineCacheData(device_, pipelineCache_, &dataSize, data.data());
+
+                // Build header
+                struct CacheFileHeader {
+                    uint8_t  uuid[VK_UUID_SIZE];
+                    uint32_t driverVersion;
+                    uint32_t vendorID;
+                };
+                CacheFileHeader hdr{};
+                memcpy(hdr.uuid, deviceProps_.pipelineCacheUUID, VK_UUID_SIZE);
+                hdr.driverVersion = deviceProps_.driverVersion;
+                hdr.vendorID      = deviceProps_.vendorID;
+
                 // Write to temp file then rename for atomicity (crash-safe)
                 std::string tmpPath = cachePath + ".tmp";
                 std::ofstream f(tmpPath, std::ios::binary);
                 if (f.is_open())
                 {
+                    f.write(reinterpret_cast<const char*>(&hdr), sizeof(hdr));
                     f.write(reinterpret_cast<const char*>(data.data()),
                             static_cast<std::streamsize>(dataSize));
                     f.close();

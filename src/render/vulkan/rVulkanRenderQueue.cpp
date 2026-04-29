@@ -55,57 +55,39 @@ bool rVulkanRenderQueue::EnsureFrameBufferCapacity(FrameBuffer& fb, VkDeviceSize
 {
     if (required <= fb.size) return true;
 
-    VkDevice device = ctx_->GetDevice();
+    VmaAllocator vma = ctx_->GetAllocator();
 
     // Queue old buffer for deferred destruction (after frame completes)
     if (fb.buffer != VK_NULL_HANDLE)
     {
-        if (fb.mappedPtr)
-        {
-            vkUnmapMemory(device, fb.memory);
-            fb.mappedPtr = nullptr;
-        }
-        oldBuffers_[activeFrame_].push_back({fb.buffer, fb.memory});
-        fb.buffer = VK_NULL_HANDLE;
-        fb.memory = VK_NULL_HANDLE;
+        fb.mappedPtr = nullptr;  // VMA manages persistent mapping lifetime
+        oldBuffers_[activeFrame_].push_back({fb.buffer, fb.allocation});
+        fb.buffer     = VK_NULL_HANDLE;
+        fb.allocation = VK_NULL_HANDLE;
     }
 
     // Allocate larger buffer (at least 1MB, 2x required)
     VkDeviceSize newSize = std::max(required * 2, (VkDeviceSize)(1024 * 1024));
 
     VkBufferCreateInfo bufInfo{};
-    bufInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
-    bufInfo.size = newSize;
-    bufInfo.usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT;
+    bufInfo.sType       = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+    bufInfo.size        = newSize;
+    bufInfo.usage       = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT;
     bufInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
 
-    if (vkCreateBuffer(device, &bufInfo, nullptr, &fb.buffer) != VK_SUCCESS)
+    VmaAllocationCreateInfo vmaAllocCI{};
+    vmaAllocCI.usage = VMA_MEMORY_USAGE_AUTO;
+    vmaAllocCI.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT
+                     | VMA_ALLOCATION_CREATE_MAPPED_BIT;
+
+    VmaAllocationInfo vmaAllocInfo{};
+    if (vmaCreateBuffer(vma, &bufInfo, &vmaAllocCI,
+                        &fb.buffer, &fb.allocation, &vmaAllocInfo) != VK_SUCCESS)
         return false;
 
-    VkMemoryRequirements memReqs;
-    vkGetBufferMemoryRequirements(device, fb.buffer, &memReqs);
-
-    uint32_t memType = ctx_->FindMemoryType(memReqs.memoryTypeBits,
-        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
-    if (memType == UINT32_MAX) return false;
-
-    VkMemoryAllocateInfo allocInfo{};
-    allocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
-    allocInfo.allocationSize = memReqs.size;
-    allocInfo.memoryTypeIndex = memType;
-
-    if (vkAllocateMemory(device, &allocInfo, nullptr, &fb.memory) != VK_SUCCESS)
-        return false;
-
-    vkBindBufferMemory(device, fb.buffer, fb.memory, 0);
-    fb.size = newSize;
-
-    if (vkMapMemory(device, fb.memory, 0, VK_WHOLE_SIZE, 0, &fb.mappedPtr) != VK_SUCCESS)
-    {
-        fb.mappedPtr = nullptr;
-        return false;
-    }
-    return true;
+    fb.size      = newSize;
+    fb.mappedPtr = vmaAllocInfo.pMappedData;
+    return fb.mappedPtr != nullptr;
 }
 
 bool rVulkanRenderQueue::UploadAndBind(VkCommandBuffer cmd,
@@ -361,10 +343,12 @@ void rVulkanRenderQueue::ResetFrameOffset()
     lastBoundDescSet_   = VK_NULL_HANDLE;
 }
 
-void rVulkanRenderQueue::CompactIfNeeded(VkDevice device)
+void rVulkanRenderQueue::CompactIfNeeded(VkDevice /*device*/)
 {
     const VkDeviceSize kMinSize = 1024 * 1024;
-    if (highWaterMark_ == 0) return;
+    if (!ctx_ || highWaterMark_ == 0) return;
+
+    VmaAllocator vma = ctx_->GetAllocator();
 
     for (uint32_t i = 0; i < kMaxFrames; ++i)
     {
@@ -373,16 +357,11 @@ void rVulkanRenderQueue::CompactIfNeeded(VkDevice device)
 
         VkDeviceSize targetSize = std::max(highWaterMark_ * 2, kMinSize);
 
-        if (fb.mappedPtr)
-        {
-            vkUnmapMemory(device, fb.memory);
-            fb.mappedPtr = nullptr;
-        }
-        vkDestroyBuffer(device, fb.buffer, nullptr);
-        vkFreeMemory(device, fb.memory, nullptr);
-        fb.buffer = VK_NULL_HANDLE;
-        fb.memory = VK_NULL_HANDLE;
-        fb.size = 0;
+        vmaDestroyBuffer(vma, fb.buffer, fb.allocation);
+        fb.buffer     = VK_NULL_HANDLE;
+        fb.allocation = VK_NULL_HANDLE;
+        fb.mappedPtr  = nullptr;
+        fb.size       = 0;
 
         VkBufferCreateInfo bufInfo{};
         bufInfo.sType       = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
@@ -390,82 +369,51 @@ void rVulkanRenderQueue::CompactIfNeeded(VkDevice device)
         bufInfo.usage       = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT;
         bufInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
 
-        if (vkCreateBuffer(device, &bufInfo, nullptr, &fb.buffer) != VK_SUCCESS)
+        VmaAllocationCreateInfo vmaAllocCI{};
+        vmaAllocCI.usage = VMA_MEMORY_USAGE_AUTO;
+        vmaAllocCI.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT
+                         | VMA_ALLOCATION_CREATE_MAPPED_BIT;
+
+        VmaAllocationInfo vmaAllocInfo{};
+        if (vmaCreateBuffer(vma, &bufInfo, &vmaAllocCI,
+                            &fb.buffer, &fb.allocation, &vmaAllocInfo) != VK_SUCCESS)
             continue;
 
-        VkMemoryRequirements memReqs;
-        vkGetBufferMemoryRequirements(device, fb.buffer, &memReqs);
-
-        uint32_t memType = ctx_->FindMemoryType(memReqs.memoryTypeBits,
-            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
-        if (memType == UINT32_MAX)
-        {
-            vkDestroyBuffer(device, fb.buffer, nullptr);
-            fb.buffer = VK_NULL_HANDLE;
-            continue;
-        }
-
-        VkMemoryAllocateInfo allocInfo{};
-        allocInfo.sType           = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
-        allocInfo.allocationSize  = memReqs.size;
-        allocInfo.memoryTypeIndex = memType;
-
-        if (vkAllocateMemory(device, &allocInfo, nullptr, &fb.memory) != VK_SUCCESS)
-        {
-            vkDestroyBuffer(device, fb.buffer, nullptr);
-            fb.buffer = VK_NULL_HANDLE;
-            continue;
-        }
-
-        vkBindBufferMemory(device, fb.buffer, fb.memory, 0);
-        fb.size = targetSize;
-
-        if (vkMapMemory(device, fb.memory, 0, VK_WHOLE_SIZE, 0, &fb.mappedPtr) != VK_SUCCESS)
-            fb.mappedPtr = nullptr;
+        fb.size      = targetSize;
+        fb.mappedPtr = vmaAllocInfo.pMappedData;
     }
 }
 
 void rVulkanRenderQueue::CleanupOldBuffers()
 {
     if (!ctx_) return;
-    VkDevice device = ctx_->GetDevice();
+    VmaAllocator vma = ctx_->GetAllocator();
     // Only clean the active frame slot's old buffers — the fence for this slot
     // was just waited on, so these buffers are guaranteed no longer in use.
     auto& obs = oldBuffers_[activeFrame_];
     for (auto& ob : obs)
-    {
-        vkDestroyBuffer(device, ob.buffer, nullptr);
-        vkFreeMemory(device, ob.memory, nullptr);
-    }
+        vmaDestroyBuffer(vma, ob.buffer, ob.allocation);
     obs.clear();
 }
 
 void rVulkanRenderQueue::Destroy()
 {
     if (!ctx_) return;
-    VkDevice device = ctx_->GetDevice();
+    VmaAllocator vma = ctx_->GetAllocator();
 
     for (uint32_t i = 0; i < kMaxFrames; ++i)
     {
         FrameBuffer& fb = frameBuffers_[i];
         if (fb.buffer != VK_NULL_HANDLE)
         {
-            if (fb.mappedPtr)
-            {
-                vkUnmapMemory(device, fb.memory);
-                fb.mappedPtr = nullptr;
-            }
-            vkDestroyBuffer(device, fb.buffer, nullptr);
-            vkFreeMemory(device, fb.memory, nullptr);
-            fb.buffer = VK_NULL_HANDLE;
-            fb.memory = VK_NULL_HANDLE;
-            fb.size = 0;
+            vmaDestroyBuffer(vma, fb.buffer, fb.allocation);
+            fb.buffer     = VK_NULL_HANDLE;
+            fb.allocation = VK_NULL_HANDLE;
+            fb.mappedPtr  = nullptr;
+            fb.size       = 0;
         }
         for (auto& ob : oldBuffers_[i])
-        {
-            vkDestroyBuffer(device, ob.buffer, nullptr);
-            vkFreeMemory(device, ob.memory, nullptr);
-        }
+            vmaDestroyBuffer(vma, ob.buffer, ob.allocation);
         oldBuffers_[i].clear();
     }
 }

@@ -31,6 +31,7 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 #ifndef DEDICATED
 
 #include <vulkan/vulkan.h>
+#include "vk_mem_alloc.h"
 #include "rVertex.h"
 #include <vector>
 
@@ -122,11 +123,11 @@ private:
     // to prevent CPU writes from corrupting data the GPU is still reading.
     static constexpr uint32_t kMaxFrames = 2; // MAX_FRAMES_IN_FLIGHT
     struct FrameBuffer {
-        VkBuffer       buffer = VK_NULL_HANDLE;
-        VkDeviceMemory memory = VK_NULL_HANDLE;
-        VkDeviceSize   size = 0;
-        void*          mappedPtr = nullptr;
-        VkDeviceSize   currentOffset = 0;
+        VkBuffer      buffer     = VK_NULL_HANDLE;
+        VmaAllocation allocation = VK_NULL_HANDLE;
+        VkDeviceSize  size       = 0;
+        void*         mappedPtr  = nullptr;
+        VkDeviceSize  currentOffset = 0;
     };
     FrameBuffer frameBuffers_[kMaxFrames];
     uint32_t    activeFrame_ = 0;
@@ -140,7 +141,7 @@ private:
 
     // Old buffers queued for deferred destruction, per-frame to avoid
     // destroying a buffer that the other frame slot is still using.
-    struct OldBuffer { VkBuffer buffer; VkDeviceMemory memory; };
+    struct OldBuffer { VkBuffer buffer; VmaAllocation allocation; };
     std::vector<OldBuffer> oldBuffers_[kMaxFrames];
 
     // Helper: ensure the active frame's buffer has capacity

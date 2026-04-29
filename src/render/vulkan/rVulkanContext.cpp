@@ -111,6 +111,19 @@ bool rVulkanContext::Init(SDL_Window* window, bool enableValidation)
     if (!CreateLogicalDevice())
         return false;
 
+    // Initialize VulkanMemoryAllocator
+    VmaAllocatorCreateInfo vmaCI{};
+    vmaCI.vulkanApiVersion = VK_API_VERSION_1_0;
+    vmaCI.physicalDevice   = physicalDevice_;
+    vmaCI.device           = device_;
+    vmaCI.instance         = instance_;
+    vmaCI.flags            = VMA_ALLOCATOR_CREATE_EXTERNALLY_SYNCHRONIZED_BIT;
+    if (vmaCreateAllocator(&vmaCI, &allocator_) != VK_SUCCESS)
+    {
+        std::cerr << "[Vulkan] VMA: failed to create allocator\n";
+        return false;
+    }
+
     return true;
 }
 
@@ -119,6 +132,13 @@ void rVulkanContext::Shutdown()
     if (device_ != VK_NULL_HANDLE)
     {
         vkDeviceWaitIdle(device_);
+
+        if (allocator_ != VK_NULL_HANDLE)
+        {
+            vmaDestroyAllocator(allocator_);
+            allocator_ = VK_NULL_HANDLE;
+        }
+
         vkDestroyDevice(device_, nullptr);
         device_ = VK_NULL_HANDLE;
     }

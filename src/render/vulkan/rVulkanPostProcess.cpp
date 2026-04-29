@@ -164,7 +164,7 @@ bool rVulkanPostProcess::OnSwapchainResized(rVulkanContext& ctx, uint32_t width,
             if (pass.renderPass && pass.renderPass != oldSwapRP && pass.renderPass != oldSceneRP)
                 vkDestroyRenderPass(dev, pass.renderPass, nullptr);
         }
-        pair.second.pool.Destroy(dev);
+        pair.second.pool.Destroy(ctx.GetAllocator(), dev);
         if (pair.second.descriptorPool) vkDestroyDescriptorPool(dev, pair.second.descriptorPool, nullptr);
     }
     effects_.clear();
@@ -345,30 +345,24 @@ bool rVulkanPostProcess::BuildPipeline(rVulkanContext& ctx, VkRenderPass swapcha
     for (int i = 0; i < 2; ++i)
     {
         VkBufferCreateInfo bufInfo{};
-        bufInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
-        bufInfo.size = sizeof(ParamsUBO);
-        bufInfo.usage = VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT;
+        bufInfo.sType       = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+        bufInfo.size        = sizeof(ParamsUBO);
+        bufInfo.usage       = VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT;
         bufInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-        if (vkCreateBuffer(device, &bufInfo, nullptr, &paramsBuffer_[i]) != VK_SUCCESS)
+
+        VmaAllocationCreateInfo vmaAllocCI{};
+        vmaAllocCI.usage = VMA_MEMORY_USAGE_AUTO;
+        vmaAllocCI.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT
+                         | VMA_ALLOCATION_CREATE_MAPPED_BIT;
+
+        VmaAllocationInfo vmaAllocInfo{};
+        if (vmaCreateBuffer(ctx.GetAllocator(), &bufInfo, &vmaAllocCI,
+                            &paramsBuffer_[i], &paramsAllocation_[i], &vmaAllocInfo) != VK_SUCCESS)
         {
             std::cerr << "[PostProcess] Failed to create params UBO buffer\n";
             return false;
         }
-
-        VkMemoryRequirements memReqs;
-        vkGetBufferMemoryRequirements(device, paramsBuffer_[i], &memReqs);
-        VkMemoryAllocateInfo memAllocInfo{};
-        memAllocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
-        memAllocInfo.allocationSize = memReqs.size;
-        memAllocInfo.memoryTypeIndex = ctx.FindMemoryType(memReqs.memoryTypeBits,
-            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
-        if (vkAllocateMemory(device, &memAllocInfo, nullptr, &paramsMemory_[i]) != VK_SUCCESS)
-        {
-            std::cerr << "[PostProcess] Failed to allocate params UBO memory\n";
-            return false;
-        }
-        vkBindBufferMemory(device, paramsBuffer_[i], paramsMemory_[i], 0);
-        vkMapMemory(device, paramsMemory_[i], 0, sizeof(ParamsUBO), 0, &paramsMapped_[i]);
+        paramsMapped_[i] = vmaAllocInfo.pMappedData;
 
         VkDescriptorSetAllocateInfo dsAllocInfo{};
         dsAllocInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
@@ -448,13 +442,13 @@ void rVulkanPostProcess::DestroyPipeline()
     // Free per-frame params UBO memory.
     for (int i = 0; i < 2; ++i)
     {
-        if (paramsMemory_[i] && paramsMapped_[i])
+        if (paramsBuffer_[i] != VK_NULL_HANDLE)
         {
-            vkUnmapMemory(device_, paramsMemory_[i]);
-            paramsMapped_[i] = nullptr;
+            vmaDestroyBuffer(ctx_->GetAllocator(), paramsBuffer_[i], paramsAllocation_[i]);
+            paramsBuffer_[i]     = VK_NULL_HANDLE;
+            paramsAllocation_[i] = VK_NULL_HANDLE;
+            paramsMapped_[i]     = nullptr;
         }
-        if (paramsBuffer_[i]) { vkDestroyBuffer(device_, paramsBuffer_[i], nullptr); paramsBuffer_[i] = VK_NULL_HANDLE; }
-        if (paramsMemory_[i]) { vkFreeMemory(device_, paramsMemory_[i], nullptr);     paramsMemory_[i] = VK_NULL_HANDLE; }
         paramsDescSet_[i] = VK_NULL_HANDLE; // freed with the pool
     }
 
@@ -498,26 +492,16 @@ bool rVulkanPostProcess::BuildOffscreen(rVulkanContext& ctx, uint32_t width, uin
     colorInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
     colorInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
 
-    if (vkCreateImage(device, &colorInfo, nullptr, &offscreenColorImage_) != VK_SUCCESS)
     {
-        std::cerr << "[PostProcess] Failed to create offscreen color image\n";
-        return false;
+        VmaAllocationCreateInfo vmaAllocCI{};
+        vmaAllocCI.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
+        if (vmaCreateImage(ctx.GetAllocator(), &colorInfo, &vmaAllocCI,
+                           &offscreenColorImage_, &offscreenColorAllocation_, nullptr) != VK_SUCCESS)
+        {
+            std::cerr << "[PostProcess] Failed to create offscreen color image\n";
+            return false;
+        }
     }
-
-    VkMemoryRequirements colorMemReq;
-    vkGetImageMemoryRequirements(device, offscreenColorImage_, &colorMemReq);
-
-    VkMemoryAllocateInfo colorAllocInfo{};
-    colorAllocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
-    colorAllocInfo.allocationSize = colorMemReq.size;
-    colorAllocInfo.memoryTypeIndex = ctx.FindMemoryType(colorMemReq.memoryTypeBits,
-                                                         VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
-    if (vkAllocateMemory(device, &colorAllocInfo, nullptr, &offscreenColorMemory_) != VK_SUCCESS)
-    {
-        std::cerr << "[PostProcess] Failed to allocate offscreen color memory\n";
-        return false;
-    }
-    vkBindImageMemory(device, offscreenColorImage_, offscreenColorMemory_, 0);
 
     VkImageViewCreateInfo colorViewInfo{};
     colorViewInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
@@ -538,25 +522,16 @@ bool rVulkanPostProcess::BuildOffscreen(rVulkanContext& ctx, uint32_t width, uin
     // Written by the uber shader's emissive hooks. Bloom samples this.
     VkImageCreateInfo emissiveInfo = colorInfo;
     // Same format as color so the pipeline's blend state is uniform.
-    if (vkCreateImage(device, &emissiveInfo, nullptr, &offscreenEmissiveImage_) != VK_SUCCESS)
     {
-        std::cerr << "[PostProcess] Failed to create offscreen emissive image\n";
-        return false;
+        VmaAllocationCreateInfo vmaAllocCI{};
+        vmaAllocCI.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
+        if (vmaCreateImage(ctx.GetAllocator(), &emissiveInfo, &vmaAllocCI,
+                           &offscreenEmissiveImage_, &offscreenEmissiveAllocation_, nullptr) != VK_SUCCESS)
+        {
+            std::cerr << "[PostProcess] Failed to create offscreen emissive image\n";
+            return false;
+        }
     }
-
-    VkMemoryRequirements emissiveMemReq;
-    vkGetImageMemoryRequirements(device, offscreenEmissiveImage_, &emissiveMemReq);
-    VkMemoryAllocateInfo emissiveAllocInfo{};
-    emissiveAllocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
-    emissiveAllocInfo.allocationSize = emissiveMemReq.size;
-    emissiveAllocInfo.memoryTypeIndex = ctx.FindMemoryType(emissiveMemReq.memoryTypeBits,
-                                                             VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
-    if (vkAllocateMemory(device, &emissiveAllocInfo, nullptr, &offscreenEmissiveMemory_) != VK_SUCCESS)
-    {
-        std::cerr << "[PostProcess] Failed to allocate offscreen emissive memory\n";
-        return false;
-    }
-    vkBindImageMemory(device, offscreenEmissiveImage_, offscreenEmissiveMemory_, 0);
 
     VkImageViewCreateInfo emissiveViewInfo{};
     emissiveViewInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
@@ -580,26 +555,16 @@ bool rVulkanPostProcess::BuildOffscreen(rVulkanContext& ctx, uint32_t width, uin
     depthInfo.usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT |
                       VK_IMAGE_USAGE_SAMPLED_BIT;
 
-    if (vkCreateImage(device, &depthInfo, nullptr, &offscreenDepthImage_) != VK_SUCCESS)
     {
-        std::cerr << "[PostProcess] Failed to create offscreen depth image\n";
-        return false;
+        VmaAllocationCreateInfo vmaAllocCI{};
+        vmaAllocCI.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
+        if (vmaCreateImage(ctx.GetAllocator(), &depthInfo, &vmaAllocCI,
+                           &offscreenDepthImage_, &offscreenDepthAllocation_, nullptr) != VK_SUCCESS)
+        {
+            std::cerr << "[PostProcess] Failed to create offscreen depth image\n";
+            return false;
+        }
     }
-
-    VkMemoryRequirements depthMemReq;
-    vkGetImageMemoryRequirements(device, offscreenDepthImage_, &depthMemReq);
-
-    VkMemoryAllocateInfo depthAllocInfo{};
-    depthAllocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
-    depthAllocInfo.allocationSize = depthMemReq.size;
-    depthAllocInfo.memoryTypeIndex = ctx.FindMemoryType(depthMemReq.memoryTypeBits,
-                                                         VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
-    if (vkAllocateMemory(device, &depthAllocInfo, nullptr, &offscreenDepthMemory_) != VK_SUCCESS)
-    {
-        std::cerr << "[PostProcess] Failed to allocate offscreen depth memory\n";
-        return false;
-    }
-    vkBindImageMemory(device, offscreenDepthImage_, offscreenDepthMemory_, 0);
 
     VkImageViewCreateInfo depthViewInfo{};
     depthViewInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
@@ -751,15 +716,24 @@ void rVulkanPostProcess::DestroyOffscreen()
     }
     if (offscreenRenderPass_)  { vkDestroyRenderPass(device_, offscreenRenderPass_, nullptr);   offscreenRenderPass_ = VK_NULL_HANDLE; }
     if (offscreenSampler_)     { vkDestroySampler(device_, offscreenSampler_, nullptr);         offscreenSampler_ = VK_NULL_HANDLE; }
-    if (offscreenDepthView_)   { vkDestroyImageView(device_, offscreenDepthView_, nullptr);     offscreenDepthView_ = VK_NULL_HANDLE; }
-    if (offscreenDepthImage_)  { vkDestroyImage(device_, offscreenDepthImage_, nullptr);        offscreenDepthImage_ = VK_NULL_HANDLE; }
-    if (offscreenDepthMemory_) { vkFreeMemory(device_, offscreenDepthMemory_, nullptr);         offscreenDepthMemory_ = VK_NULL_HANDLE; }
-    if (offscreenEmissiveView_)   { vkDestroyImageView(device_, offscreenEmissiveView_, nullptr);     offscreenEmissiveView_ = VK_NULL_HANDLE; }
-    if (offscreenEmissiveImage_)  { vkDestroyImage(device_, offscreenEmissiveImage_, nullptr);        offscreenEmissiveImage_ = VK_NULL_HANDLE; }
-    if (offscreenEmissiveMemory_) { vkFreeMemory(device_, offscreenEmissiveMemory_, nullptr);         offscreenEmissiveMemory_ = VK_NULL_HANDLE; }
-    if (offscreenColorView_)   { vkDestroyImageView(device_, offscreenColorView_, nullptr);     offscreenColorView_ = VK_NULL_HANDLE; }
-    if (offscreenColorImage_)  { vkDestroyImage(device_, offscreenColorImage_, nullptr);        offscreenColorImage_ = VK_NULL_HANDLE; }
-    if (offscreenColorMemory_) { vkFreeMemory(device_, offscreenColorMemory_, nullptr);         offscreenColorMemory_ = VK_NULL_HANDLE; }
+    if (offscreenDepthView_) { vkDestroyImageView(device_, offscreenDepthView_, nullptr); offscreenDepthView_ = VK_NULL_HANDLE; }
+    if (offscreenDepthImage_ != VK_NULL_HANDLE)
+    {
+        vmaDestroyImage(ctx_->GetAllocator(), offscreenDepthImage_, offscreenDepthAllocation_);
+        offscreenDepthImage_ = VK_NULL_HANDLE; offscreenDepthAllocation_ = VK_NULL_HANDLE;
+    }
+    if (offscreenEmissiveView_) { vkDestroyImageView(device_, offscreenEmissiveView_, nullptr); offscreenEmissiveView_ = VK_NULL_HANDLE; }
+    if (offscreenEmissiveImage_ != VK_NULL_HANDLE)
+    {
+        vmaDestroyImage(ctx_->GetAllocator(), offscreenEmissiveImage_, offscreenEmissiveAllocation_);
+        offscreenEmissiveImage_ = VK_NULL_HANDLE; offscreenEmissiveAllocation_ = VK_NULL_HANDLE;
+    }
+    if (offscreenColorView_) { vkDestroyImageView(device_, offscreenColorView_, nullptr); offscreenColorView_ = VK_NULL_HANDLE; }
+    if (offscreenColorImage_ != VK_NULL_HANDLE)
+    {
+        vmaDestroyImage(ctx_->GetAllocator(), offscreenColorImage_, offscreenColorAllocation_);
+        offscreenColorImage_ = VK_NULL_HANDLE; offscreenColorAllocation_ = VK_NULL_HANDLE;
+    }
     offscreenBuilt_ = false;
 }
 
@@ -943,7 +917,7 @@ rVulkanPostProcess::Effect* rVulkanPostProcess::EnsureEffectLoaded(const std::st
     if (vkCreateDescriptorPool(device_, &dpCI, nullptr, &ef.descriptorPool) != VK_SUCCESS)
     {
         std::cerr << "[PostProcess] Failed to create descriptor pool for '" << name << "'\n";
-        ef.pool.Destroy(device_);
+        ef.pool.Destroy(ctx_->GetAllocator(), device_);
         return nullptr;
     }
 
@@ -961,7 +935,7 @@ rVulkanPostProcess::Effect* rVulkanPostProcess::EnsureEffectLoaded(const std::st
             for (auto& p : ef.passes) DestroyPass(p);
             ef.passes.clear();
             vkDestroyDescriptorPool(device_, ef.descriptorPool, nullptr);
-            ef.pool.Destroy(device_);
+            ef.pool.Destroy(ctx_->GetAllocator(), device_);
             return nullptr;
         }
         ef.passes.push_back(std::move(pass));
@@ -1342,7 +1316,7 @@ void rVulkanPostProcess::DestroyEffect(Effect& ef)
         vkDestroyDescriptorPool(device_, ef.descriptorPool, nullptr);
         ef.descriptorPool = VK_NULL_HANDLE;
     }
-    ef.pool.Destroy(device_);
+    ef.pool.Destroy(ctx_->GetAllocator(), device_);
     ef.desc.resources.clear();
     ef.desc.passes.clear();
     ef.params.clear();
@@ -1682,7 +1656,7 @@ bool rPostProcessResourcePool::Allocate(rVulkanContext& ctx,
                                         VkExtent2D baseExtent)
 {
     // Fresh allocation every time — destroy anything left over.
-    Destroy(ctx.GetDevice());
+    Destroy(ctx.GetAllocator(), ctx.GetDevice());
 
     VkDevice device = ctx.GetDevice();
 
@@ -1707,29 +1681,16 @@ bool rPostProcessResourcePool::Allocate(rVulkanContext& ctx,
         imgInfo.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
         imgInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
         imgInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-        if (vkCreateImage(device, &imgInfo, nullptr, &res.image) != VK_SUCCESS)
+        VmaAllocationCreateInfo vmaAllocCI{};
+        vmaAllocCI.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
+        if (vmaCreateImage(ctx.GetAllocator(), &imgInfo, &vmaAllocCI,
+                           &res.image, &res.allocation, nullptr) != VK_SUCCESS)
         {
             std::cerr << "[PostProcess] ResourcePool: failed to create image '"
                       << decl.name << "'\n";
-            Destroy(device);
+            Destroy(ctx.GetAllocator(), device);
             return false;
         }
-
-        VkMemoryRequirements memReq;
-        vkGetImageMemoryRequirements(device, res.image, &memReq);
-        VkMemoryAllocateInfo memInfo{};
-        memInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
-        memInfo.allocationSize = memReq.size;
-        memInfo.memoryTypeIndex = ctx.FindMemoryType(memReq.memoryTypeBits,
-                                                      VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
-        if (vkAllocateMemory(device, &memInfo, nullptr, &res.memory) != VK_SUCCESS)
-        {
-            std::cerr << "[PostProcess] ResourcePool: failed to allocate memory for '"
-                      << decl.name << "'\n";
-            Destroy(device);
-            return false;
-        }
-        vkBindImageMemory(device, res.image, res.memory, 0);
 
         VkImageViewCreateInfo viewInfo{};
         viewInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
@@ -1743,7 +1704,7 @@ bool rPostProcessResourcePool::Allocate(rVulkanContext& ctx,
         {
             std::cerr << "[PostProcess] ResourcePool: failed to create view for '"
                       << decl.name << "'\n";
-            Destroy(device);
+            Destroy(ctx.GetAllocator(), device);
             return false;
         }
 
@@ -1752,15 +1713,14 @@ bool rPostProcessResourcePool::Allocate(rVulkanContext& ctx,
     return true;
 }
 
-void rPostProcessResourcePool::Destroy(VkDevice device)
+void rPostProcessResourcePool::Destroy(VmaAllocator allocator, VkDevice device)
 {
     if (device == VK_NULL_HANDLE) return;
     for (auto& kv : resources_)
     {
         Resource& r = kv.second;
-        if (r.view)   vkDestroyImageView(device, r.view, nullptr);
-        if (r.image)  vkDestroyImage(device, r.image, nullptr);
-        if (r.memory) vkFreeMemory(device, r.memory, nullptr);
+        if (r.view)  { vkDestroyImageView(device, r.view, nullptr); r.view = VK_NULL_HANDLE; }
+        if (r.image) { vmaDestroyImage(allocator, r.image, r.allocation); r.image = VK_NULL_HANDLE; r.allocation = VK_NULL_HANDLE; }
     }
     resources_.clear();
 }

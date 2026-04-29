@@ -31,6 +31,7 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 #ifndef DEDICATED
 
 #include <vulkan/vulkan.h>
+#include "vk_mem_alloc.h"
 #include <vector>
 #include <functional>
 
@@ -83,6 +84,9 @@ public:
     //! When true, vkCmdSetDepthBias may use a non-zero clamp to limit slope-based bias.
     bool HasDepthBiasClamp() const { return depthBiasClampSupported_; }
 
+    //! VulkanMemoryAllocator handle — use for all image and buffer allocations.
+    VmaAllocator GetAllocator() const { return allocator_; }
+
     // Non-copyable
     rVulkanContext(const rVulkanContext&) = delete;
     rVulkanContext& operator=(const rVulkanContext&) = delete;
@@ -105,6 +109,8 @@ private:
 
     VkPhysicalDeviceProperties       deviceProperties_{};
     VkPhysicalDeviceMemoryProperties memoryProperties_{};
+
+    VmaAllocator allocator_ = VK_NULL_HANDLE;
 
     bool validationEnabled_ = false;
     bool depthBiasClampSupported_ = false;

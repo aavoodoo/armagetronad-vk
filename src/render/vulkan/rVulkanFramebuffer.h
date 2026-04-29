@@ -31,6 +31,7 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 #ifndef DEDICATED
 
 #include <vulkan/vulkan.h>
+#include "vk_mem_alloc.h"
 #include <vector>
 
 class rVulkanContext;
@@ -50,7 +51,7 @@ public:
     bool Recreate(rVulkanContext& ctx, rVulkanSwapchain& swapchain);
 
     //! Destroy all resources
-    void Destroy(VkDevice device);
+    void Destroy(rVulkanContext& ctx);
 
     VkRenderPass  GetRenderPass()              const { return renderPass_; }
     VkFramebuffer GetFramebuffer(uint32_t idx) const { return framebuffers_[idx]; }
@@ -64,16 +65,16 @@ private:
     bool CreateRenderPass(VkDevice device, VkFormat colorFormat);
     bool CreateDepthResources(rVulkanContext& ctx, uint32_t width, uint32_t height);
     bool CreateFramebuffers(VkDevice device, rVulkanSwapchain& swapchain);
-    void DestroyDepthResources(VkDevice device);
+    void DestroyDepthResources(rVulkanContext& ctx);
     void DestroyFramebuffers(VkDevice device);
 
     VkFormat FindDepthFormat(VkPhysicalDevice physDev);
 
-    VkRenderPass               renderPass_  = VK_NULL_HANDLE;
-    VkImage                    depthImage_  = VK_NULL_HANDLE;
-    VkDeviceMemory             depthMemory_ = VK_NULL_HANDLE;
-    VkImageView                depthView_   = VK_NULL_HANDLE;
-    VkFormat                   depthFormat_ = VK_FORMAT_UNDEFINED;
+    VkRenderPass               renderPass_       = VK_NULL_HANDLE;
+    VkImage                    depthImage_       = VK_NULL_HANDLE;
+    VmaAllocation              depthAllocation_  = VK_NULL_HANDLE;
+    VkImageView                depthView_        = VK_NULL_HANDLE;
+    VkFormat                   depthFormat_      = VK_FORMAT_UNDEFINED;
     std::vector<VkFramebuffer> framebuffers_;
 };
 

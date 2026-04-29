@@ -31,17 +31,18 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 #ifndef DEDICATED
 
 #include <vulkan/vulkan.h>
+#include "vk_mem_alloc.h"
 #include <vector>
 
 class rVulkanContext;
 
-//! RAII wrapper for a VkBuffer + VkDeviceMemory pair
+//! RAII wrapper for a VkBuffer + VmaAllocation pair
 struct rVulkanBuffer
 {
-    VkBuffer       buffer = VK_NULL_HANDLE;
-    VkDeviceMemory memory = VK_NULL_HANDLE;
-    VkDeviceSize   size   = 0;
-    void*          mapped = nullptr;  // Non-null if persistently mapped
+    VkBuffer       buffer     = VK_NULL_HANDLE;
+    VmaAllocation  allocation = VK_NULL_HANDLE;
+    VkDeviceSize   size       = 0;
+    void*          mapped     = nullptr;  // Non-null if persistently mapped
 
     bool IsValid() const { return buffer != VK_NULL_HANDLE; }
 };
@@ -57,8 +58,8 @@ public:
                              VkMemoryPropertyFlags memProps,
                              rVulkanBuffer& outBuffer);
 
-    //! Destroy a buffer and free its memory
-    static void DestroyBuffer(VkDevice device, rVulkanBuffer& buffer);
+    //! Destroy a buffer and free its allocation
+    static void DestroyBuffer(VmaAllocator allocator, rVulkanBuffer& buffer);
 
     //! Create a staging buffer (host visible + coherent) with data
     static bool CreateStagingBuffer(rVulkanContext& ctx,
@@ -72,8 +73,8 @@ public:
                                    VkBufferUsageFlags usage,
                                    rVulkanBuffer& outBuffer);
 
-    //! Upload data to a host-visible buffer (map → memcpy → unmap)
-    static bool UploadToBuffer(VkDevice device, rVulkanBuffer& buffer,
+    //! Upload data to a host-visible buffer (map → memcpy → unmap, or direct if persistently mapped)
+    static bool UploadToBuffer(VmaAllocator allocator, rVulkanBuffer& buffer,
                                const void* data, VkDeviceSize size, VkDeviceSize offset = 0);
 
     //! Execute a one-shot command buffer synchronously (blocks until GPU is done).

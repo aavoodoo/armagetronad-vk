@@ -31,6 +31,7 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 #ifndef DEDICATED
 
 #include <vulkan/vulkan.h>
+#include "vk_mem_alloc.h"
 #include <atomic>
 #include <vector>
 #include <string>
@@ -120,8 +121,8 @@ class rPostProcessResourcePool
 public:
     struct Resource
     {
-        VkImage        image  = VK_NULL_HANDLE;
-        VkDeviceMemory memory = VK_NULL_HANDLE;
+        VkImage       image      = VK_NULL_HANDLE;
+        VmaAllocation allocation = VK_NULL_HANDLE;
         VkImageView    view   = VK_NULL_HANDLE;
         VkExtent2D     extent = {0, 0};
         VkFormat       format = VK_FORMAT_UNDEFINED;
@@ -138,7 +139,7 @@ public:
                   VkExtent2D baseExtent);
 
     //! Destroy all allocations. Safe to call on an empty pool.
-    void Destroy(VkDevice device);
+    void Destroy(VmaAllocator allocator, VkDevice device);
 
     //! Look up a resource by name. Returns nullptr if not found.
     const Resource* Get(const std::string& name) const;
@@ -264,6 +265,31 @@ public:
     VkRenderPass  GetSceneRenderPass()  const { return offscreenRenderPass_; }
     VkFramebuffer GetSceneFramebuffer() const { return offscreenFramebuffer_; }
 
+    //! Layout tracking: call when the scene render pass is about to begin.
+    //! The offscreen render pass declares initialLayout=UNDEFINED, so we
+    //! record that the images' content is discarded at this point.
+    void NotifySceneRenderPassBeginning()
+    {
+        offscreenColorLayout_    = VK_IMAGE_LAYOUT_UNDEFINED;
+        offscreenEmissiveLayout_ = VK_IMAGE_LAYOUT_UNDEFINED;
+        offscreenDepthLayout_    = VK_IMAGE_LAYOUT_UNDEFINED;
+    }
+
+    //! Layout tracking: call after vkCmdEndRenderPass for the scene render pass.
+    //! The offscreen render pass's finalLayout transitions each image to its
+    //! read-optimal layout, ready to be sampled by the PP passes.
+    void NotifySceneRenderPassEnded()
+    {
+        offscreenColorLayout_    = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        offscreenEmissiveLayout_ = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        offscreenDepthLayout_    = VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;
+    }
+
+    //! Query tracked layouts (for barrier insertion and assertions).
+    VkImageLayout GetOffscreenColorLayout()    const { return offscreenColorLayout_; }
+    VkImageLayout GetOffscreenEmissiveLayout() const { return offscreenEmissiveLayout_; }
+    VkImageLayout GetOffscreenDepthLayout()    const { return offscreenDepthLayout_; }
+
     //! Execute the post-process pass. Called from EndFrame() after the scene
     //! render pass has ended. Transitions the offscreen color image into a
     //! shader-read layout (done implicitly by the offscreen render pass),
@@ -306,23 +332,26 @@ private:
     VkRenderPass swapchainRenderPass_ = VK_NULL_HANDLE; // borrowed, not owned
 
     // Offscreen color target
-    VkImage        offscreenColorImage_  = VK_NULL_HANDLE;
-    VkDeviceMemory offscreenColorMemory_ = VK_NULL_HANDLE;
-    VkImageView    offscreenColorView_   = VK_NULL_HANDLE;
+    VkImage       offscreenColorImage_      = VK_NULL_HANDLE;
+    VmaAllocation offscreenColorAllocation_ = VK_NULL_HANDLE;
+    VkImageView   offscreenColorView_       = VK_NULL_HANDLE;
     VkSampler      offscreenSampler_     = VK_NULL_HANDLE;
+    VkImageLayout  offscreenColorLayout_    = VK_IMAGE_LAYOUT_UNDEFINED;
 
     // Offscreen emissive target — second color attachment written by the
     // uber fragment shader's emissive hooks. Default hook returns vec4(0),
     // so this is the accumulated "which pixels glow and how much" signal
     // that bloom samples instead of the (often dim) color buffer.
-    VkImage        offscreenEmissiveImage_  = VK_NULL_HANDLE;
-    VkDeviceMemory offscreenEmissiveMemory_ = VK_NULL_HANDLE;
-    VkImageView    offscreenEmissiveView_   = VK_NULL_HANDLE;
+    VkImage       offscreenEmissiveImage_      = VK_NULL_HANDLE;
+    VmaAllocation offscreenEmissiveAllocation_ = VK_NULL_HANDLE;
+    VkImageView   offscreenEmissiveView_       = VK_NULL_HANDLE;
+    VkImageLayout  offscreenEmissiveLayout_ = VK_IMAGE_LAYOUT_UNDEFINED;
 
     // Offscreen depth target
-    VkImage        offscreenDepthImage_  = VK_NULL_HANDLE;
-    VkDeviceMemory offscreenDepthMemory_ = VK_NULL_HANDLE;
-    VkImageView    offscreenDepthView_   = VK_NULL_HANDLE;
+    VkImage       offscreenDepthImage_      = VK_NULL_HANDLE;
+    VmaAllocation offscreenDepthAllocation_ = VK_NULL_HANDLE;
+    VkImageView   offscreenDepthView_       = VK_NULL_HANDLE;
+    VkImageLayout  offscreenDepthLayout_ = VK_IMAGE_LAYOUT_UNDEFINED;
 
     // Offscreen render pass + framebuffer (scene renders here)
     VkRenderPass  offscreenRenderPass_  = VK_NULL_HANDLE;
@@ -438,8 +467,8 @@ private:
     static_assert(sizeof(ParamsUBO) == 256, "PostProcess params UBO must be 256 bytes");
 
     ParamsUBO      currentParams_{};
-    VkBuffer       paramsBuffer_[2] = {VK_NULL_HANDLE, VK_NULL_HANDLE};  // one per frame-in-flight
-    VkDeviceMemory paramsMemory_[2] = {VK_NULL_HANDLE, VK_NULL_HANDLE};
+    VkBuffer      paramsBuffer_[2]     = {VK_NULL_HANDLE, VK_NULL_HANDLE};  // one per frame-in-flight
+    VmaAllocation paramsAllocation_[2] = {VK_NULL_HANDLE, VK_NULL_HANDLE};
     void*          paramsMapped_[2] = {nullptr, nullptr};
     VkDescriptorSet paramsDescSet_[2] = {VK_NULL_HANDLE, VK_NULL_HANDLE};
 

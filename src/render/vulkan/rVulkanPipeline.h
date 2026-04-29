@@ -100,7 +100,8 @@ public:
               VkShaderModule vertShader, VkShaderModule fragShader,
               VkShaderModule fragShaderEmissive,
               const VkDescriptorSetLayout* setLayouts, uint32_t setLayoutCount,
-              VkPipelineLayout* outLayout);
+              VkPipelineLayout* outLayout,
+              const VkPhysicalDeviceProperties* deviceProps = nullptr);
 
     //! Set instanced vertex shader (for cycle batching). Optional.
     void SetInstancedVertShader(VkShaderModule s) { vertShaderInstanced_ = s; }
@@ -139,6 +140,8 @@ public:
 
 private:
     VkPipeline CreatePipeline(const rVulkanPipelineKey& key);
+
+    VkPhysicalDeviceProperties deviceProps_ = {};
 
     VkDevice         device_        = VK_NULL_HANDLE;
     VkRenderPass     renderPass_    = VK_NULL_HANDLE;

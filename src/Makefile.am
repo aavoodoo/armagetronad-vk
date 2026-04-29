@@ -162,6 +162,7 @@ librender_a_SOURCES=${render_extra} render/rConsole.cpp render/rConsoleGraph.cpp
 	render/rFrameLifecycle.h render/rFrameLifecycle.cpp \
 	render/rRendererState.h render/rRendererState.cpp \
 	render/vulkan/rVulkanContext.h render/vulkan/rVulkanContext.cpp \
+	render/vulkan/rVulkanAllocator.cpp \
 	render/vulkan/rVulkanSwapchain.h render/vulkan/rVulkanSwapchain.cpp \
 	render/vulkan/rVulkanFramebuffer.h render/vulkan/rVulkanFramebuffer.cpp \
 	render/vulkan/rVulkanBuffer.h render/vulkan/rVulkanBuffer.cpp \
@@ -169,6 +170,7 @@ librender_a_SOURCES=${render_extra} render/rConsole.cpp render/rConsoleGraph.cpp
 	render/vulkan/rVulkanPipeline.h render/vulkan/rVulkanPipeline.cpp \
 	render/vulkan/rVulkanDescriptor.h render/vulkan/rVulkanDescriptor.cpp \
 	render/vulkan/rVulkanRenderQueue.h render/vulkan/rVulkanRenderQueue.cpp \
+	render/vulkan/rVulkanStagingPool.h render/vulkan/rVulkanStagingPool.cpp \
 	render/vulkan/rVulkanPostProcess.h render/vulkan/rVulkanPostProcess.cpp \
 	render/vulkan/rVulkanRender.h render/vulkan/rVulkanRender.cpp \
 	render/utilities/rRenderBucket.h render/utilities/rRenderBucket.cpp \
@@ -260,7 +262,7 @@ endif
 libtools_a_CPPFLAGS = -iquote @srcdir@/thirdparty/binreloc
 libtools_a_CXXFLAGS  =$(AM_CXXFLAGS) $(CXXFLAGS_OURFILES) -iquote @srcdir@/tools -iquote @srcdir@/tools/values -iquote @srcdir@/resource -iquote @srcdir@/thirdparty/mathexpr -iquote @srcdir@/thirdparty/utf8 -iquote @srcdir@/protobuf -iquote protobuf
 libnetwork_a_CXXFLAGS=$(libtools_a_CXXFLAGS)  -iquote @srcdir@/network
-librender_a_CXXFLAGS =$(libtools_a_CXXFLAGS)  -iquote @srcdir@/render -iquote @srcdir@/render/utilities -iquote @srcdir@/render/renderers -iquote @srcdir@/render/geometry -iquote @srcdir@/render/fonts -iquote @srcdir@/thirdparty/stb
+librender_a_CXXFLAGS =$(libtools_a_CXXFLAGS)  -iquote @srcdir@/render -iquote @srcdir@/render/utilities -iquote @srcdir@/render/renderers -iquote @srcdir@/render/geometry -iquote @srcdir@/render/fonts -iquote @srcdir@/thirdparty/stb -iquote @srcdir@/thirdparty/vma
 libui_a_CXXFLAGS     =$(librender_a_CXXFLAGS) -iquote @srcdir@/ui -iquote @srcdir@/thirdparty/shttpd -iquote @srcdir@/thirdparty/scrap
 libengine_a_CXXFLAGS =$(libui_a_CXXFLAGS)     -iquote @srcdir@/network -iquote @srcdir@/engine -iquote @srcdir@/engine/sound -iquote @srcdir@/engine/sound/sdl_mixer -iquote @srcdir@/thirdparty/miniaudio
 libtron_a_CXXFLAGS   =$(libengine_a_CXXFLAGS) -iquote @srcdir@/thirdparty/particles -iquote @srcdir@/tron -iquote @srcdir@/tron/cockpit -iquote @srcdir@/tron/zone

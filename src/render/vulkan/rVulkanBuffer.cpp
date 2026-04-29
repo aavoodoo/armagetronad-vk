@@ -40,68 +40,46 @@ bool rVulkanBufferManager::CreateBuffer(rVulkanContext& ctx,
                                         VkMemoryPropertyFlags memProps,
                                         rVulkanBuffer& outBuffer)
 {
-    VkDevice device = ctx.GetDevice();
-
     VkBufferCreateInfo bufferInfo{};
     bufferInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
     bufferInfo.size = size;
     bufferInfo.usage = usage;
     bufferInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
 
-    if (vkCreateBuffer(device, &bufferInfo, nullptr, &outBuffer.buffer) != VK_SUCCESS)
+    VmaAllocationCreateInfo vmaAllocCI{};
+    if (memProps & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT)
     {
-        std::cerr << "[Vulkan] Failed to create buffer" << std::endl;
+        vmaAllocCI.usage = VMA_MEMORY_USAGE_AUTO;
+        vmaAllocCI.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT;
+    }
+    else
+    {
+        vmaAllocCI.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
+    }
+
+    if (vmaCreateBuffer(ctx.GetAllocator(), &bufferInfo, &vmaAllocCI,
+                        &outBuffer.buffer, &outBuffer.allocation, nullptr) != VK_SUCCESS)
+    {
+        std::cerr << "[Vulkan] VMA: failed to create buffer\n";
         return false;
     }
 
-    VkMemoryRequirements memReqs;
-    vkGetBufferMemoryRequirements(device, outBuffer.buffer, &memReqs);
-
-    uint32_t memType = ctx.FindMemoryType(memReqs.memoryTypeBits, memProps);
-    if (memType == UINT32_MAX)
-    {
-        std::cerr << "[Vulkan] Failed to find suitable memory type" << std::endl;
-        vkDestroyBuffer(device, outBuffer.buffer, nullptr);
-        outBuffer.buffer = VK_NULL_HANDLE;
-        return false;
-    }
-
-    VkMemoryAllocateInfo allocInfo{};
-    allocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
-    allocInfo.allocationSize = memReqs.size;
-    allocInfo.memoryTypeIndex = memType;
-
-    if (vkAllocateMemory(device, &allocInfo, nullptr, &outBuffer.memory) != VK_SUCCESS)
-    {
-        std::cerr << "[Vulkan] Failed to allocate buffer memory" << std::endl;
-        vkDestroyBuffer(device, outBuffer.buffer, nullptr);
-        outBuffer.buffer = VK_NULL_HANDLE;
-        return false;
-    }
-
-    vkBindBufferMemory(device, outBuffer.buffer, outBuffer.memory, 0);
     outBuffer.size = size;
     return true;
 }
 
-void rVulkanBufferManager::DestroyBuffer(VkDevice device, rVulkanBuffer& buffer)
+void rVulkanBufferManager::DestroyBuffer(VmaAllocator allocator, rVulkanBuffer& buffer)
 {
-    if (buffer.mapped)
-    {
-        vkUnmapMemory(device, buffer.memory);
-        buffer.mapped = nullptr;
-    }
     if (buffer.buffer != VK_NULL_HANDLE)
     {
-        vkDestroyBuffer(device, buffer.buffer, nullptr);
-        buffer.buffer = VK_NULL_HANDLE;
+        // VMA handles unmap internally — no need to call vmaUnmapMemory for non-persistent mappings.
+        // For persistent mappings (mapped != nullptr), VMA also handles cleanup on destroy.
+        vmaDestroyBuffer(allocator, buffer.buffer, buffer.allocation);
+        buffer.buffer     = VK_NULL_HANDLE;
+        buffer.allocation = VK_NULL_HANDLE;
     }
-    if (buffer.memory != VK_NULL_HANDLE)
-    {
-        vkFreeMemory(device, buffer.memory, nullptr);
-        buffer.memory = VK_NULL_HANDLE;
-    }
-    buffer.size = 0;
+    buffer.mapped = nullptr;
+    buffer.size   = 0;
 }
 
 bool rVulkanBufferManager::CreateStagingBuffer(rVulkanContext& ctx,
@@ -116,10 +94,13 @@ bool rVulkanBufferManager::CreateStagingBuffer(rVulkanContext& ctx,
 
     if (data)
     {
-        void* mapped;
-        vkMapMemory(ctx.GetDevice(), outBuffer.memory, 0, size, 0, &mapped);
-        memcpy(mapped, data, static_cast<size_t>(size));
-        vkUnmapMemory(ctx.GetDevice(), outBuffer.memory);
+        if (vmaCopyMemoryToAllocation(ctx.GetAllocator(), data,
+                                      outBuffer.allocation, 0, size) != VK_SUCCESS)
+        {
+            std::cerr << "[Vulkan] VMA: failed to copy to staging buffer\n";
+            DestroyBuffer(ctx.GetAllocator(), outBuffer);
+            return false;
+        }
     }
 
     return true;
@@ -142,7 +123,7 @@ bool rVulkanBufferManager::CreateDeviceBuffer(rVulkanContext& ctx,
                       VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
                       outBuffer))
     {
-        DestroyBuffer(ctx.GetDevice(), staging);
+        DestroyBuffer(ctx.GetAllocator(), staging);
         return false;
     }
 
@@ -155,19 +136,24 @@ bool rVulkanBufferManager::CreateDeviceBuffer(rVulkanContext& ctx,
 
     EndSingleTimeCommands(ctx.GetDevice(), cmdPool, ctx.GetGraphicsQueue(), cmd);
 
-    DestroyBuffer(ctx.GetDevice(), staging);
+    DestroyBuffer(ctx.GetAllocator(), staging);
     return true;
 }
 
-bool rVulkanBufferManager::UploadToBuffer(VkDevice device, rVulkanBuffer& buffer,
+bool rVulkanBufferManager::UploadToBuffer(VmaAllocator allocator, rVulkanBuffer& buffer,
                                           const void* data, VkDeviceSize size,
                                           VkDeviceSize offset)
 {
+    if (buffer.mapped)
+    {
+        memcpy(static_cast<char*>(buffer.mapped) + offset, data, static_cast<size_t>(size));
+        return true;
+    }
     void* mapped;
-    if (vkMapMemory(device, buffer.memory, offset, size, 0, &mapped) != VK_SUCCESS)
+    if (vmaMapMemory(allocator, buffer.allocation, &mapped) != VK_SUCCESS)
         return false;
-    memcpy(mapped, data, static_cast<size_t>(size));
-    vkUnmapMemory(device, buffer.memory);
+    memcpy(static_cast<char*>(mapped) + offset, data, static_cast<size_t>(size));
+    vmaUnmapMemory(allocator, buffer.allocation);
     return true;
 }
 
