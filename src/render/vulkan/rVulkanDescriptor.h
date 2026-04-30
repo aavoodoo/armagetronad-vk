@@ -85,6 +85,20 @@ public:
     //! Number of live descriptor pools (for monitoring; should stabilize after warmup)
     uint32_t GetPoolCount() const { return static_cast<uint32_t>(pools_.size()); }
 
+    //! Current slot index used by InvalidateCache. Matches the slot that
+    //! was last passed to DrainDeferred. Use this (not the renderer's
+    //! currentFrame_) when queuing deferred-delete textures alongside
+    //! InvalidateCache — they must land in the same slot so the descriptor
+    //! free happens before the image-view destroy.
+    uint32_t GetCurrentSlot() const { return currentSlot_; }
+
+    //! Free ALL descriptor sets immediately — both the live cache and every
+    //! deferred-free slot. Call only after vkDeviceWaitIdle; safe because
+    //! no command buffer can still reference any of these sets.
+    //! Used before RecreateSwapchain destroys image views that are still
+    //! formally referenced by cached or deferred descriptor sets.
+    void FlushAllDeferred();
+
     //! Number of deferred-free slots. MUST equal MAX_FRAMES_IN_FLIGHT in rVulkanRender.h.
     //! A static_assert in rVulkanRender.cpp enforces this.
     static constexpr uint32_t PP_MAX_FRAMES = 2;

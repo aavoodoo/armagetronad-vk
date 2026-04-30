@@ -604,9 +604,25 @@ bool rFontSTB::LoadMSDFGlyph(unsigned int codepoint)
 
     // Helper: try to pack into atlas, growing if needed. On grow, rescale
     // all cached glyph UVs so previously-packed glyphs remain correct.
+    //
+    // IMPORTANT: never grow mid-frame. Growing creates a new VkImage (new
+    // VkImageView) which invalidates all descriptor sets for this atlas.
+    // Any text vertex batches already written this frame carry UV coords
+    // relative to the OLD (smaller) atlas. When ExecutePhase runs, those
+    // batches will be bound to the NEW atlas, sampling wrong positions.
+    // If we detect that frame recording is active we skip the grow and set
+    // atlasGrowPending_ — BeginFrame() will do the grow at the safe
+    // pre-render window of the next frame.
     auto packOrGrow = [&](auto& atlas, int cellSize, int& outX, int& outY) -> bool {
         bool ok = atlas->pack(cellSize, cellSize, outX, outY);
         if (!ok) {
+            // Defer the grow when mid-frame — BUT NOT during initialization.
+            // Fonts are loaded on-demand during rendering (RenderIsFrameStarted=true),
+            // but must complete their initial ASCII preload synchronously regardless.
+            if (RenderIsFrameStarted() && !initializing_) {
+                atlasGrowPending_ = true;
+                return false;
+            }
             int oldW = atlas->width(), oldH = atlas->height();
             if (atlas->grow()) {
                 float sx = static_cast<float>(oldW) / atlas->width();
@@ -711,6 +727,34 @@ unsigned int rFontSTB::GetActiveTextureId() const
     if (mode_ == FontMode::MTSDF && atlasMTSDF_)
         return atlasMTSDF_->textureId();
     return textureId_;  // Legacy mode
+}
+
+// Called once per frame before any rendering begins (from rBeginFrame via sr_FontBeginFrame).
+// Performs any atlas grow that was deferred from the previous frame because growing
+// mid-frame would corrupt already-batched vertex UV coordinates.
+void rFontSTB::BeginFrame()
+{
+    if (!atlasGrowPending_) return;
+    atlasGrowPending_ = false;
+
+    auto doGrow = [&](auto& atlas) {
+        if (!atlas) return;
+        int oldW = atlas->width(), oldH = atlas->height();
+        if (atlas->grow()) {
+            float sx = static_cast<float>(oldW) / atlas->width();
+            float sy = static_cast<float>(oldH) / atlas->height();
+            for (auto& [cp, g] : glyphCache_) {
+                if (g.state == GlyphState::LOADED && g.metrics.textureId == atlas->textureId()) {
+                    g.metrics.texU0 *= sx; g.metrics.texU1 *= sx;
+                    g.metrics.texV0 *= sy; g.metrics.texV1 *= sy;
+                }
+            }
+        }
+    };
+
+    if (mode_ == FontMode::SDF)        doGrow(atlasSDF_);
+    else if (mode_ == FontMode::MSDF)  doGrow(atlasMSDF_);
+    else if (mode_ == FontMode::MTSDF) doGrow(atlasMTSDF_);
 }
 
 void rFontSTB::ProcessPendingGlyphs()

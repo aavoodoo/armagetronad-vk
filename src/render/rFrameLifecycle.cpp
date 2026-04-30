@@ -57,6 +57,10 @@ void rBeginFrame()
     rRenderQueue::Instance().SetShadowCollection(sr_shadowMode == rSHADOW_MAP);
     rRenderQueue::Instance().BeginFrame();
 
+    // Perform any font atlas grows deferred from the previous frame.
+    // Must run before any text vertex building begins.
+    sr_FontBeginFrame();
+
     // Initialize subsystem renderers
     rSkyFloorBeginFrame();
     rEffectsRendererBeginFrame();

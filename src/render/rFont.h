@@ -270,6 +270,11 @@ rTextField & rTextField::SetColor( tColor const & color )
 //! Reloads the font (in case the resolution or font type changes)
 void sr_ReloadFont(void);
 
+//! Per-frame pre-render hook: performs any atlas grows that were deferred from
+//! the previous frame (growing mid-frame corrupts in-flight vertex UV coordinates).
+//! Called from rBeginFrame() before any rendering begins.
+void sr_FontBeginFrame(void);
+
 //! Debug: render font atlas texture as overlay (controlled by SHOW_FONT_ATLAS console var)
 void sr_RenderFontAtlas(void);
 

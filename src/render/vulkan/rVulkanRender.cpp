@@ -730,6 +730,12 @@ bool vkRenderer::RecreateSwapchain(int width, int height)
     vkDeviceWaitIdle(context_.GetDevice());
     vulkanQueue_.CompactIfNeeded(context_.GetDevice());
 
+    // GPU is idle — free ALL descriptor sets immediately so that the image
+    // views they reference can be safely destroyed below.  Without this,
+    // cached and deferred descriptor sets still formally "reference" their
+    // views, and vkDestroyImageView triggers VUID-01026.
+    descriptorManager_.FlushAllDeferred();
+
     // Destroy viewport FBOs — they're sized to viewport dimensions which change
     DestroyViewportFBOs();
 
@@ -2007,9 +2013,17 @@ void vkRenderer::DeleteTexture(unsigned int id)
     auto it = textures_.find(id);
     if (it == textures_.end()) return;
 
-    // Defer GPU resource destruction until the current frame slot's previous
-    // use is guaranteed finished (after MAX_FRAMES_IN_FLIGHT frames).
-    pendingDeleteTextures_.queue(std::move(it->second), currentFrame_);
+    // Invalidate descriptor cache before queuing for deletion — the drain
+    // lambda also calls InvalidateCache as a safety net, but that call runs
+    // AFTER the image view is destroyed, leaving dangling descriptor sets
+    // in deferredFree_ if they were created between here and the drain.
+    // Calling it here guarantees descriptor sets are deferred in the same
+    // slot as the texture, so DrainDeferred frees them before drainWith
+    // destroys the view.
+    if (it->second.view)
+        descriptorManager_.InvalidateCache(it->second.view);
+
+    pendingDeleteTextures_.queue(std::move(it->second), descriptorManager_.GetCurrentSlot());
     textures_.erase(it);
 }
 
@@ -2099,10 +2113,19 @@ void vkRenderer::TexImage2D(int target, int level, int /*internalFormat*/,
         {
             // Invalidate descriptor cache now (CPU-side) so new descriptors
             // are allocated immediately, but delay GPU resource destruction
-            // until the current frame slot has cycled through all in-flight frames.
+            // until the deferred slot cycles through all in-flight frames.
+            // IMPORTANT: use GetCurrentSlot() — NOT currentFrame_ — so the
+            // texture drain and the descriptor drain land in the *same* slot.
+            // TexImage2D can be called from sr_FontBeginFrame() before the
+            // renderer's lazy BeginFrame updates currentFrame_; at that point
+            // currentSlot_ still equals the previous frame's slot, and
+            // currentFrame_ has already been incremented to the new frame.
+            // Using currentFrame_ here would drain the texture in the current
+            // frame's BeginFrame (same frame it was created), before
+            // DrainDeferred has freed the descriptor sets queued to currentSlot_.
             if (it->second.view)
                 descriptorManager_.InvalidateCache(it->second.view);
-            pendingDeleteTextures_.queue(std::move(it->second), currentFrame_);
+            pendingDeleteTextures_.queue(std::move(it->second), descriptorManager_.GetCurrentSlot());
             textures_.erase(it);
         }
     }
@@ -2936,6 +2959,15 @@ void vkRenderer::DestroyViewportFBOs()
         for (int i = 0; i < MAX_VIEWPORT_FBOS; i++)
         {
             ViewportFBO& vfbo = viewportFBOs_[f][i];
+            // Invalidate descriptor cache BEFORE destroying image views.
+            // (FlushAllDeferred was called earlier in RecreateSwapchain so
+            //  the cache is already empty; these calls are a safety net for
+            //  any path that destroys FBOs without a prior FlushAllDeferred.)
+            if (vfbo.colorTexId && vfbo.colorView)
+                descriptorManager_.InvalidateCache(vfbo.colorView);
+            if (vfbo.depthTexId && vfbo.depthView)
+                descriptorManager_.InvalidateCache(vfbo.depthView);
+
             if (vfbo.framebuffer)   vkDestroyFramebuffer(device, vfbo.framebuffer, nullptr);
             if (vfbo.colorView)     vkDestroyImageView(device, vfbo.colorView, nullptr);
             if (vfbo.colorImage)    vmaDestroyImage(context_.GetAllocator(), vfbo.colorImage, vfbo.colorAlloc);
@@ -2945,14 +2977,8 @@ void vkRenderer::DestroyViewportFBOs()
             if (vfbo.depthImage)    vmaDestroyImage(context_.GetAllocator(), vfbo.depthImage, vfbo.depthAlloc);
             if (vfbo.sampler)      vkDestroySampler(device, vfbo.sampler, nullptr);
             if (vfbo.depthSampler) vkDestroySampler(device, vfbo.depthSampler, nullptr);
-            if (vfbo.colorTexId) {
-                if (vfbo.colorView) descriptorManager_.InvalidateCache(vfbo.colorView);
-                textures_.erase(vfbo.colorTexId);
-            }
-            if (vfbo.depthTexId) {
-                if (vfbo.depthView) descriptorManager_.InvalidateCache(vfbo.depthView);
-                textures_.erase(vfbo.depthTexId);
-            }
+            if (vfbo.colorTexId) textures_.erase(vfbo.colorTexId);
+            if (vfbo.depthTexId) textures_.erase(vfbo.depthTexId);
             vfbo = ViewportFBO{};
         }
     }

@@ -72,6 +72,10 @@ class rIFont
 public:
     virtual ~rIFont() = default;
 
+    //! Called once per frame before any rendering begins. Implementations may
+    //! perform deferred work here (e.g. atlas growth that was unsafe mid-frame).
+    virtual void BeginFrame() {}
+
     //! Load font from file at specified size
     //! @param path Path to font file (TTF)
     //! @param size Font size in pixels

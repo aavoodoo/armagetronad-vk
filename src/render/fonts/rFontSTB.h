@@ -58,6 +58,7 @@ public:
     ~rFontSTB() override;
 
     // rIFont interface
+    void BeginFrame() override;
     bool Load(const char* path, int size) override;
     bool IsValid() const override;
     float GetLineHeight() const override;
@@ -164,6 +165,9 @@ private:
     std::unique_ptr<rFontAtlasSDF> atlasSDF_;      //!< glm::u8vec1 for SDF
     std::unique_ptr<rFontAtlasMSDF> atlasMSDF_;    //!< glm::u8vec3 for MSDF
     std::unique_ptr<rFontAtlasMTSDF> atlasMTSDF_;  //!< glm::u8vec4 for MTSDF
+
+    //! Atlas grow was requested mid-frame; will be executed in BeginFrame() next frame.
+    bool atlasGrowPending_ = false;
 
     //! MSDF glyph size (pixels in atlas per glyph)
     int msdfGlyphSize_ = 48;

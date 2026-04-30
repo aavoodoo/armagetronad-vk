@@ -134,7 +134,7 @@ public:
     void SwapBuffers() override;
 
     //! Check if a frame is in progress
-    bool IsFrameStarted() const { return frameStarted_; }
+    bool IsFrameStarted() const override { return frameStarted_; }
     VkDevice GetDevice() const { return context_.GetDevice(); }
 
     //! Check if Vulkan is initialized

@@ -214,6 +214,18 @@ void sr_ReloadFont(void) {
 void sr_RenderFontAtlas(void)
 {
 }
+
+// Called from rBeginFrame() before any rendering begins.
+// Propagates to all loaded font instances so they can perform deferred atlas
+// grows (mid-frame grows corrupt in-flight vertex UV coordinates).
+void sr_FontBeginFrame(void)
+{
+    for (auto& [size, font] : sr_Font)
+    {
+        if (font)
+            font->BeginFrame();
+    }
+}
 #endif
 
 rTextField::rTextField(REAL Left,REAL Top,

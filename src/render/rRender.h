@@ -186,6 +186,7 @@ public:
     virtual int GetTexLevelParameteriv(int /*target*/, int /*level*/, int /*pname*/) { return 0; }
 
     // System operations (S10.0) - GPU sync, queries, screenshots
+    virtual bool IsFrameStarted() const { return false; }
     virtual void Finish() {}
     virtual void Flush() {}
     virtual void ReadPixels(int /*x*/, int /*y*/, int /*width*/, int /*height*/,
@@ -626,6 +627,10 @@ inline int RenderGetTexLevelParameteriv(int target, int level, int pname){
 // System operation wrappers (S10.0)
 inline void RenderFinish(){
     if (renderer) renderer->Finish();
+}
+
+inline bool RenderIsFrameStarted(){
+    return renderer && renderer->IsFrameStarted();
 }
 
 inline void RenderFlush(){

@@ -229,6 +229,48 @@ void rVulkanDescriptorManager::DrainDeferred(uint32_t slot)
     currentSlot_ = slot;
 }
 
+void rVulkanDescriptorManager::FlushAllDeferred()
+{
+    // Free every deferred slot immediately.
+    for (uint32_t i = 0; i < PP_MAX_FRAMES; ++i)
+    {
+        for (const auto& entry : deferredFree_[i])
+        {
+            vkFreeDescriptorSets(device_, entry.pool, 1, &entry.set);
+            auto it = poolAllocCounts_.find(entry.pool);
+            if (it != poolAllocCounts_.end() && it->second > 0)
+                it->second--;
+        }
+        deferredFree_[i].clear();
+    }
+
+    // Free the live cache too — GPU is idle so these are safe to release.
+    for (const auto& [key, entry] : cache_)
+    {
+        vkFreeDescriptorSets(device_, entry.pool, 1, &entry.set);
+        auto it = poolAllocCounts_.find(entry.pool);
+        if (it != poolAllocCounts_.end() && it->second > 0)
+            it->second--;
+    }
+    cache_.clear();
+
+    // Destroy any empty non-last pools.
+    for (auto it = pools_.begin(); it != pools_.end() && pools_.size() > 1; )
+    {
+        auto countIt = poolAllocCounts_.find(*it);
+        if (countIt != poolAllocCounts_.end() && countIt->second == 0)
+        {
+            vkDestroyDescriptorPool(device_, *it, nullptr);
+            poolAllocCounts_.erase(countIt);
+            it = pools_.erase(it);
+        }
+        else
+        {
+            ++it;
+        }
+    }
+}
+
 void rVulkanDescriptorManager::Reset()
 {
     cache_.clear();

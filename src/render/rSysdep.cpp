@@ -126,6 +126,14 @@ static int    s_videooutDest=fileno(stdout);
 
 static bool png_screenshot=true;
 static tConfItem<bool> pns("PNG_SCREENSHOT",png_screenshot);
+
+// Minimum seconds between on_time() Lua calls (default 1 s). Set to 0 to
+// fire every frame (equivalent to on_frame). Configurable at runtime via
+// aa_config_set("LUA_TIME_INTERVAL", "0.5") from Lua or config files.
+static float s_luaTimeInterval = 1.0f;
+static tConfItem<float> sr_luaTimeInterval("LUA_TIME_INTERVAL", s_luaTimeInterval);
+static double s_lastLuaTimeHook = -1.0;
+
 #ifndef DEDICATED
 
 // Async screenshot saving - runs on background thread
@@ -1179,9 +1187,29 @@ void rSysDep::SwapGL(){
 
     rPerFrameTask::DoPerFrameTasks();
 
-    // Fire per-frame Lua hook if defined (game-scripting equivalent of old Ruby rPerFrameTaskRuby)
+    // Fire Lua render hooks if defined.
     if (tLuaState::Instance().IsAlive()) {
         lua_State* L = tLuaState::Instance().View().raw();
+
+        // on_time(timestamp): fires at most every LUA_TIME_INTERVAL seconds
+        // (default 1 s).  Safer than on_frame for work that doesn't need
+        // per-frame granularity (stats, data polling, score updates, etc.).
+        // timestamp is the game simulation time in seconds.
+        double interval = (double)s_luaTimeInterval;
+        if (s_lastLuaTimeHook < 0.0 || (time - s_lastLuaTimeHook) >= interval) {
+            s_lastLuaTimeHook = time;
+            lua_getglobal(L, "on_time");
+            if (lua_isfunction(L, -1)) {
+                lua_pushnumber(L, time);
+                lua_pcall(L, 1, 0, 0);
+            } else {
+                lua_pop(L, 1);
+            }
+        }
+
+        // on_frame(): fires every rendered frame. Use sparingly — heavy work
+        // here costs per-frame CPU time. Prefer on_time for anything that
+        // doesn't need sub-second granularity.
         lua_getglobal(L, "on_frame");
         if (lua_isfunction(L, -1))
             lua_pcall(L, 0, 0, 0);
