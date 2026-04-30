@@ -31,8 +31,6 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 #include "tString.h"
 #include "tCallback.h"
 #include "tCallbackString.h"
-#include "tRuby.h"
-
 #ifndef DEDICATED
 #include "rSDL.h"
 #endif
@@ -191,13 +189,6 @@ public:
     static void DoPerFrameTasks();
 };
 
-#ifdef HAVE_LIBRUBY
-class rPerFrameTaskRuby : public tCallbackRuby {
-public:
-    rPerFrameTaskRuby();
-    static void DoPerFrameTasks();
-};
-#endif
 
 class rRenderIdCallback:public tCallbackString{
 public:

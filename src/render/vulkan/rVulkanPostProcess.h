@@ -32,10 +32,12 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 
 #include <vulkan/vulkan.h>
 #include "vk_mem_alloc.h"
+#include "rFileWatcher.h"
 #include <atomic>
 #include <vector>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <cstdint>
 
 class rVulkanContext;
@@ -449,6 +451,14 @@ private:
     std::unordered_map<std::string, Effect> effects_;
     std::string activeEffect_ = "passthrough";
     Effect*     activeEffectPtr_ = nullptr;  // cached lookup (invalidated on Destroy)
+
+    // --- Hot-reload (development only) ---
+    rFileWatcher                      scriptWatcher_;
+    std::unordered_set<std::string>   pendingReloads_;
+
+    //! Force-reload a named effect: destroy cached version, re-run EnsureEffectLoaded.
+    //! If reload fails, the effect is gone — Execute will fall back to passthrough.
+    void HotReloadEffect(const std::string& name);
 
     // Parameter values currently applied to the active effect (written to UBO).
     //

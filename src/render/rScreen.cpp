@@ -240,10 +240,6 @@ static tConfItem<int> fa("FAILED_ATTEMPTS", failed_attempts);
 
 static tCallback *rPerFrameTask_anchor;
 
-    #ifdef HAVE_LIBRUBY
-static tCallbackRuby * rPerFrameTaskRuby_anchor;
-    #endif
-
 bool sr_True(){return true;}
 
 rPerFrameTask::rPerFrameTask(AA_VOIDFUNC *f):tCallback(rPerFrameTask_anchor, f){}
@@ -252,18 +248,6 @@ void rPerFrameTask::DoPerFrameTasks(){
     rNoAutoDisplayAtNewlineCallback noAutoDisplay( sr_True );
     Exec(rPerFrameTask_anchor);
 }
-
-    #ifdef HAVE_LIBRUBY
-rPerFrameTaskRuby::rPerFrameTaskRuby()
-        :tCallbackRuby(rPerFrameTaskRuby_anchor)
-{
-}
-
-void rPerFrameTaskRuby::DoPerFrameTasks(){
-    rNoAutoDisplayAtNewlineCallback noAutoDisplay( sr_True );
-    Exec(rPerFrameTaskRuby_anchor);
-}
-    #endif
 
 
 

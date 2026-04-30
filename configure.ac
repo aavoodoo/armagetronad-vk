@@ -412,12 +412,6 @@ AC_ARG_ENABLE(desktop,
 enable_desktop=yes)
 AC_SUBST(enable_desktop)
 
-AC_ARG_ENABLE(ruby,
-	AC_HELP_STRING([--enable-ruby],
-		[enable ruby scripting api.  Requires ruby to be installed. (default=disabled)]),,
-enable_ruby=no)
-AC_SUBST(enable_ruby)
-AM_CONDITIONAL(ENABLE_RUBY, test "x$enable_ruby" = "xyes")
 
 initdir=location
 AC_ARG_ENABLE(initscripts,
@@ -533,18 +527,19 @@ test $DEBUGLEVEL -ge 4 && CXXFLAGS="$CXXFLAGS -DDEBUG_EXPENSIVE"
 test $DEBUGLEVEL -ge 5 && CXXFLAGS="$CXXFLAGS -DMEM_DEB"
 
 dnl oddly, this macro needs to be called once unconditionally, or automake borks up.
-dnl pick C++14 standard if we can
-AX_CXXFLAGS_GCC_OPTION(-std=c++17)
+dnl Pick the highest available C++ standard. luapp.hpp requires C++20.
+AX_CXXFLAGS_GCC_OPTION(-std=c++20)
 if test -z "`echo $CXXFLAGS | grep "\-std="`"; then
-  dnl fallback; our own code should maybe still work with older standards, it is just current protobuf that requires C++ 17
-  AX_CXXFLAGS_GCC_OPTION(-std=c++14)
+  dnl C++20 not available; fall back to C++17 (minimum for protobuf)
+  AX_CXXFLAGS_GCC_OPTION(-std=c++17)
   if test -z "`echo $CXXFLAGS | grep "\-std="`"; then
-	dnl still nothing? Last try, our own code relies on this standard.
-	AX_CXXFLAGS_GCC_OPTION(-std=c++11)
-	if test -z "`echo $CXXFLAGS | grep "\-std="`"; then
-	  dnl last call: pre-c++11 standard. Works on mingw, so why not here?
-	  AX_CXXFLAGS_GCC_OPTION(-std=c++0x)
-	fi
+    AX_CXXFLAGS_GCC_OPTION(-std=c++14)
+    if test -z "`echo $CXXFLAGS | grep "\-std="`"; then
+	  AX_CXXFLAGS_GCC_OPTION(-std=c++11)
+	  if test -z "`echo $CXXFLAGS | grep "\-std="`"; then
+	    AX_CXXFLAGS_GCC_OPTION(-std=c++0x)
+	  fi
+    fi
   fi
 fi
 
@@ -678,16 +673,6 @@ if test ${HAVE_BASH} = no; then
    AC_MSG_ERROR([GNU Bourne-Again SHell (bash) is currently required for compilation.])
 fi
 
-dnl Ruby
-
-AC_ARG_WITH(ruby,
-    AC_HELP_STRING([--with-ruby],
-        [The ruby to use]),
-    if test ! -z "${withval}"; then
-        RUBY="${withval}"
-    fi
-)
-
 dnl
 
 dnl testing a nifty make feature: silent inclu[]des
@@ -808,7 +793,6 @@ case "$target" in
         SYS_GLU_LIB=""
         test x$build_regular = xfalse || LIBS="$LIBS -framework OpenGL"
         LIBS="$LIBS -framework CoreFoundation -framework CoreServices"
-        CXXFLAGS="${CXXFLAGS} -DGL_SILENCE_DEPRECATION"
         unset OBJC
         macosx=true
         default_enable_sysinstall=false
@@ -1247,6 +1231,16 @@ PKG_CHECK_MODULES([SHADERC], [shaderc],
 AC_CHECK_HEADERS([vulkan/vulkan.h],,
     [AC_MSG_ERROR([Vulkan headers not found. Check your Vulkan SDK installation.])])
 
+dnl         LuaJIT (for Lua scripting layer — post-process effect DSL)
+dnl
+dnl luajit pkg-config name is "luajit". On macOS: brew install luajit.
+dnl On iOS/Android the library is linked as a static archive; the pkg-config
+dnl path is set by the platform build scripts.
+PKG_CHECK_MODULES([LUAJIT], [luajit],
+    [CPPFLAGS="${CPPFLAGS} ${LUAJIT_CFLAGS}"
+     LIBS="${LIBS} ${LUAJIT_LIBS}"],
+    [AC_MSG_ERROR([LuaJIT not found. Install with: brew install luajit (macOS) or set PKG_CONFIG_PATH to your LuaJIT installation.])])
+
 AC_CHECK_HEADERS([shaderc/shaderc.hpp],,
     [AC_MSG_ERROR([shaderc C++ headers not found. Check your Vulkan SDK installation.])])
 
@@ -1656,11 +1650,7 @@ if test "x$enable_sysinstall" = "xyes" -a "x$enable_etc" = "xyes"; then
 echo "     Link to configuration will go to   : /etc/${progname}"
 fi
 echo "     Build with Krawall authentication support: $enable_krawall"
-echo "     Ruby support: $enable_ruby"
-if test "x$enable_ruby" = "xyes"; then
-echo "         Ruby include dir: $ruby_include_dir"
-echo "         Ruby lib dir: $ruby_lib_dir"
-fi
+
 echo "     Call sysinstall: $enable_sysinstall"
 if test "$enable_uninstall" = "yes" &&
    test "$external_uninstall_cmd" != ""; then

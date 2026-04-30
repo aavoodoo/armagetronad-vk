@@ -34,6 +34,8 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 #include "rVulkanContext.h"
 #include "rVulkanShader.h"
 #include "rVulkanPipeline.h"
+#include "rPassGraphBuilder.h"
+#include "tLuaState.h"
 #include "tDirectories.h"
 #include "tString.h"
 #include "tConfiguration.h"
@@ -69,6 +71,17 @@ bool rVulkanPostProcess::Init(rVulkanContext& ctx, VkFormat swapchainFormat, VkF
     colorFormat_ = swapchainFormat;
     depthFormat_ = depthFormat;
     swapchainRenderPass_ = swapchainRenderPass;
+
+    // Register Lua builder classes once (idempotent: luaL_newmetatable is a no-op
+    // if the metatable already exists, so safe to call on every renderer Init).
+    if (tLuaState::Instance().IsAlive())
+        rRegisterEffectBuilder(tLuaState::Instance().View());
+
+    // Hot-reload: queue a reload when a .lua script changes on disk.
+    scriptWatcher_.SetCallback([this](const std::string& effectName) {
+        pendingReloads_.insert(effectName);
+    });
+
     return BuildPipeline(ctx, swapchainRenderPass);
 }
 
@@ -760,6 +773,17 @@ void rVulkanPostProcess::Execute(VkCommandBuffer cmd,
                                  float time)
 {
     if (!IsEnabled()) return;
+
+    // Hot-reload: poll the file watcher and drain any pending reload requests.
+    // This runs once per frame before we touch the active effect pointer.
+    scriptWatcher_.Poll();
+    if (!pendingReloads_.empty())
+    {
+        for (const auto& name : pendingReloads_)
+            HotReloadEffect(name);
+        pendingReloads_.clear();
+    }
+
     if (!activeEffectPtr_ || activeEffectPtr_->passes.empty()) return;
 
     // Pick up any pending MVP parameter changes from the config system
@@ -867,29 +891,72 @@ rVulkanPostProcess::Effect* rVulkanPostProcess::EnsureEffectLoaded(const std::st
 
     Effect ef;
 
-    // --- 1. Parse .pipeline file (or synthesize a default 1-pass descriptor) ---
-    std::string pipelineSub = "shaders/postprocess/" + name + "/" + name + ".pipeline";
-    tString pipelinePath = sg_PPGetReadPath(pipelineSub);
-    if (pipelinePath.Len() > 1)
+    // --- 1. Load effect descriptor from .lua (preferred) or .pipeline (fallback) ---
+    bool loadedFromLua = false;
+
+    // Try .lua first: inject EffectBuilder as Lua global "effect",
+    // run the script, extract the built descriptor and params.
+    std::string luaSub = "shaders/postprocess/" + name + "/" + name + ".lua";
+    tString luaPath = sg_PPGetReadPath(luaSub);
+    if (luaPath.Len() > 1 && tLuaState::Instance().IsAlive())
     {
-        std::string err;
-        if (!ParsePipelineFile(std::string(static_cast<const char*>(pipelinePath)), ef.desc, err))
+        EffectBuilder eb;
+        rInjectEffectBuilder(tLuaState::Instance().View(), eb);
+
+        if (tLuaState::Instance().DoFile(static_cast<const char*>(luaPath)))
         {
-            std::cerr << "[PostProcess] " << err << "\n";
-            return nullptr;
+            lua_State* L = tLuaState::Instance().View().raw();
+
+            lua_getglobal(L, "effect");
+            auto* built = static_cast<EffectBuilder*>(
+                luaL_testudata(L, -1, luapp::userdata_traits<EffectBuilder>::name));
+            if (built)
+            {
+                ef.desc   = built->BuildDesc();
+                ef.params = built->BuildParams();
+                loadedFromLua = true;
+            }
+            else
+                std::cerr << "[PostProcess] Lua script '" << name
+                          << "' overwrote the 'effect' global — effect ignored\n";
+            lua_pop(L, 1);
+
+            if (loadedFromLua)
+            {
+                // Register for hot-reload: watch this .lua file for changes.
+                scriptWatcher_.Watch(std::string(static_cast<const char*>(luaPath)), name);
+            }
         }
+        // DoFile already logged any error. Either way, clean up injected global.
+        rCleanEffectGlobal(tLuaState::Instance().View());
     }
-    else
+
+    if (!loadedFromLua)
     {
-        // Default: single pass reading SCENE_COLOR+SCENE_DEPTH, writing to
-        // SWAPCHAIN, using a fragment shader named <effect>.frag.spv. This
-        // keeps single-pass effects trivial — no .pipeline file needed.
-        rPostProcessPassDecl defaultPass;
-        defaultPass.shader = name;
-        defaultPass.target = "SWAPCHAIN";
-        defaultPass.samplers.push_back({0, "SCENE_COLOR"});
-        defaultPass.samplers.push_back({1, "SCENE_DEPTH"});
-        ef.desc.passes.push_back(std::move(defaultPass));
+        // Fall back to .pipeline file (or synthesize a default 1-pass descriptor)
+        std::string pipelineSub = "shaders/postprocess/" + name + "/" + name + ".pipeline";
+        tString pipelinePath = sg_PPGetReadPath(pipelineSub);
+        if (pipelinePath.Len() > 1)
+        {
+            std::string err;
+            if (!ParsePipelineFile(std::string(static_cast<const char*>(pipelinePath)), ef.desc, err))
+            {
+                std::cerr << "[PostProcess] " << err << "\n";
+                return nullptr;
+            }
+        }
+        else
+        {
+            // Default: single pass reading SCENE_COLOR+SCENE_DEPTH, writing to
+            // SWAPCHAIN, using a fragment shader named <effect>.frag.spv. This
+            // keeps single-pass effects trivial — no .pipeline file needed.
+            rPostProcessPassDecl defaultPass;
+            defaultPass.shader = name;
+            defaultPass.target = "SWAPCHAIN";
+            defaultPass.samplers.push_back({0, "SCENE_COLOR"});
+            defaultPass.samplers.push_back({1, "SCENE_DEPTH"});
+            ef.desc.passes.push_back(std::move(defaultPass));
+        }
     }
 
     // --- 2. Allocate the effect's intermediate render targets ---
@@ -942,11 +1009,15 @@ rVulkanPostProcess::Effect* rVulkanPostProcess::EnsureEffectLoaded(const std::st
     }
 
     // --- 5. Parse the .meta file for tunable parameters (optional) ---
-    std::string metaSub = "shaders/postprocess/" + name + "/" + name + ".meta";
-    tString metaPath = sg_PPGetReadPath(metaSub);
-    if (metaPath.Len() > 1)
+    // Skipped when loaded from .lua (params already extracted from EffectMetaBuilder).
+    if (!loadedFromLua)
     {
-        ParseMetaFile(std::string(static_cast<const char*>(metaPath)), ef.params);
+        std::string metaSub = "shaders/postprocess/" + name + "/" + name + ".meta";
+        tString metaPath = sg_PPGetReadPath(metaSub);
+        if (metaPath.Len() > 1)
+        {
+            ParseMetaFile(std::string(static_cast<const char*>(metaPath)), ef.params);
+        }
     }
 
     // Debug: uncomment to trace effect loading
@@ -1320,6 +1391,39 @@ void rVulkanPostProcess::DestroyEffect(Effect& ef)
     ef.desc.resources.clear();
     ef.desc.passes.clear();
     ef.params.clear();
+}
+
+void rVulkanPostProcess::HotReloadEffect(const std::string& name)
+{
+    // Invalidate the active effect pointer if it points to the effect being reloaded.
+    if (activeEffectPtr_ && activeEffect_ == name)
+        activeEffectPtr_ = nullptr;
+
+    auto it = effects_.find(name);
+    if (it != effects_.end())
+    {
+        DestroyEffect(it->second);
+        effects_.erase(it);
+    }
+
+    // Attempt reload. On failure, EnsureEffectLoaded returns nullptr and logs the
+    // error — the active effect falls back to passthrough on the next Execute().
+    Effect* reloaded = EnsureEffectLoaded(name);
+    if (reloaded)
+    {
+        std::cerr << "[PostProcess] Hot-reloaded '" << name << "'\n";
+        // Re-seed parameter defaults from the fresh effect.
+        if (activeEffect_ == name)
+        {
+            SeedEffectDefaults(*reloaded);
+            activeEffectPtr_ = reloaded;
+        }
+    }
+    else
+    {
+        std::cerr << "[PostProcess] Hot-reload failed for '" << name
+                  << "' — effect unavailable until fixed\n";
+    }
 }
 
 // ============================================================================

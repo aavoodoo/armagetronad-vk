@@ -20,36 +20,27 @@ GNU General Public License for more details.
 You should have received a copy of the GNU General Public License
 along with this program; if not, write to the Free Software
 Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
-  
+
 ***************************************************************************
 
 */
 
-#ifndef ArmageTron_CALLBACK_H
-#define ArmageTron_CALLBACK_H
+#ifndef GLUCABINDINGS_H
+#define GLUCABINDINGS_H
 
-#include "defs.h"
-#include "tLinkedList.h"
+#ifndef DEDICATED
 
-class tCallback:public tListItem<tCallback>{
-    AA_VOIDFUNC *func;
-public:
-    tCallback(tCallback*& anchor, AA_VOIDFUNC *f);
-    static void Exec(tCallback *anchor);
-};
+struct lua_State;
 
-class tCallbackAnd:public tListItem<tCallbackAnd>{
-    BOOLRETFUNC *func;
-public:
-    tCallbackAnd(tCallbackAnd*& anchor, BOOLRETFUNC *f);
-    static bool Exec(tCallbackAnd *anchor);
-};
+//! Register all game-side Lua global functions on L.
+//! Must be called once after rLuaState::Instance() has been created.
+//!
+//! Registered functions:
+//!   aa_config_get(name)            -> string | nil
+//!   aa_config_set(name, value)     -> bool
+//!   aa_players()                   -> array of player tables
+//!   aa_teams()                     -> array of team tables
+void gRegisterLuaBindings(lua_State* L);
 
-class tCallbackOr:public tListItem<tCallbackOr>{
-    BOOLRETFUNC *func;
-public:
-    tCallbackOr(tCallbackOr*& anchor, BOOLRETFUNC *f);
-    static bool Exec(tCallbackOr *anchor);
-};
-
-#endif
+#endif // DEDICATED
+#endif // GLUCABINDINGS_H

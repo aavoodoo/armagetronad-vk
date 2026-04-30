@@ -42,6 +42,8 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 #include "rSysdep.h"
 #ifndef DEDICATED
 #include "rFrameLifecycle.h"
+#include "tLuaState.h"
+#include "gLuaBindings.h"
 #endif
 #include "uInputQueue.h"
 #include "uInput.h"
@@ -68,7 +70,6 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 
 #include "nServerInfo.h"
 #include "nSocket.h"
-#include "tRuby.h"
 #include "eLadderLog.h"
 #ifndef DEDICATED
 #include "rRender.h"
@@ -822,15 +823,6 @@ int main(int argc,char **argv){
         // tERR_MESSAGE( "Initializing player data." );
         ePlayer::Init();
 
-#ifdef HAVE_LIBRUBY
-        tRuby::InitializeInterpreter();
-        try {
-            tRuby::Load(tDirectories::Data(), "scripts/initialize.rb");
-        }
-        catch (std::runtime_error & e) {
-            std::cerr << e.what() << '\n';
-        }
-#endif
 
         // tERR_MESSAGE( "Loading configuration." );
         tLocale::Load("languages.txt");
@@ -962,15 +954,20 @@ int main(int argc,char **argv){
 
                     sn_bigBrotherString = renderer_identification + "VER=" + st_programVersion + "\n\n";
 
-#ifdef HAVE_LIBRUBY
-                    try {
-                        // tRuby::Load(tDirectories::Data(), "scripts/menu.rb");
-                        tRuby::Load(tDirectories::Data(), "scripts/ai.rb");
-                    }
-                    catch (std::runtime_error & e) {
-                        std::cerr << e.what() << '\n';
-                    }
+                    // Route all eLadderLog game events to Lua on_<event>(args) functions.
+                    // Registered once here because gArmagetron.cpp has access to both
+                    // the engine (eLadderLog) and render (tLuaState) layers.
+#ifndef DEDICATED
+                    eLadderLogWriter::SetScriptHook(&tLuaState::DispatchEvent);
+                    gRegisterLuaBindings(tLuaState::Instance().View().raw());
 #endif
+
+                    // Load startup Lua script if present (game-scripting equivalent of old Ruby initialize.rb)
+                    if (tLuaState::Instance().IsAlive()) {
+                        tString luaInit = tDirectories::Data().GetReadPath("scripts/initialize.lua");
+                        if (luaInit.Len() > 1)
+                            tLuaState::Instance().DoFile(luaInit.c_str());
+                    }
 
                     MainMenu();
 
@@ -1036,9 +1033,6 @@ int main(int argc,char **argv){
 
         ePlayer::Exit();
 
-#ifdef HAVE_LIBRUBY
-        tRuby::CleanupInterpreter();
-#endif
 
         //	tLocale::Clear();
     }

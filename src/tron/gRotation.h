@@ -31,19 +31,6 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 #include "tCallback.h"
 #include "tLinkedList.h"
 
-#ifdef HAVE_LIBRUBY
-class gRoundEventRuby : public tCallbackRuby {
-public:
-    gRoundEventRuby();
-    static void DoRoundEvents();
-};
-
-class gMatchEventRuby : public tCallbackRuby {
-public:
-    gMatchEventRuby();
-    static void DoMatchEvents();
-};
-#endif // HAVE_LIBRUBY
 
 class gRotation
 {

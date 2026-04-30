@@ -28,6 +28,7 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 
 #include "eLadderLog.h"
 #include "nNetwork.h"
+#include <cstring>
 #include "rConsole.h"
 #include "tConfiguration.h"
 #include "tCrypto.h"
@@ -206,6 +207,15 @@ private:
     const eLadderLogWriter & writer_;
 };
 
+bool eLadderLogWriter::s_hookActive = false;
+static void(*s_scriptHookFn)(const char*, const char*) = nullptr;
+
+void eLadderLogWriter::SetScriptHook(void(*hook)(const char* name, const char* args))
+{
+    s_scriptHookFn = hook;
+    s_hookActive = (hook != nullptr);
+}
+
 eLadderLogWriter::eLadderLogWriter( char const *name, bool enabledByDefault, char const *specification )
     : name_( name )
     , specification_( specification )
@@ -254,6 +264,13 @@ void eLadderLogWriter::write()
         if ( isEnabledForScript_ )
         {
             sr_InputForScripts( line.c_str() );
+        }
+
+        if ( s_scriptHookFn )
+        {
+            const char* cacheStr = static_cast<const char*>( cache_ );
+            const char* sp = strchr( cacheStr, ' ' );
+            s_scriptHookFn( static_cast<const char*>( name_ ), sp ? sp + 1 : "" );
         }
     }
     cache_ = name_;

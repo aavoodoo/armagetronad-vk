@@ -90,8 +90,16 @@ public:
     //!< check this if you're going to make expensive calculations for ladderlog output
     bool isEnabled() const
     {
-        return isEnabledForFile_ || isEnabledForScript_;
+        return isEnabledForFile_ || isEnabledForScript_ || s_hookActive;
     }
+
+    //! Register a global hook called for every event fired (pass nullptr to unregister).
+    //! The hook receives the event name (e.g. "DEATH_FRAG") and the space-separated
+    //! args string (everything after the event name, or "" if none).
+    //! Only fires when sn_GetNetState() != nCLIENT and not playing back a recording.
+    static void SetScriptHook(void(*hook)(const char* name, const char* args));
+
+    static bool s_hookActive;
 private:
 #ifdef DEBUG
     void EnsureConsistent() const;

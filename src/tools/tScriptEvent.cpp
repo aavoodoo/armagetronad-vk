@@ -20,36 +20,45 @@ GNU General Public License for more details.
 You should have received a copy of the GNU General Public License
 along with this program; if not, write to the Free Software
 Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
-  
+
 ***************************************************************************
 
 */
 
-#ifndef ArmageTron_CALLBACK_H
-#define ArmageTron_CALLBACK_H
+#include "tScriptEvent.h"
+#include <algorithm>
 
-#include "defs.h"
-#include "tLinkedList.h"
+// Meyer's singleton storage — initialized on first access, avoiding any
+// cross-TU static initialization order issues.
 
-class tCallback:public tListItem<tCallback>{
-    AA_VOIDFUNC *func;
-public:
-    tCallback(tCallback*& anchor, AA_VOIDFUNC *f);
-    static void Exec(tCallback *anchor);
-};
+std::vector<tScriptEvent::Entry>& tScriptEvent::Listeners()
+{
+    static std::vector<Entry> s_listeners;
+    return s_listeners;
+}
 
-class tCallbackAnd:public tListItem<tCallbackAnd>{
-    BOOLRETFUNC *func;
-public:
-    tCallbackAnd(tCallbackAnd*& anchor, BOOLRETFUNC *f);
-    static bool Exec(tCallbackAnd *anchor);
-};
+int& tScriptEvent::NextId()
+{
+    static int s_id = 0;
+    return s_id;
+}
 
-class tCallbackOr:public tListItem<tCallbackOr>{
-    BOOLRETFUNC *func;
-public:
-    tCallbackOr(tCallbackOr*& anchor, BOOLRETFUNC *f);
-    static bool Exec(tCallbackOr *anchor);
-};
+void tScriptEvent::Fire(std::string_view name, Args args)
+{
+    for (const auto& entry : Listeners())
+        entry.fn(name, args);
+}
 
-#endif
+int tScriptEvent::Subscribe(Handler h)
+{
+    int id = ++NextId();
+    Listeners().push_back({id, std::move(h)});
+    return id;
+}
+
+void tScriptEvent::Unsubscribe(int id)
+{
+    auto& L = Listeners();
+    L.erase(std::remove_if(L.begin(), L.end(),
+        [id](const Entry& e){ return e.id == id; }), L.end());
+}

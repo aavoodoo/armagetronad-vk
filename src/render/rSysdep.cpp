@@ -50,6 +50,7 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 #include "rRenderQueue.h"
 #include "rRenderBucket.h"
 #include "rVertex.h"
+#include "tLuaState.h"
 #endif
 #include <memory>
 #include <vector>
@@ -995,10 +996,6 @@ void rSysDep::StartNetSyncThread( rNetIdler * idler )
 {
     sr_netIdler = idler;
 
-#ifdef HAVE_LIBRUBY
-    return; // BUG This thread is crashing ruby
-#endif
-
     // can't use thrading trouble while recording
     if ( tRecorder::IsRunning() )
         return;
@@ -1173,9 +1170,6 @@ void rSysDep::SwapGL(){
         // in playback or recording mode, always execute frame tasks, they may be improtant for consistency
         if ( tRecorder::IsRunning() ) {
             rPerFrameTask::DoPerFrameTasks();
-#ifdef HAVE_LIBRUBY
-            rPerFrameTaskRuby::DoPerFrameTasks();
-#endif
         }
 
 
@@ -1184,9 +1178,16 @@ void rSysDep::SwapGL(){
 
 
     rPerFrameTask::DoPerFrameTasks();
-#ifdef HAVE_LIBRUBY
-    rPerFrameTaskRuby::DoPerFrameTasks();
-#endif
+
+    // Fire per-frame Lua hook if defined (game-scripting equivalent of old Ruby rPerFrameTaskRuby)
+    if (tLuaState::Instance().IsAlive()) {
+        lua_State* L = tLuaState::Instance().View().raw();
+        lua_getglobal(L, "on_frame");
+        if (lua_isfunction(L, -1))
+            lua_pcall(L, 0, 0, 0);
+        else
+            lua_pop(L, 1);
+    }
 
     // Reset viewport to fullscreen for any remaining global HUD elements
     // (console, text fields). Per-viewport cockpit HUD was already flushed

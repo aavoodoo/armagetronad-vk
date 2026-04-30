@@ -44,6 +44,7 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 #include "tSysTime.h"
 #include "tConfiguration.h"
 #include "rRenderStats.h"
+#include "tLuaState.h"
 #include <cstring>
 #include <iostream>
 #include <algorithm>
@@ -332,6 +333,11 @@ vkRenderer::~vkRenderer()
         framebuffer_.Destroy(context_);
         swapchain_.Destroy(device);
         context_.Shutdown();
+
+        // Shut down the Lua scripting layer last — after all Vulkan resources are
+        // gone, so any Lua-owned C++ objects that hold Vulkan handles are already
+        // destroyed by this point.
+        tLuaState::Instance().Shutdown();
     }
 }
 
@@ -707,6 +713,10 @@ bool vkRenderer::Init(SDL_Window* window)
         std::cerr << "[Vulkan] Wall compute pipeline init failed; CPU wall path active\n";
         // Non-fatal: wallComputeReady_ stays false, CPU path used
     }
+
+    // Initialize Lua scripting layer (Season 4 — post-process effect DSL).
+    tLuaState::Instance();  // creates the state; sandbox applied in constructor
+    VK_LOG_INFO("[Lua] Scripting layer initialized (LuaJIT)" << std::endl);
 
     VK_LOG_INFO("[Vulkan] Renderer initialized: " << context_.GetDeviceName() << std::endl);
     return true;

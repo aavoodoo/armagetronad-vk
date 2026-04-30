@@ -42,27 +42,6 @@ void tCallback::Exec(tCallback *anchor){
 }
 
 
-#ifdef HAVE_LIBRUBY
-
-tCallbackRuby::tCallbackRuby(tCallbackRuby *& anchor)
-        :tListItem<tCallbackRuby>(anchor), block(rb_block_proc())
-{
-}
-
-void tCallbackRuby::Exec(tCallbackRuby *anchor) {
-    if (anchor) {
-        int status = 0;
-        rb_protect(ExecProtect, anchor->block, &status);
-        tRuby::CheckStatus(status);
-        Exec(anchor->Next());
-    }
-}
-
-VALUE tCallbackRuby::ExecProtect(VALUE block)
-{
-    return rb_funcall(block, rb_intern("call"), 0);
-}
-#endif // HAVE_LIBRUBY
 
 tCallbackAnd::tCallbackAnd(tCallbackAnd*& anchor, BOOLRETFUNC *f)
         :tListItem<tCallbackAnd>(anchor), func(f){

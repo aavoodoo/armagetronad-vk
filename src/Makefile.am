@@ -1,5 +1,5 @@
 include $(top_srcdir)/Makefile.paths
-SUBDIRS = first protobuf thirdparty swig
+SUBDIRS = first protobuf thirdparty
 
 # target directory
 gamesdir=${bindir}
@@ -56,6 +56,7 @@ libtools_a_SOURCES = ${tools_extra} tools/tVersion.cpp tools/tVersion.h tTrueVer
 	tools/tRecorderInternal.cpp tools/tRecorderInternal.h\
 	tools/tCommandLine.cpp tools/tCommandLine.h\
 	tools/tRandom.cpp tools/tRandom.h\
+	tools/tScriptEvent.cpp tools/tScriptEvent.h\
 	tools/tIniFile.h tools/tIniFile.cpp\
 	tools/tXmlParser.h tools/tXmlParser.cpp\
 	defs.h\
@@ -87,12 +88,12 @@ libtools_a_SOURCES = ${tools_extra} tools/tVersion.cpp tools/tVersion.h tTrueVer
 	tools/tPolynomial.h tools/tPolynomial.cpp\
 	tools/tPolynomialMarshaler.h tools/tPolynomialMarshaler.cpp \
 	tools/tPolynomialWithBase.h tools/tPolynomialWithBase.cpp \
-	tools/tRuby.h tools/tRuby.cpp \
 	tools/tDict.h \
 	tools/md5.cpp tools/md5.h \
 	tools/tCrypto.h tools/tCrypto.cpp \
 	resource/tResource.h resource/tResource.cpp resource/tResourceType.h resource/tResourceType.cpp\
-	tools/tMemManager.cpp tools/tMemManager.h
+	tools/tMemManager.cpp tools/tMemManager.h \
+	tools/tLuaState.h tools/tLuaState.cpp
 # again, tMemManager.cpp/.h must be last here.
 
 #tools/tCommandLine.cpp tools/tCommandLine.h
@@ -174,6 +175,8 @@ librender_a_SOURCES=${render_extra} render/rConsole.cpp render/rConsoleGraph.cpp
 	render/vulkan/rVulkanPostProcess.h render/vulkan/rVulkanPostProcess.cpp \
 	render/vulkan/rRenderGraph.h render/vulkan/rRenderGraph.cpp \
 	render/vulkan/rVulkanRender.h render/vulkan/rVulkanRender.cpp \
+	render/rPassGraphBuilder.h render/rPassGraphBuilder.cpp \
+	render/rFileWatcher.h render/rFileWatcher.cpp \
 	render/utilities/rRenderBucket.h render/utilities/rRenderBucket.cpp \
 	render/utilities/rRenderQueue.h render/utilities/rRenderQueue.cpp \
 	render/utilities/rRenderState.h render/utilities/rRenderState.cpp \
@@ -204,6 +207,7 @@ libtron_a_SOURCES=tron/gAIBase.cpp tron/gAIBase.h tron/gAICharacter.cpp tron/gAI
 	tron/gStatList.h tron/gStatList.cpp\
 	tron/gCommandLineJumpStart.cpp tron/gCommandLineJumpStart.h \
 	tron/gRotation.h tron/gRotation.cpp \
+	tron/gLuaBindings.h tron/gLuaBindings.cpp \
 	tron/gVectorExtra.h \
 	tron/cockpit/cCockpit.h \
 	tron/cockpit/cWidgetBase.h tron/cockpit/cWidgetBase.cpp \
@@ -261,7 +265,7 @@ endif
 #AM_CXXFLAGS= $(BINRELOC_CFLAGS)
 
 libtools_a_CPPFLAGS = -iquote @srcdir@/thirdparty/binreloc
-libtools_a_CXXFLAGS  =$(AM_CXXFLAGS) $(CXXFLAGS_OURFILES) -iquote @srcdir@/tools -iquote @srcdir@/tools/values -iquote @srcdir@/resource -iquote @srcdir@/thirdparty/mathexpr -iquote @srcdir@/thirdparty/utf8 -iquote @srcdir@/protobuf -iquote protobuf
+libtools_a_CXXFLAGS  =$(AM_CXXFLAGS) $(CXXFLAGS_OURFILES) -iquote @srcdir@/tools -iquote @srcdir@/tools/values -iquote @srcdir@/resource -iquote @srcdir@/thirdparty/mathexpr -iquote @srcdir@/thirdparty/utf8 -iquote @srcdir@/protobuf -iquote protobuf -iquote @srcdir@/thirdparty/luapp $(LUAJIT_CFLAGS)
 libnetwork_a_CXXFLAGS=$(libtools_a_CXXFLAGS)  -iquote @srcdir@/network
 librender_a_CXXFLAGS =$(libtools_a_CXXFLAGS)  -iquote @srcdir@/render -iquote @srcdir@/render/utilities -iquote @srcdir@/render/renderers -iquote @srcdir@/render/geometry -iquote @srcdir@/render/fonts -iquote @srcdir@/thirdparty/stb -iquote @srcdir@/thirdparty/vma
 libui_a_CXXFLAGS     =$(librender_a_CXXFLAGS) -iquote @srcdir@/ui -iquote @srcdir@/thirdparty/shttpd -iquote @srcdir@/thirdparty/scrap
@@ -303,13 +307,6 @@ games_PROGRAMS += armagetronad_serverquery$(EXEEXT)
 endif
 #EXTRA_PROGRAMS = armagetronad_main_master
 
-#if ENABLE_RUBY
-#rubysources = ${top_builddir}/src/swig/ext/armagetronad_wrap.cxx
-#librubywrap_a_SOURCES    = $(rubysources)
-#librubywrap_a_CXXFLAGS   = $(libtron_a_CXXFLAGS) -w
-#else
-#librubywrap_a_SOURCES    = 
-#endif
 
 if BUILDFAKERELEASE
 BUILDFAKE=echo -e "\#!/bin/sh\necho Running FAKE \"\$$0\" \"\$$@\"\ntest \"\$$1\" = "--doc" || test \"\$$1\" = "--help" || sleep 5" > $@; chmod 755 $@

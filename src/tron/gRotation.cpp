@@ -20,48 +20,12 @@ GNU General Public License for more details.
 You should have received a copy of the GNU General Public License
 along with this program; if not, write to the Free Software
 Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
-  
+
 ***************************************************************************
 
 */
 
 #include "gRotation.h"
 
-void gRotation::HandleNewRound() {
-#ifdef HAVE_LIBRUBY
-    gRoundEventRuby::DoRoundEvents();
-#endif
-}
-void gRotation::HandleNewMatch() {
-#ifdef HAVE_LIBRUBY
-    gMatchEventRuby::DoMatchEvents();
-#endif
-}
-
-#ifdef HAVE_LIBRUBY
-
-static tCallbackRuby *roundEventRuby_anchor;
-gRoundEventRuby::gRoundEventRuby()
-        :tCallbackRuby(roundEventRuby_anchor)
-{
-}
-
-void gRoundEventRuby::DoRoundEvents()
-{
-    Exec(roundEventRuby_anchor);
-}
-
-static tCallbackRuby *matchEventRuby_anchor;
-
-gMatchEventRuby::gMatchEventRuby()
-        :tCallbackRuby(matchEventRuby_anchor)
-{
-}
-
-void gMatchEventRuby::DoMatchEvents()
-{
-    Exec(matchEventRuby_anchor);
-}
-#endif
-
-
+void gRotation::HandleNewRound() {}
+void gRotation::HandleNewMatch() {}

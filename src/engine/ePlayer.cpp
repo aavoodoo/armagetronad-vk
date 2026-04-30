@@ -48,6 +48,9 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 #include "rRender.h"
 #include "rFont.h"
 #include "rSysdep.h"
+#ifndef DEDICATED
+#include "tLuaState.h"
+#endif
 #include "nAuthentication.h"
 #include "tDirectories.h"
 #include "eVoter.h"
@@ -60,7 +63,6 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 #include "nNetwork.h"
 #include "nProtoBuf.h"
 #include <time.h>
-#include "tRuby.h"
 #include "eWarmup.h"
 #include "eLadderLog.h"
 #include <climits>
@@ -1375,43 +1377,6 @@ void ePlayer::Render(){
 #endif
 
 static void chat( ePlayer * chatter, tString const & msgCore );
-void se_rubyEval(tString msgCore) {
-#ifdef HAVE_LIBRUBY
-    try {
-        tRuby::Safe safe(0.3);
-        safe.Load(tDirectories::Data(), "scripts/subbanese.rb");
-        VALUE val = safe.Eval(msgCore);
-        VALUE to_s = rb_funcall(val, rb_intern("to_s"), 0);
-        tString res("result: ");
-        res << StringValuePtr(to_s);
-
-        switch (sn_GetNetState())
-        {
-        case nSTANDALONE:
-        case nCLIENT:
-            {
-                ePlayerNetID * me = ePlayer::PlayerConfig( 0 )->netPlayer;
-                me->Chat(res);
-            }
-            break;
-        case nSERVER:
-            tColoredString send;
-            send << tColoredString::ColorString( 1,0,0 );
-            send << "Admin";
-            send << tColoredString::ColorString( 1,1,.5 );
-            send << ": " << res << "\n";
-            sn_ConsoleOut(send);
-            break;
-        }
-    }
-    catch (std::runtime_error & e) {
-        std::cout << e.what() << '\n';
-    }
-    catch(...) {
-        std::cout << "unhandled exception\n";
-    }
-#endif
-}
 
 static void se_RequestLogin( ePlayerNetID * p );
 
@@ -1573,9 +1538,6 @@ static void se_DisplayChatLocally( ePlayerNetID* p, const tString& say )
         message << ": " << say << '\n';
         con << message;
 
-        if (say.StartsWith("eval ")) {
-            se_rubyEval(say.SubStr(5));
-        }
     }
 }
 
@@ -4250,6 +4212,16 @@ void se_ChatHandlerServer( unsigned short id, tColoredString const & say, nMessa
                         se_Help( p, p, s );
                         return;
                     }
+#ifndef DEDICATED
+                    else if (command == "/eval") {
+                        spam.lastSaidType_ = eChatMessageType_Command;
+                        tString expr;
+                        expr.ReadLine(s);
+                        if (tLuaState::Instance().IsAlive())
+                            tLuaState::Instance().DoString(expr.c_str());
+                        return;
+                    }
+#endif
 #ifdef DEDICATED
                     else  if ( command == "/rtfm" || command == "/teach" )
                     {
