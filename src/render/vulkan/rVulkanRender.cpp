@@ -43,12 +43,18 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 #endif
 #include "tSysTime.h"
 #include "tConfiguration.h"
+#include "rRenderStats.h"
 #include <cstring>
 #include <iostream>
 #include <algorithm>
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/type_ptr.hpp>
+
+// Enforce that the descriptor manager's deferred-free slot count matches the renderer's
+// frame-in-flight count. If MAX_FRAMES_IN_FLIGHT changes, PP_MAX_FRAMES must also change.
+static_assert(rVulkanDescriptorManager::PP_MAX_FRAMES == MAX_FRAMES_IN_FLIGHT,
+    "PP_MAX_FRAMES in rVulkanDescriptor.h must equal MAX_FRAMES_IN_FLIGHT in rVulkanRender.h");
 
 // Arena bounds for floor shader (set via sr_vkSetArenaBounds before floor rendering)
 static float s_arenaBoundsLow[2]  = {-100.0f, -100.0f};
@@ -75,6 +81,22 @@ int sr_modelCacheVersion = 0;
 // Global renderer pointer — defined at the bottom of this file near sr_vkRendererInit().
 // Forward-declared here so the destructor and sr_vkSet* helpers can reference it.
 static vkRenderer* s_vkRenderer = nullptr;
+
+// ============================================================================
+// Wall GPU compute segment accumulator (Sprint 3.1)
+// ============================================================================
+// Segments collected during the current frame's render callback. Swapped with
+// sg_wallSegsPrev_ at BeginFrame, so the previous frame's segments are
+// dispatched to the compute shader while this frame's walls are collected.
+static std::vector<WallSegmentGPU> sg_wallSegsCurrent_;
+static std::vector<WallSegmentGPU> sg_wallSegsPrev_;
+// Persistent UV bounds (never shrink). Expands as new segments are added.
+// Reused across frames so the texture matrix doesn't pop on boundary changes.
+static float sg_wallUMin_ =  1e30f;
+static float sg_wallUMax_ = -1e30f;
+// Multi-viewport guard: incremented at each BeginViewportFBO call.
+// sr_AddWallComputeSegment only accumulates when this is 0 (first viewport).
+static int sg_wallAccumViewportN_ = 0;
 
 // Tracks whether the CURRENT frame has drawn any in-game 3D content.
 // Flipped to true whenever sr_vkSetRenderContext sees a Game3D_* context ID
@@ -297,6 +319,7 @@ vkRenderer::~vkRenderer()
         rVulkanShader::Destroy(device, fragShader_);
         rVulkanShader::Destroy(device, fragShaderEmissive_);
 
+        DestroyWallComputePipeline();
         postProcess_.Destroy();
         pipelineManager_.Destroy();
 
@@ -676,6 +699,13 @@ bool vkRenderer::Init(SDL_Window* window)
         // Dummy descriptor set (set 0 = texture only — UBO is now separate in set 1)
         dummyDescriptorSet_ = descriptorManager_.GetOrCreateTextureSet(
             dummyTexture_.view, dummyTexture_.sampler);
+    }
+
+    // Initialize wall GPU compute pipeline (non-fatal — falls back to CPU if shader missing)
+    if (!CreateWallComputePipeline())
+    {
+        std::cerr << "[Vulkan] Wall compute pipeline init failed; CPU wall path active\n";
+        // Non-fatal: wallComputeReady_ stays false, CPU path used
     }
 
     VK_LOG_INFO("[Vulkan] Renderer initialized: " << context_.GetDeviceName() << std::endl);
@@ -1127,6 +1157,7 @@ void vkRenderer::BeginFrame()
     // calls queue into this slot (to be drained next time this slot
     // cycles around).
     descriptorManager_.DrainDeferred(currentFrame_);
+    rRenderStats::Instance().SetDescriptorPoolCount(descriptorManager_.GetPoolCount());
 
     // Drain textures deferred for deletion — this slot's previous frame has now completed.
     pendingDeleteTextures_.drainWith(device, currentFrame_, [this](VkDevice dev, VkTextureInfo& tex) {
@@ -1203,15 +1234,92 @@ void vkRenderer::BeginFrame()
     }
     rpInfo.pClearValues = clearValues;
 
+    // === Render graph setup ===
+    // Create shadow maps first (if needed) so we know if they're available
+    // for resource registration.
+    if (sr_shadowMode == rSHADOW_MAP && !shadowMapsCreated_)
+        CreateShadowMaps();
+
+    // Declare per-frame pass dependencies and compile barrier sets.
+    // For transitions already covered by render-pass subpass dependencies,
+    // the computed barrier is redundant but harmless (Vulkan merges them).
+    {
+        const bool hasShadow = (sr_shadowMode == rSHADOW_MAP && shadowMapsCreated_);
+
+        renderGraph_.Reset();
+
+        if (postProcessActive)
+        {
+            renderGraph_.SetResource(RGResourceId::SceneColor,
+                                     postProcess_.GetOffscreenColorImage(),
+                                     VK_IMAGE_LAYOUT_UNDEFINED,
+                                     VK_IMAGE_ASPECT_COLOR_BIT);
+            renderGraph_.SetResource(RGResourceId::SceneEmissive,
+                                     postProcess_.GetOffscreenEmissiveImage(),
+                                     VK_IMAGE_LAYOUT_UNDEFINED,
+                                     VK_IMAGE_ASPECT_COLOR_BIT);
+            renderGraph_.SetResource(RGResourceId::SceneDepth,
+                                     postProcess_.GetOffscreenDepthImage(),
+                                     VK_IMAGE_LAYOUT_UNDEFINED,
+                                     VK_IMAGE_ASPECT_DEPTH_BIT);
+        }
+        if (hasShadow)
+        {
+            // Shadow maps end each frame in DEPTH_STENCIL_READ_ONLY_OPTIMAL
+            // (render pass finalLayout). Use that as the starting layout.
+            renderGraph_.SetResource(RGResourceId::ShadowMap0,
+                                     shadowMaps_[0].depthImage,
+                                     VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL,
+                                     VK_IMAGE_ASPECT_DEPTH_BIT);
+            renderGraph_.SetResource(RGResourceId::ShadowMap1,
+                                     shadowMaps_[1].depthImage,
+                                     VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL,
+                                     VK_IMAGE_ASPECT_DEPTH_BIT);
+        }
+
+        // Shadow pass: writes shadow depth maps (finalLayout = DEPTH_STENCIL_READ_ONLY)
+        if (hasShadow)
+            renderGraph_.AddPass({"shadow", {},
+                                  {RGResourceId::ShadowMap0, RGResourceId::ShadowMap1},
+                                  nullptr});
+
+        // Scene pass: reads shadow maps, writes offscreen color/emissive/depth
+        {
+            std::vector<RGResourceId> sceneReads;
+            if (hasShadow)
+            {
+                sceneReads.push_back(RGResourceId::ShadowMap0);
+                sceneReads.push_back(RGResourceId::ShadowMap1);
+            }
+            std::vector<RGResourceId> sceneWrites;
+            if (postProcessActive)
+                sceneWrites = {RGResourceId::SceneColor,
+                               RGResourceId::SceneEmissive,
+                               RGResourceId::SceneDepth};
+            renderGraph_.AddPass({"scene",
+                                  std::move(sceneReads), std::move(sceneWrites),
+                                  nullptr});
+        }
+
+        // Post-process pass: reads offscreen targets, composites onto swapchain
+        if (postProcessActive)
+            renderGraph_.AddPass({"postprocess",
+                                  {RGResourceId::SceneColor,
+                                   RGResourceId::SceneEmissive,
+                                   RGResourceId::SceneDepth},
+                                  {RGResourceId::SwapchainOut}, nullptr});
+
+        renderGraph_.Compile();
+    }
+
     // === Shadow map pass (before main render pass) ===
     // Uses shadow vertices collected from the PREVIOUS frame (one-frame lag, imperceptible).
     // Must run before the main render pass so shadow maps are ready for sampling.
     if (sr_shadowMode == rSHADOW_MAP)
     {
-        if (!shadowMapsCreated_)
-            CreateShadowMaps();
         if (shadowMapsCreated_)
         {
+            renderGraph_.EmitBarriersForPass(cmd, "shadow");
             RenderShadowPass(cmd);
         }
         // Clear dynamic shadow vertices (already consumed by shadow pass).
@@ -1227,10 +1335,25 @@ void vkRenderer::BeginFrame()
         rRenderQueue::Instance().ClearShadowDynamic();
     }
 
+    // === Wall compute pass (before main render pass) ===
+    // Swap segment accumulators: prev = segments collected last frame (ready to dispatch),
+    // current = empty buffer for this frame's wall collection.
+    // Reset viewport accumulation guard so the first viewport accumulates.
+    std::swap(sg_wallSegsCurrent_, sg_wallSegsPrev_);
+    sg_wallSegsCurrent_.clear();
+    sg_wallAccumViewportN_ = 0;
+    DispatchWallCompute(cmd);  // uploads sg_wallSegsPrev_ to SSBO, dispatches, barriers
+
     // Track offscreen image layouts: render pass declares initialLayout=UNDEFINED,
     // so content is discarded — record this so we know the images are not readable.
     if (postProcessActive)
         postProcess_.NotifySceneRenderPassBeginning();
+
+    // Emit render graph barriers for the scene pass. For shadow-mode frames,
+    // this ensures shadow maps are in DEPTH_STENCIL_READ_ONLY_OPTIMAL before
+    // the scene fragment shader samples them (the shadow render pass finalLayout
+    // guarantees this, so in practice no barrier is emitted here).
+    renderGraph_.EmitBarriersForPass(cmd, "scene");
 
     vkCmdBeginRenderPass(cmd, &rpInfo, VK_SUBPASS_CONTENTS_INLINE);
     vulkanQueue_.InvalidateBindingCache();  // new render pass — force pipeline/descriptor rebind
@@ -1411,6 +1534,13 @@ void vkRenderer::EndFrame()
     // post-process (which would sample an uninitialized offscreen image).
     if (postProcessActive)
     {
+        // Emit render graph barriers for the PP pass. The scene render pass's
+        // finalLayout + subpass dependency already transition color/emissive to
+        // SHADER_READ_ONLY and depth to DEPTH_STENCIL_READ_ONLY; this explicit
+        // barrier is an additional safety net that documents the PP dependency
+        // on all three offscreen images.
+        renderGraph_.EmitBarriersForPass(cmd, "postprocess");
+
         postProcess_.Execute(cmd, currentFrame_,
                              framebuffer_.GetFramebuffer(currentImageIndex_),
                              swapchain_.GetExtent(),
@@ -3225,6 +3355,406 @@ void vkRenderer::DestroyShadowMaps()
     shadowMapsCreated_ = false;
 }
 
+// =============================================================================
+// Wall GPU Compute Pipeline (Sprint 3.1)
+// =============================================================================
+
+bool vkRenderer::CreateWallComputePipeline()
+{
+    VkDevice device     = context_.GetDevice();
+    VmaAllocator alloc  = context_.GetAllocator();
+
+    // --- Per-frame SSBOs: host-visible, persistently mapped ---
+    {
+        VkBufferCreateInfo bufCI{};
+        bufCI.sType       = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+        bufCI.size        = kMaxWallSegments * sizeof(WallSegmentGPU);
+        bufCI.usage       = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
+        bufCI.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+
+        VmaAllocationCreateInfo vmaCI{};
+        vmaCI.usage = VMA_MEMORY_USAGE_AUTO;
+        vmaCI.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT
+                    | VMA_ALLOCATION_CREATE_MAPPED_BIT;
+
+        for (int i = 0; i < MAX_FRAMES_IN_FLIGHT; i++)
+        {
+            VmaAllocationInfo info{};
+            if (vmaCreateBuffer(alloc, &bufCI, &vmaCI,
+                                &wallSSBO_[i], &wallSSBOAlloc_[i], &info) != VK_SUCCESS)
+            {
+                std::cerr << "[Vulkan] CreateWallComputePipeline: SSBO alloc failed\n";
+                return false;
+            }
+            wallSSBOMapped_[i] = info.pMappedData;
+            if (!wallSSBOMapped_[i])
+            {
+                std::cerr << "[Vulkan] CreateWallComputePipeline: SSBO persistent map failed\n";
+                return false;
+            }
+        }
+    }
+
+    // --- Per-frame device-local output VBOs: compute writes, vertex input reads ---
+    {
+        // 6 rVertex20 verts per segment, 5 uint32s per vert
+        VkBufferCreateInfo bufCI{};
+        bufCI.sType       = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+        bufCI.size        = kMaxWallSegments * 6u * 5u * sizeof(uint32_t);
+        bufCI.usage       = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT;
+        bufCI.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+
+        VmaAllocationCreateInfo vmaCI{};
+        vmaCI.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
+
+        for (int i = 0; i < MAX_FRAMES_IN_FLIGHT; i++)
+        {
+            if (vmaCreateBuffer(alloc, &bufCI, &vmaCI,
+                                &wallOutputVBO_[i], &wallOutputVBOAlloc_[i], nullptr) != VK_SUCCESS)
+            {
+                std::cerr << "[Vulkan] CreateWallComputePipeline: output VBO alloc failed\n";
+                return false;
+            }
+        }
+    }
+
+    // --- Descriptor set layout: binding 0 = input SSBO, binding 1 = output VBO ---
+    {
+        VkDescriptorSetLayoutBinding bindings[2]{};
+        bindings[0].binding         = 0;
+        bindings[0].descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        bindings[0].descriptorCount = 1;
+        bindings[0].stageFlags      = VK_SHADER_STAGE_COMPUTE_BIT;
+        bindings[1].binding         = 1;
+        bindings[1].descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        bindings[1].descriptorCount = 1;
+        bindings[1].stageFlags      = VK_SHADER_STAGE_COMPUTE_BIT;
+
+        VkDescriptorSetLayoutCreateInfo layoutCI{};
+        layoutCI.sType        = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+        layoutCI.bindingCount = 2;
+        layoutCI.pBindings    = bindings;
+        if (vkCreateDescriptorSetLayout(device, &layoutCI, nullptr, &wallComputeSetLayout_) != VK_SUCCESS)
+        {
+            std::cerr << "[Vulkan] CreateWallComputePipeline: descriptor set layout failed\n";
+            return false;
+        }
+    }
+
+    // --- Descriptor pool ---
+    {
+        VkDescriptorPoolSize poolSize{};
+        poolSize.type            = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        poolSize.descriptorCount = MAX_FRAMES_IN_FLIGHT * 2;  // 2 storage bindings per set
+
+        VkDescriptorPoolCreateInfo poolCI{};
+        poolCI.sType         = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+        poolCI.maxSets       = MAX_FRAMES_IN_FLIGHT;
+        poolCI.poolSizeCount = 1;
+        poolCI.pPoolSizes    = &poolSize;
+        if (vkCreateDescriptorPool(device, &poolCI, nullptr, &wallComputePool_) != VK_SUCCESS)
+        {
+            std::cerr << "[Vulkan] CreateWallComputePipeline: descriptor pool failed\n";
+            return false;
+        }
+    }
+
+    // --- Allocate and update descriptor sets (per frame) ---
+    {
+        VkDescriptorSetLayout layouts[MAX_FRAMES_IN_FLIGHT];
+        for (int i = 0; i < MAX_FRAMES_IN_FLIGHT; i++)
+            layouts[i] = wallComputeSetLayout_;
+
+        VkDescriptorSetAllocateInfo allocInfo{};
+        allocInfo.sType              = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+        allocInfo.descriptorPool     = wallComputePool_;
+        allocInfo.descriptorSetCount = MAX_FRAMES_IN_FLIGHT;
+        allocInfo.pSetLayouts        = layouts;
+        if (vkAllocateDescriptorSets(device, &allocInfo, wallComputeSets_) != VK_SUCCESS)
+        {
+            std::cerr << "[Vulkan] CreateWallComputePipeline: descriptor set alloc failed\n";
+            return false;
+        }
+
+        for (int i = 0; i < MAX_FRAMES_IN_FLIGHT; i++)
+        {
+            VkDescriptorBufferInfo ssboInfo{};
+            ssboInfo.buffer = wallSSBO_[i];
+            ssboInfo.offset = 0;
+            ssboInfo.range  = VK_WHOLE_SIZE;
+
+            VkDescriptorBufferInfo vboInfo{};
+            vboInfo.buffer = wallOutputVBO_[i];
+            vboInfo.offset = 0;
+            vboInfo.range  = VK_WHOLE_SIZE;
+
+            VkWriteDescriptorSet writes[2]{};
+            writes[0].sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+            writes[0].dstSet          = wallComputeSets_[i];
+            writes[0].dstBinding      = 0;
+            writes[0].descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+            writes[0].descriptorCount = 1;
+            writes[0].pBufferInfo     = &ssboInfo;
+            writes[1].sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+            writes[1].dstSet          = wallComputeSets_[i];
+            writes[1].dstBinding      = 1;
+            writes[1].descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+            writes[1].descriptorCount = 1;
+            writes[1].pBufferInfo     = &vboInfo;
+            vkUpdateDescriptorSets(device, 2, writes, 0, nullptr);
+        }
+    }
+
+    // --- Pipeline layout: single set + push constants (WallComputePC) ---
+    {
+        VkPushConstantRange pcRange{};
+        pcRange.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+        pcRange.offset     = 0;
+        pcRange.size       = sizeof(WallComputePC);
+
+        VkPipelineLayoutCreateInfo layoutCI{};
+        layoutCI.sType                  = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+        layoutCI.setLayoutCount         = 1;
+        layoutCI.pSetLayouts            = &wallComputeSetLayout_;
+        layoutCI.pushConstantRangeCount = 1;
+        layoutCI.pPushConstantRanges    = &pcRange;
+        if (vkCreatePipelineLayout(device, &layoutCI, nullptr, &wallComputePipeLayout_) != VK_SUCCESS)
+        {
+            std::cerr << "[Vulkan] CreateWallComputePipeline: pipeline layout failed\n";
+            return false;
+        }
+    }
+
+    // --- Load/compile the compute shader ---
+    {
+#ifdef HAVE_SHADERC_SHADERC_HPP
+        std::vector<std::string> includePaths;
+        tString compPath = tDirectories::Data().GetReadPath("shaders/wall_gen.comp");
+        if (compPath.Len() > 1)
+        {
+            std::string p = static_cast<const char*>(compPath);
+            auto slash = p.find_last_of('/');
+            if (slash != std::string::npos)
+                includePaths.push_back(p.substr(0, slash));
+            std::string err;
+            wallComputeShader_ = rVulkanShader::CompileFromFile(
+                device, p, rVulkanShader::Stage::Compute, includePaths, &err);
+            if (wallComputeShader_ == VK_NULL_HANDLE)
+                std::cerr << "[Vulkan] wall_gen.comp compile failed:\n" << err << "\n";
+        }
+        else
+        {
+            std::cerr << "[Vulkan] wall_gen.comp not found in data dirs — wall compute disabled\n";
+        }
+#else
+        // Android (no shaderc): load pre-compiled SPIR-V from APK assets
+        wallComputeShader_ = rVulkanShader::LoadFromFile(device, "shaders/wall_gen.comp.spv");
+        if (wallComputeShader_ == VK_NULL_HANDLE)
+            SDL_Log("[Vulkan] Failed to load shaders/wall_gen.comp.spv");
+#endif
+        if (wallComputeShader_ == VK_NULL_HANDLE)
+        {
+            // Non-fatal: wall compute disabled, CPU path remains active
+            DestroyWallComputePipeline();
+            return true;
+        }
+    }
+
+    // --- Create the compute pipeline ---
+    {
+        VkPipelineShaderStageCreateInfo stageCI{};
+        stageCI.sType  = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+        stageCI.stage  = VK_SHADER_STAGE_COMPUTE_BIT;
+        stageCI.module = wallComputeShader_;
+        stageCI.pName  = "main";
+
+        VkComputePipelineCreateInfo pipeCI{};
+        pipeCI.sType  = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
+        pipeCI.stage  = stageCI;
+        pipeCI.layout = wallComputePipeLayout_;
+        if (vkCreateComputePipelines(device, VK_NULL_HANDLE, 1, &pipeCI, nullptr, &wallComputePipe_) != VK_SUCCESS)
+        {
+            std::cerr << "[Vulkan] CreateWallComputePipeline: vkCreateComputePipelines failed\n";
+            return false;
+        }
+    }
+
+    wallComputeReady_ = true;
+    VK_LOG_INFO("[Vulkan] Wall compute pipeline ready (" << kMaxWallSegments << " max segments)\n");
+    return true;
+}
+
+void vkRenderer::DestroyWallComputePipeline()
+{
+    wallComputeReady_ = false;
+    VkDevice     device = context_.GetDevice();
+    VmaAllocator alloc  = context_.GetAllocator();
+
+    VK_DESTROY(vkDestroyPipeline,       device, wallComputePipe_);
+    VK_DESTROY(vkDestroyPipelineLayout, device, wallComputePipeLayout_);
+    rVulkanShader::Destroy(device, wallComputeShader_);
+    wallComputeShader_ = VK_NULL_HANDLE;
+    VK_DESTROY(vkDestroyDescriptorPool,      device, wallComputePool_);
+    VK_DESTROY(vkDestroyDescriptorSetLayout, device, wallComputeSetLayout_);
+    memset(wallComputeSets_, 0, sizeof(wallComputeSets_));
+
+    for (int i = 0; i < MAX_FRAMES_IN_FLIGHT; i++)
+    {
+        if (wallOutputVBO_[i])
+        {
+            vmaDestroyBuffer(alloc, wallOutputVBO_[i], wallOutputVBOAlloc_[i]);
+            wallOutputVBO_[i]      = VK_NULL_HANDLE;
+            wallOutputVBOAlloc_[i] = VK_NULL_HANDLE;
+        }
+        wallSSBOMapped_[i] = nullptr;
+        if (wallSSBO_[i])
+        {
+            vmaDestroyBuffer(alloc, wallSSBO_[i], wallSSBOAlloc_[i]);
+            wallSSBO_[i]      = VK_NULL_HANDLE;
+            wallSSBOAlloc_[i] = VK_NULL_HANDLE;
+        }
+    }
+}
+
+void vkRenderer::DispatchWallCompute(VkCommandBuffer cmd)
+{
+    if (!wallComputeReady_) return;
+
+    const auto& segs = sg_wallSegsPrev_;
+    uint32_t segCount = static_cast<uint32_t>(
+        std::min(segs.size(), static_cast<size_t>(kMaxWallSegments)));
+
+    if (segCount == 0)
+    {
+        wallUMinPrev_   = 0.0f;
+        wallURangePrev_ = 1.0f;
+        return;
+    }
+
+    // Snapshot UV normalization params for this batch
+    float uMin   = sg_wallUMin_;
+    float uMax   = sg_wallUMax_;
+    float uRange = std::max(uMax - uMin, 1.0e-6f);
+    wallUMinPrev_   = uMin;
+    wallURangePrev_ = uRange;
+
+    // Upload segment descriptors to SSBO
+    memcpy(wallSSBOMapped_[currentFrame_], segs.data(), segCount * sizeof(WallSegmentGPU));
+
+    // Barrier: HOST_WRITE → COMPUTE_SHADER_READ on SSBO
+    VkBufferMemoryBarrier hostToComp{};
+    hostToComp.sType               = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
+    hostToComp.srcAccessMask       = VK_ACCESS_HOST_WRITE_BIT;
+    hostToComp.dstAccessMask       = VK_ACCESS_SHADER_READ_BIT;
+    hostToComp.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    hostToComp.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    hostToComp.buffer              = wallSSBO_[currentFrame_];
+    hostToComp.offset              = 0;
+    hostToComp.size                = segCount * sizeof(WallSegmentGPU);
+    vkCmdPipelineBarrier(cmd,
+        VK_PIPELINE_STAGE_HOST_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        0, 0, nullptr, 1, &hostToComp, 0, nullptr);
+
+    // Dispatch compute shader
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, wallComputePipe_);
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
+                            wallComputePipeLayout_, 0, 1, &wallComputeSets_[currentFrame_],
+                            0, nullptr);
+
+    WallComputePC pc{};
+    pc.u_min     = uMin;
+    pc.u_range   = uRange;
+    pc.seg_count = segCount;
+    pc._pad      = 0;
+    vkCmdPushConstants(cmd, wallComputePipeLayout_,
+                       VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(WallComputePC), &pc);
+
+    uint32_t groupCount = (segCount + 63u) / 64u;
+    vkCmdDispatch(cmd, groupCount, 1, 1);
+
+    // Barrier: COMPUTE_SHADER_WRITE → VERTEX_INPUT_READ on output VBO
+    VkBufferMemoryBarrier compToVert{};
+    compToVert.sType               = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
+    compToVert.srcAccessMask       = VK_ACCESS_SHADER_WRITE_BIT;
+    compToVert.dstAccessMask       = VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT;
+    compToVert.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    compToVert.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    compToVert.buffer              = wallOutputVBO_[currentFrame_];
+    compToVert.offset              = 0;
+    compToVert.size                = VK_WHOLE_SIZE;
+    vkCmdPipelineBarrier(cmd,
+        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_VERTEX_INPUT_BIT,
+        0, 0, nullptr, 1, &compToVert, 0, nullptr);
+}
+
+uint32_t vkRenderer::GetWallComputeCurrentCount() const
+{
+    return static_cast<uint32_t>(sg_wallSegsCurrent_.size());
+}
+
+void vkRenderer::DrawComputedWallsRange(unsigned int textureId, uint32_t startSeg, uint32_t segCount)
+{
+    if (!wallComputeReady_ || segCount == 0) return;
+    if (!frameStarted_) return;
+
+    VkCommandBuffer cmd = commandBuffers_[currentFrame_];
+
+    // Texture matrix: remap normalized [0,1] UV → raw UV space
+    // Column-major 4x4: index = col*4 + row
+    //   [0]  = U scale (col 0, row 0)
+    //   [5]  = V scale (col 1, row 1) — identity, V is already in [0,1]
+    //   [12] = U translate (col 3, row 0)
+    //   [15] = W component = 1 (col 3, row 3)
+    // Indices [8],[9],[10],[11] are overwritten by BuildPushConstants (time, ctx, alphatest, lit)
+    float texMat[16] = {};
+    texMat[0]  = wallURangePrev_;
+    texMat[5]  = 1.0f;
+    texMat[12] = wallUMinPrev_;
+    texMat[15] = 1.0f;
+
+    // Build render state key matching the CPU wall path
+    rRenderStateKey state = textureId
+        ? rRenderStateKey::Textured(static_cast<uint64_t>(textureId), rBlendMode::Alpha)
+        : rRenderStateKey::Colored(rBlendMode::Alpha);
+    state.SetTexMatrix(texMat);
+    state.SetRenderContext(s_renderContextId);
+
+    // Build push constants (reads MVP from current matrix stacks)
+    VkPushConstants pc{};
+    BuildPushConstants(pc, state, false);
+
+    // Look up texture descriptor
+    VkDescriptorSet descSet = LookupTextureDescriptor(state);
+
+    // Get graphics pipeline matching the wall render state
+    rVulkanPipelineKey pipeKey{};
+    pipeKey.blendMode      = static_cast<uint8_t>(state.blendMode);
+    pipeKey.depthTest      = (state.flags & rRenderStateKey::DepthTest)  != 0;
+    pipeKey.depthWrite     = (state.flags & rRenderStateKey::DepthWrite) != 0;
+    pipeKey.cullFace       = cullFaceEnabled_;
+    pipeKey.frontFaceCW    = frontFaceCW_;
+    pipeKey.useLines       = false;
+    pipeKey.colorWriteMask = 0xF;
+
+    VkPipeline pipeline = pipelineManager_.GetPipeline(pipeKey);
+    if (pipeline == VK_NULL_HANDLE) return;
+
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                            pipelineManager_.GetLayout(), 0, 1, &descSet, 0, nullptr);
+    vkCmdPushConstants(cmd, pipelineManager_.GetLayout(),
+                       VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                       0, sizeof(pc), &pc);
+
+    VkDeviceSize offset = 0;
+    vkCmdBindVertexBuffers(cmd, 0, 1, &wallOutputVBO_[currentFrame_], &offset);
+
+    vkCmdDraw(cmd, segCount * 6u, 1, startSeg * 6u, 0);
+
+    // Invalidate render queue binding cache so the next draw rebinds its own pipeline
+    vulkanQueue_.InvalidateBindingCache();
+}
+
 void vkRenderer::ComputeShadowVPMatrices()
 {
     // Arena bounds
@@ -3589,23 +4119,22 @@ void vkRenderer::CompositeViewportFBOs(int count, const int viewportRects[][4], 
 }
 
 // Global helpers
-void sr_DrawInstancedModelMesh(const void* geometryKey,
+void sr_DrawInstancedModelMesh(uint64_t meshId,
                                const rInstanceData* instances, size_t instanceCount,
                                unsigned int textureId)
 {
-    if (s_vkRenderer) s_vkRenderer->DrawInstancedModelMesh(geometryKey, instances, instanceCount, textureId);
+    if (s_vkRenderer) s_vkRenderer->DrawInstancedModelMesh(meshId, instances, instanceCount, textureId);
 }
 
-bool sr_IsModelMeshCached(const void* geometryKey)
+bool sr_IsModelMeshCached(uint64_t meshId)
 {
-    if (!s_vkRenderer || !geometryKey) return false;
-    return s_vkRenderer->IsModelMeshCached(geometryKey);
+    if (!s_vkRenderer || meshId == 0) return false;
+    return s_vkRenderer->IsModelMeshCached(meshId);
 }
 
-bool vkRenderer::IsModelMeshCached(const void* geometryKey) const
+bool vkRenderer::IsModelMeshCached(uint64_t meshId) const
 {
-    auto key = reinterpret_cast<uintptr_t>(geometryKey);
-    auto it = modelMeshCache_.find(key);
+    auto it = modelMeshCache_.find(meshId);
     return it != modelMeshCache_.end() && !it->second.litVerts.empty();
 }
 
@@ -3618,6 +4147,8 @@ static int s_savedScreenW = 0, s_savedScreenH = 0;
 
 void sr_BeginViewportFBO(int index, int totalViewports, int x, int y, int w, int h)
 {
+    // Increment multi-viewport guard so subsequent viewports don't re-accumulate wall segments
+    sr_WallComputeOnViewportBegin();
     if (s_vkRenderer) s_vkRenderer->BeginViewportFBO(index, totalViewports, x, y, w, h);
     // Cockpit code uses sr_screenWidth/Height for sizing — expose FBO dimensions
     // so per-viewport widgets are sized relative to the FBO, not the full swapchain.
@@ -3637,6 +4168,65 @@ void sr_EndViewportFBO()
 void sr_CompositeViewportFBOs(int count, const int viewportRects[][4], const int viewportRotations[])
 {
     if (s_vkRenderer) s_vkRenderer->CompositeViewportFBOs(count, viewportRects, viewportRotations);
+}
+
+// ============================================================================
+// Wall GPU compute API (Sprint 3.1)
+// ============================================================================
+
+void sr_WallComputeOnViewportBegin()
+{
+    sg_wallAccumViewportN_++;
+}
+
+bool sr_IsWallComputeActive()
+{
+    return s_vkRenderer && s_vkRenderer->IsWallComputeActive();
+}
+
+void sr_AddWallComputeSegment(float p1x, float p1y, float p2x, float p2y,
+                               float ta,  float te,  float r,   float g,   float b)
+{
+    if (!s_vkRenderer || !s_vkRenderer->IsWallComputeActive())
+        return;
+    if (sg_wallAccumViewportN_ != 0)
+        return;  // only first viewport accumulates
+    if (sg_wallSegsCurrent_.size() >= 65536u)  // matches vkRenderer::kMaxWallSegments
+        return;  // SSBO full — excess segments fall back to CPU path
+
+    // Pack color as RGBA8 (A = 255 for walls)
+    uint32_t ri = static_cast<uint32_t>(std::min(255.0f, r * 255.0f + 0.5f));
+    uint32_t gi = static_cast<uint32_t>(std::min(255.0f, g * 255.0f + 0.5f));
+    uint32_t bi = static_cast<uint32_t>(std::min(255.0f, b * 255.0f + 0.5f));
+    uint32_t packed = ri | (gi << 8u) | (bi << 16u) | (0xFFu << 24u);
+
+    WallSegmentGPU seg;
+    seg.p1x     = p1x;
+    seg.p1y     = p1y;
+    seg.p2x     = p2x;
+    seg.p2y     = p2y;
+    seg.u_start = ta;
+    seg.u_end   = te;
+    seg.color   = packed;
+    seg.flags   = 1u;  // alive
+
+    sg_wallSegsCurrent_.push_back(seg);
+
+    // Expand persistent UV bounds (never shrink, prevents texture matrix pops)
+    if (ta < sg_wallUMin_) sg_wallUMin_ = ta;
+    if (te < sg_wallUMin_) sg_wallUMin_ = te;
+    if (ta > sg_wallUMax_) sg_wallUMax_ = ta;
+    if (te > sg_wallUMax_) sg_wallUMax_ = te;
+}
+
+uint32_t sr_GetWallComputeCurrentCount()
+{
+    return s_vkRenderer ? s_vkRenderer->GetWallComputeCurrentCount() : 0u;
+}
+
+void sr_DrawComputedWallsRange(unsigned int textureId, uint32_t startSeg, uint32_t segCount)
+{
+    if (s_vkRenderer) s_vkRenderer->DrawComputedWallsRange(textureId, startSeg, segCount);
 }
 
 // ============================================================================
@@ -3881,7 +4471,8 @@ void vkRenderer::DrawBatchLitTriangles(const void* vertices, size_t vertexCount,
     }
 }
 
-void vkRenderer::DrawModelMesh(const std::vector<rModelVertex>& vertices,
+void vkRenderer::DrawModelMesh(uint64_t meshId,
+                               const std::vector<rModelVertex>& vertices,
                                const std::vector<unsigned int>& indices,
                                unsigned int textureId)
 {
@@ -3890,8 +4481,7 @@ void vkRenderer::DrawModelMesh(const std::vector<rModelVertex>& vertices,
     if (vertices.empty()) return;
 
     // ----- Cache: convert rModelVertex → rVertexLit32 once per unique mesh -----
-    auto cacheKey = reinterpret_cast<uintptr_t>(vertices.data());
-    auto& entry = modelMeshCache_[cacheKey];
+    auto& entry = modelMeshCache_[meshId];
 
     if (entry.litVerts.empty())
     {
@@ -4033,21 +4623,20 @@ void vkRenderer::DrawModelMesh(const std::vector<rModelVertex>& vertices,
     }
 }
 
-void vkRenderer::DrawInstancedModelMesh(const void* geometryKey,
+void vkRenderer::DrawInstancedModelMesh(uint64_t meshId,
                                         const rInstanceData* instances, size_t instanceCount,
                                         unsigned int textureId)
 {
-    if (!frameStarted_ || !geometryKey || instanceCount == 0) return;
+    if (!frameStarted_ || meshId == 0 || instanceCount == 0) return;
 
-    // Look up cached geometry by key
-    auto cacheKey = reinterpret_cast<uintptr_t>(geometryKey);
-    auto it = modelMeshCache_.find(cacheKey);
+    // Look up cached geometry by stable mesh ID
+    auto it = modelMeshCache_.find(meshId);
     if (it == modelMeshCache_.end() || it->second.litVerts.empty())
     {
         static int s_warnCount = 0;
         if (s_warnCount++ < 10)
-            std::cerr << "[Vulkan] DrawInstancedModelMesh: cache miss for key 0x"
-                      << std::hex << cacheKey << std::dec
+            std::cerr << "[Vulkan] DrawInstancedModelMesh: cache miss for meshId="
+                      << meshId
                       << " (cache size=" << modelMeshCache_.size() << ")\n";
         return;
     }

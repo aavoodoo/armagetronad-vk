@@ -290,6 +290,11 @@ public:
     VkImageLayout GetOffscreenEmissiveLayout() const { return offscreenEmissiveLayout_; }
     VkImageLayout GetOffscreenDepthLayout()    const { return offscreenDepthLayout_; }
 
+    //! VkImage handles for render graph resource registration.
+    VkImage GetOffscreenColorImage()    const { return offscreenColorImage_; }
+    VkImage GetOffscreenEmissiveImage() const { return offscreenEmissiveImage_; }
+    VkImage GetOffscreenDepthImage()    const { return offscreenDepthImage_; }
+
     //! Execute the post-process pass. Called from EndFrame() after the scene
     //! render pass has ended. Transitions the offscreen color image into a
     //! shader-read layout (done implicitly by the offscreen render pass),

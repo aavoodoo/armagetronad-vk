@@ -45,6 +45,7 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 #include "rVulkanRenderQueue.h"
 #include "rVulkanPostProcess.h"
 #include "rVulkanStagingPool.h"
+#include "rRenderGraph.h"
 #include <vector>
 #include <unordered_map>
 #include "rCycleRenderer.h"
@@ -55,6 +56,33 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 //! (3) updating any callers that pass light indices.
 static constexpr int VK_MAX_LIGHTS = 2;
 static constexpr int MAX_FRAMES_IN_FLIGHT = 2;
+
+// ============================================================================
+// Wall GPU compute geometry (Sprint 3.1)
+// ============================================================================
+
+//! Compact wall segment descriptor stored in the per-frame GPU SSBO.
+//! std430 layout: 32 bytes, all fields naturally aligned.
+//! CPU writes this at BeginFrame; compute shader reads it and emits 6 rVertex20.
+struct WallSegmentGPU {
+    float    p1x, p1y;    // segment start XY (world space)
+    float    p2x, p2y;    // segment end XY (world space)
+    float    u_start;     // raw U texture coord at p1 (ta)
+    float    u_end;       // raw U texture coord at p2 (te)
+    uint32_t color;       // RGBA8 packed (R=bits0-7, G=8-15, B=16-23, A=24-31)
+    uint32_t flags;       // bit 0 = alive (1) / dead (0)
+};
+static_assert(sizeof(WallSegmentGPU) == 32, "WallSegmentGPU must be 32 bytes for std430");
+
+//! Push constant for the wall compute pipeline (12 bytes, 16-byte aligned block).
+struct WallComputePC {
+    float    u_min;      // persistent minimum U across all live segments
+    float    u_range;    // u_max - u_min (clamped to ≥ 1e-6)
+    uint32_t seg_count;  // number of segments written to SSBO this frame
+    uint32_t _pad;       // align to 16 bytes
+};
+
+// ============================================================================
 
 //! Push constant data sent per-draw (192 bytes; MoltenVK supports 4096)
 //!
@@ -249,22 +277,23 @@ public:
                         const void* stateKey) override;
 
     // === Model mesh draw (called from rModelMesh::Render) ===
-    void DrawModelMesh(const std::vector<struct rModelVertex>& vertices,
+    void DrawModelMesh(uint64_t meshId,
+                       const std::vector<struct rModelVertex>& vertices,
                        const std::vector<unsigned int>& indices,
                        unsigned int textureId) override;
 
     // === Instanced cycle rendering ===
     //! Draw multiple instances of the same model mesh in one draw call.
-    //! @param geometryKey Cache key (rModelVertex data pointer) identifying the mesh
-    //! @param instances Array of rInstanceData (model matrix + color, 80 bytes each)
+    //! @param meshId     Stable ID from rModelMesh::GetMeshId()
+    //! @param instances  Array of rInstanceData (model matrix + color, 80 bytes each)
     //! @param instanceCount Number of instances
-    //! @param textureId Texture to bind
-    void DrawInstancedModelMesh(const void* geometryKey,
+    //! @param textureId  Texture to bind
+    void DrawInstancedModelMesh(uint64_t meshId,
                                 const struct rInstanceData* instances, size_t instanceCount,
                                 unsigned int textureId);
 
-    //! Check if a model mesh geometry key is in the instancing cache
-    bool IsModelMeshCached(const void* geometryKey) const;
+    //! Check if a mesh ID is in the instancing cache
+    bool IsModelMeshCached(uint64_t meshId) const;
 
     // === VBO helpers ===
     void PrepareForVBODraw() override;
@@ -317,6 +346,7 @@ private:
     rVulkanPipelineManager pipelineManager_;
     rVulkanDescriptorManager descriptorManager_;
     rVulkanPostProcess     postProcess_;
+    rRenderGraph           renderGraph_;
 
     // Per-frame command resources
     VkCommandPool   commandPool_;
@@ -501,8 +531,10 @@ private:
         std::vector<rVertexLit32> litVerts;  // Expanded, index-flattened vertices
         float texScale = 1.0f;               // UV normalization scale (for tex matrix)
     };
-    // Key: address of the vertex vector's data pointer (stable for the lifetime of rModelMesh)
-    std::unordered_map<uintptr_t, ModelMeshEntry> modelMeshCache_;
+    // Key: rModelMesh::GetMeshId() — monotonic counter, new ID on every Build().
+    // Eliminates the uintptr_t(vertices.data()) aliasing bug where a new mesh
+    // allocated at the same address as a destroyed one would get a false cache hit.
+    std::unordered_map<uint64_t, ModelMeshEntry> modelMeshCache_;
     uint32_t modelMeshCacheVersion_ = 0;  // Incremented on every cache clear
 
     // === Shadow map FBOs (FR13: shadow mapping) ===
@@ -532,6 +564,46 @@ private:
     void DestroyShadowMaps();
     void RenderShadowPass(VkCommandBuffer cmd);
     void ComputeShadowVPMatrices();
+
+    // === Wall GPU compute pass (Sprint 3.1) ===
+    //! Maximum segments the SSBO and output VBO can hold. Exceeding this silently
+    //! falls back to the CPU path for the extra segments.
+    static constexpr uint32_t kMaxWallSegments = 65536;
+    //! Per-frame host-visible SSBO: CPU writes WallSegmentGPU array here at BeginFrame.
+    //! Double-buffered so frame N writes slot N%2 while frame N-2's GPU reads are safely done.
+    VkBuffer          wallSSBO_[MAX_FRAMES_IN_FLIGHT]        = {};
+    VmaAllocation     wallSSBOAlloc_[MAX_FRAMES_IN_FLIGHT]   = {};
+    void*             wallSSBOMapped_[MAX_FRAMES_IN_FLIGHT]  = {};
+    //! Per-frame device-local output VBO: compute writes rVertex20 here, draw reads it.
+    VkBuffer          wallOutputVBO_[MAX_FRAMES_IN_FLIGHT]       = {};
+    VmaAllocation     wallOutputVBOAlloc_[MAX_FRAMES_IN_FLIGHT]  = {};
+    //! Compute pipeline resources
+    VkDescriptorSetLayout wallComputeSetLayout_ = VK_NULL_HANDLE;
+    VkDescriptorPool      wallComputePool_      = VK_NULL_HANDLE;
+    VkDescriptorSet       wallComputeSets_[MAX_FRAMES_IN_FLIGHT] = {};
+    VkPipelineLayout      wallComputePipeLayout_ = VK_NULL_HANDLE;
+    VkPipeline            wallComputePipe_       = VK_NULL_HANDLE;
+    VkShaderModule        wallComputeShader_     = VK_NULL_HANDLE;
+    //! UV bounds from the PREVIOUS frame's dispatch (used by DrawComputedWallsRange)
+    float    wallUMinPrev_      = 0.0f;
+    float    wallURangePrev_    = 1.0f;
+    //! True once the compute pipeline + buffers are successfully created
+    bool     wallComputeReady_  = false;
+
+    [[nodiscard]] bool CreateWallComputePipeline();
+    void               DestroyWallComputePipeline();
+    //! Upload sg_wallSegsPrev to SSBO[slot] and dispatch the compute shader.
+    //! Must be called BEFORE the render pass begins (outside a render pass).
+    void               DispatchWallCompute(VkCommandBuffer cmd);
+
+public:
+    //! True once the wall compute pipeline and buffers are ready.
+    bool IsWallComputeActive() const { return wallComputeReady_; }
+    //! Number of segments accumulated in sg_wallSegsCurrent_ so far this frame.
+    uint32_t GetWallComputeCurrentCount() const;
+    //! Draw a range of compute-VBO segments (per-collector slice).
+    void DrawComputedWallsRange(unsigned int textureId, uint32_t startSeg, uint32_t segCount);
+private:
 
     // === Per-viewport FBOs (split-screen depth isolation) ===
     static constexpr int MAX_VIEWPORT_FBOS = 4;

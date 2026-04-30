@@ -83,6 +83,9 @@ public:
     //! Render all quads (triangles)
     virtual void RenderQuads() = 0;
 
+    //! Render only the first headSegCount quads (for GPU compute head-fill)
+    virtual void RenderQuadsHead(uint32_t headSegCount) = 0;
+
     //! Render all lines
     virtual void RenderLines() = 0;
 

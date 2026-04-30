@@ -31,6 +31,7 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 #ifndef DEDICATED
 
 #include "rWallGeometryBufferPacked.h"
+#include "rRender.h"
 
 rWallGeometryCollector::rWallGeometryCollector()
     : staticNeedsRebuild_(true)
@@ -48,6 +49,12 @@ rWallGeometryCollector::~rWallGeometryCollector()
 
 void rWallGeometryCollector::BeginFrame()
 {
+    // Save previous frame's per-collector compute slice, record new start
+    computeStartPrev_    = computeStartCurrent_;
+    computeCountPrev_    = computeCountCurrent_;
+    computeStartCurrent_ = sr_GetWallComputeCurrentCount();
+    computeCountCurrent_ = 0;
+
     // Clear streaming buffer every frame (it changes constantly)
     if (streamingBuffer_)
     {
@@ -67,6 +74,7 @@ void rWallGeometryCollector::BeginFrame()
         pendingStaticLines_.clear();
     }
     staticNeedsRebuild_ = true;
+    firstNormalAdded_ = false;
 
     collecting_ = true;
 }
@@ -79,23 +87,29 @@ REAL rWallGeometryCollector::CalculateStableThreshold(REAL cycleDistance, REAL s
     return (cycleDistance / segmentLength) - beginLength;
 }
 
-void rWallGeometryCollector::AddNormalQuad(const rPackedWallVertex& v0, const rPackedWallVertex& v1,
+bool rWallGeometryCollector::AddNormalQuad(const rPackedWallVertex& v0, const rPackedWallVertex& v1,
                                             const rPackedWallVertex& v2, const rPackedWallVertex& v3)
 {
-    if (!collecting_ || !staticBuffer_)
+    if (!collecting_) return false;
+
+    // The first normal segment each frame bridges the gap between the streaming
+    // begin/gradient zone and the static buffer. Route it to streaming so the
+    // wall is visually continuous regardless of the 1-frame compute lag.
+    if (!firstNormalAdded_ && streamingBuffer_)
     {
-        return;
+        streamingBuffer_->AddQuad(v0, v1, v2, v3);
+        firstNormalAdded_ = true;
+        return false;  // not in static/compute — caller should skip sr_AddWallComputeSegment
     }
+
+    if (!staticBuffer_) return false;
 
     if (staticNeedsRebuild_)
     {
-        // Full rebuild mode - add directly to buffer
         staticBuffer_->AddQuad(v0, v1, v2, v3);
     }
     else
     {
-        // Incremental mode - accumulate for append
-        // Convert quad to triangles
         pendingStaticQuads_.push_back(v0);
         pendingStaticQuads_.push_back(v1);
         pendingStaticQuads_.push_back(v2);
@@ -103,6 +117,7 @@ void rWallGeometryCollector::AddNormalQuad(const rPackedWallVertex& v0, const rP
         pendingStaticQuads_.push_back(v2);
         pendingStaticQuads_.push_back(v3);
     }
+    return true;
 }
 
 void rWallGeometryCollector::AddNormalLine(const rPackedLineVertex& v0, const rPackedLineVertex& v1)
@@ -199,6 +214,9 @@ bool rWallGeometryCollector::EndFrame()
 {
     collecting_ = false;
 
+    // Record how many segments this collector contributed this frame
+    computeCountCurrent_ = sr_GetWallComputeCurrentCount() - computeStartCurrent_;
+
     bool success = true;
 
     // Handle static buffer
@@ -243,7 +261,24 @@ void rWallGeometryCollector::Render(bool renderLines, bool renderQuads)
         }
         if (renderQuads)
         {
-            staticBuffer_->RenderQuads();
+            if (sr_IsWallComputeActive() && computeCountPrev_ > 0)
+            {
+                // GPU compute covers this collector's previous-frame slice.
+                // The 1-frame lag means the newest segments (at index 0 in the
+                // static buffer, rendered newest-first) are not yet in the batch.
+                unsigned int texId = RenderGetBoundTexture2D();
+                sr_DrawComputedWallsRange(texId, computeStartPrev_, computeCountPrev_);
+
+                uint32_t totalSegs = static_cast<uint32_t>(staticBuffer_->GetQuadCount());
+                if (totalSegs > computeCountPrev_)
+                {
+                    staticBuffer_->RenderQuadsHead(totalSegs - computeCountPrev_);
+                }
+            }
+            else
+            {
+                staticBuffer_->RenderQuads();
+            }
         }
     }
 

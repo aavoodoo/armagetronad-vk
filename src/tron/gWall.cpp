@@ -1286,7 +1286,12 @@ void gNetPlayerWall::RenderNormal(const eCoord &p1,const eCoord &p2,REAL ta,REAL
             if (isDeath)
                 collector->AddDeathQuad(v0, v1, v2, v3);
             else
-                collector->AddNormalQuad(v0, v1, v2, v3);
+            {
+                // AddNormalQuad returns false for the first segment (bridge to streaming).
+                // Only add to GPU compute batch when it went to the static buffer.
+                if (collector->AddNormalQuad(v0, v1, v2, v3))
+                    sr_AddWallComputeSegment(p1.x, p1.y, p2.x, p2.y, ta, te, r, g, b);
+            }
         }
     }
 }

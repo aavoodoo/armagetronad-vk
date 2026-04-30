@@ -63,9 +63,12 @@ public:
     //! @param beginLength Begin fade length (gBEG_LEN)
     static REAL CalculateStableThreshold(REAL cycleDistance, REAL segmentLength, REAL beginLength);
 
-    //! Add a normal (stable) wall segment quad
-    //! Routes to static buffer
-    void AddNormalQuad(const rPackedWallVertex& v0, const rPackedWallVertex& v1,
+    //! Add a normal (stable) wall segment quad.
+    //! The very first call per BeginFrame is routed to the streaming buffer (bridges
+    //! the gap between the begin/gradient zone and the static buffer).
+    //! @return true  = added to static buffer (caller should also call sr_AddWallComputeSegment)
+    //! @return false = added to streaming buffer (skip sr_AddWallComputeSegment)
+    bool AddNormalQuad(const rPackedWallVertex& v0, const rPackedWallVertex& v1,
                        const rPackedWallVertex& v2, const rPackedWallVertex& v3);
 
     //! Add a normal (stable) wall segment line
@@ -134,6 +137,16 @@ private:
 
     bool staticNeedsRebuild_;
     bool collecting_;
+    bool firstNormalAdded_;   //!< True once the bridge segment has been sent to streaming
+
+    // Per-collector GPU compute wall tracking.
+    // Each collector occupies a contiguous slice of the global sg_wallSegsCurrent_ array.
+    // At BeginFrame the previous frame's slice is saved; at Render() it is used to
+    // call sr_DrawComputedWallsRange with the correct per-collector offset and count.
+    uint32_t computeStartPrev_    = 0;   //!< Start index in the previous frame's compute batch
+    uint32_t computeCountPrev_    = 0;   //!< Number of segments this collector contributed last frame
+    uint32_t computeStartCurrent_ = 0;   //!< Start index in the current frame's compute batch
+    uint32_t computeCountCurrent_ = 0;   //!< Accumulated count this frame (set at EndFrame)
 };
 
 #endif // RWALLGEOMETRYCOLLECTOR_H

@@ -212,6 +212,9 @@ rFrameStats rRenderStats::GetAverageStats(int frameCount) const
         avg.shaderSwitches += frame.shaderSwitches;
         avg.textureSwitches += frame.textureSwitches;
         avg.bytesUploaded += frame.bytesUploaded;
+        // Pool count: take the most recent value (not a mean) — it's a current state metric.
+        // We just carry it forward from the last history entry; the loop overwrites it each time.
+        avg.descriptorPoolCount = frame.descriptorPoolCount;
 
         for (size_t j = 0; j < static_cast<size_t>(rRenderPhase::COUNT); ++j)
         {
@@ -283,9 +286,9 @@ void rRenderStats::RenderOverlay()
         char buffer[256];
         std::snprintf(buffer, sizeof(buffer),
                       "[RenderStats] FPS: %.1f | Frame: %.2fms | Draws: %zu | Tris: %zu | "
-                      "Verts: %zu | States: %zu",
+                      "Verts: %zu | States: %zu | DescPools: %zu",
                       GetFPS(), avg.frameTimeMs, avg.drawCalls, avg.triangles, avg.vertices,
-                      avg.stateChanges);
+                      avg.stateChanges, avg.descriptorPoolCount);
 
         // Would use tOutput or con << here
         // For now just rely on external code to query and display

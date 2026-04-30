@@ -79,8 +79,10 @@ public:
                                        const void* stateKey) {}
 
     //! Draw a model mesh (rModelVertex array + optional index array).
+    //! @param meshId  Stable identity from rModelMesh::GetMeshId() — used as cache key.
     //! The renderer owns vertex conversion and caching. Called from rModelMesh::Render().
-    virtual void DrawModelMesh(const std::vector<struct rModelVertex>& vertices,
+    virtual void DrawModelMesh(uint64_t meshId,
+                               const std::vector<struct rModelVertex>& vertices,
                                const std::vector<unsigned int>& indices,
                                unsigned int textureId) {}
 
@@ -666,7 +668,7 @@ void sr_CompositeViewportFBOs(int count, const int viewportRects[][4], const int
 
 //! Draw instanced model mesh (cycle batching). Called from rEndCycleRendering().
 struct rInstanceData;
-void sr_DrawInstancedModelMesh(const void* geometryKey,
+void sr_DrawInstancedModelMesh(uint64_t meshId,
                                const rInstanceData* instances, size_t instanceCount,
                                unsigned int textureId);
 
@@ -675,7 +677,31 @@ void sr_DrawInstancedModelMesh(const void* geometryKey,
 extern int sr_modelCacheVersion;
 
 //! Check if a model mesh is already in the instancing cache.
-bool sr_IsModelMeshCached(const void* geometryKey);
+bool sr_IsModelMeshCached(uint64_t meshId);
+
+// === GPU compute wall geometry (Sprint 3.1) ===
+//! Add one normal (non-death) wall segment to the current-frame GPU compute accumulator.
+//! Called from gWall.cpp::RenderNormal for each quad. Ignored when compute is unavailable.
+void sr_AddWallComputeSegment(float p1x, float p1y, float p2x, float p2y,
+                               float ta, float te, float r, float g, float b);
+
+//! Returns true when the Vulkan wall compute pass is initialised and ready.
+bool sr_IsWallComputeActive();
+
+//! Returns the number of segments accumulated in sg_wallSegsCurrent_ so far this frame.
+//! Used by rWallGeometryCollector to record per-collector start offsets.
+uint32_t sr_GetWallComputeCurrentCount();
+
+//! Draw a range of the compute VBO (startSeg..startSeg+segCount-1).
+//! Called from rWallGeometryCollector::Render() with per-collector offsets.
+//! @param textureId   Currently-bound wall texture (0 = untextured).
+//! @param startSeg    First segment index in the compute VBO.
+//! @param segCount    Number of segments to draw.
+void sr_DrawComputedWallsRange(unsigned int textureId, uint32_t startSeg, uint32_t segCount);
+
+//! Called at BeginViewportFBO() — locks the segment accumulator after the first
+//! viewport so subsequent viewports don't double-count wall segments.
+void sr_WallComputeOnViewportBegin();
 
 //! Initialize the renderer
 void sr_InitRenderer(bool useGL3 = false);

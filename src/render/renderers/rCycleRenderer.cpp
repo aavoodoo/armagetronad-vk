@@ -136,7 +136,7 @@ void rBeginCycleRendering()
 }
 
 // Forward declarations from rVulkanRender.cpp
-void sr_DrawInstancedModelMesh(const void* geometryKey,
+void sr_DrawInstancedModelMesh(uint64_t meshId,
                                const rInstanceData* instances, size_t instanceCount,
                                unsigned int textureId);
 uint32_t sr_GetModelMeshCacheVersion_impl();
@@ -156,13 +156,13 @@ void rEndCycleRendering()
     // Group instances by (geometryKey, textureId) so each group can be drawn
     // in one instanced draw call with shared geometry and texture.
     struct GroupKey {
-        const void* geometry;
+        uint64_t geometry;
         unsigned int texture;
         bool operator==(const GroupKey& o) const { return geometry == o.geometry && texture == o.texture; }
     };
     struct GroupKeyHash {
         size_t operator()(const GroupKey& k) const {
-            return std::hash<const void*>()(k.geometry) ^ (std::hash<unsigned int>()(k.texture) << 16);
+            return std::hash<uint64_t>()(k.geometry) ^ (std::hash<unsigned int>()(k.texture) << 16);
         }
     };
 

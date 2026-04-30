@@ -80,6 +80,7 @@ bool rVulkanDescriptorManager::AllocatePool()
     }
 
     pools_.push_back(pool);
+    poolAllocCounts_[pool] = 0;
     return true;
 }
 
@@ -104,7 +105,10 @@ VkDescriptorSet rVulkanDescriptorManager::GetOrCreateTextureSet(VkImageView imag
 
         VkResult result = vkAllocateDescriptorSets(device_, &allocInfo, &set);
         if (result == VK_SUCCESS)
+        {
             owningPool = pools_.back();
+            poolAllocCounts_[owningPool]++;
+        }
         else if (result != VK_ERROR_OUT_OF_POOL_MEMORY && result != VK_ERROR_FRAGMENTED_POOL)
         {
             std::cerr << "[Vulkan] Failed to allocate descriptor set (vkResult=" << result << ")" << std::endl;
@@ -131,6 +135,7 @@ VkDescriptorSet rVulkanDescriptorManager::GetOrCreateTextureSet(VkImageView imag
             std::cerr << "[Vulkan] Failed to allocate descriptor set from new pool" << std::endl;
             return VK_NULL_HANDLE;
         }
+        poolAllocCounts_[owningPool]++;
     }
 
     // Update the descriptor set: binding 0 = texture sampler only.
@@ -195,8 +200,27 @@ void rVulkanDescriptorManager::DrainDeferred(uint32_t slot)
         for (const auto& entry : deferredFree_[slot])
         {
             vkFreeDescriptorSets(device_, entry.pool, 1, &entry.set);
+            auto it = poolAllocCounts_.find(entry.pool);
+            if (it != poolAllocCounts_.end() && it->second > 0)
+                it->second--;
         }
         deferredFree_[slot].clear();
+
+        // Destroy any pool that became empty — but never the last one.
+        for (auto it = pools_.begin(); it != pools_.end() && pools_.size() > 1; )
+        {
+            auto countIt = poolAllocCounts_.find(*it);
+            if (countIt != poolAllocCounts_.end() && countIt->second == 0)
+            {
+                vkDestroyDescriptorPool(device_, *it, nullptr);
+                poolAllocCounts_.erase(countIt);
+                it = pools_.erase(it);
+            }
+            else
+            {
+                ++it;
+            }
+        }
     }
 
     // Subsequent InvalidateCache calls (during this frame's draws) queue
@@ -225,6 +249,7 @@ void rVulkanDescriptorManager::Destroy()
     for (VkDescriptorPool pool : pools_)
         vkDestroyDescriptorPool(device_, pool, nullptr);
     pools_.clear();
+    poolAllocCounts_.clear();
 
     if (layout_ != VK_NULL_HANDLE)
     {

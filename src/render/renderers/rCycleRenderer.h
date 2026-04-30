@@ -29,6 +29,7 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 #define RCYCLERENDERER_H
 
 #include "defs.h"
+#include <cstdint>
 
 //! @file rCycleRenderer.h
 //! Cycle rendering helpers for the modern GL3 renderer.
@@ -73,7 +74,7 @@ struct rInstanceData
 struct rCycleInstance
 {
     rInstanceData instance;     //!< GPU-ready instance data
-    const void* geometryKey;   //!< Pointer to rModelVertex data (cache key for mesh)
+    uint64_t geometryKey;      //!< Stable mesh ID from rModelMesh::GetMeshId() (cache key)
     unsigned int textureId;    //!< Bound texture for this part
 };
 

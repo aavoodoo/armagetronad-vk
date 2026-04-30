@@ -148,52 +148,55 @@ bool rWallGeometryBufferPacked::IsReady() const
     return uploaded_ && (!quadVertices_.empty() || !lineVertices_.empty());
 }
 
+void rWallGeometryBufferPacked::EnsureQuadCache()
+{
+    if (!vkQuadCacheDirty_) return;
+
+    // Scan current frame's UV bounds
+    float minU = quadVertices_[0].texcoord[0], maxU = minU;
+    float minV = quadVertices_[0].texcoord[1], maxV = minV;
+    for (const auto& v : quadVertices_)
+    {
+        minU = std::min(minU, v.texcoord[0]); maxU = std::max(maxU, v.texcoord[0]);
+        minV = std::min(minV, v.texcoord[1]); maxV = std::max(maxV, v.texcoord[1]);
+    }
+
+    // Expand persistent bounds (never shrink). This prevents texture matrix
+    // pops when boundary segments shift the min/max range frame-to-frame.
+    persistMinU_ = std::min(persistMinU_, minU);
+    persistMaxU_ = std::max(persistMaxU_, maxU);
+    persistMinV_ = std::min(persistMinV_, minV);
+    persistMaxV_ = std::max(persistMaxV_, maxV);
+
+    float rangeU = std::max(persistMaxU_ - persistMinU_, 1e-6f);
+    float rangeV = std::max(persistMaxV_ - persistMinV_, 1e-6f);
+
+    vkCachedQuadVerts_.resize(quadVertices_.size());
+    for (size_t i = 0; i < quadVertices_.size(); i++)
+    {
+        const auto& v = quadVertices_[i];
+        rVertex20& rv = vkCachedQuadVerts_[i];
+        rv.position[0] = v.position[0]; rv.position[1] = v.position[1]; rv.position[2] = v.position[2];
+        rv.color[0] = v.color[0]; rv.color[1] = v.color[1]; rv.color[2] = v.color[2]; rv.color[3] = v.color[3];
+        float nu = (v.texcoord[0] - persistMinU_) / rangeU;
+        float nv = (v.texcoord[1] - persistMinV_) / rangeV;
+        rv.texcoord[0] = static_cast<int16_t>(std::max(-32767.0f, std::min(32767.0f, nu * 32767.0f)));
+        rv.texcoord[1] = static_cast<int16_t>(std::max(-32767.0f, std::min(32767.0f, nv * 32767.0f)));
+    }
+    std::memset(vkQuadTexMatrix_, 0, sizeof(vkQuadTexMatrix_));
+    vkQuadTexMatrix_[0]  = rangeU;
+    vkQuadTexMatrix_[5]  = rangeV;
+    vkQuadTexMatrix_[10] = 1.0f;
+    vkQuadTexMatrix_[12] = persistMinU_;
+    vkQuadTexMatrix_[13] = persistMinV_;
+    vkQuadTexMatrix_[15] = 1.0f;
+    vkQuadCacheDirty_ = false;
+}
+
 void rWallGeometryBufferPacked::RenderQuads()
 {
     if (quadVertices_.empty()) return;
-
-    if (vkQuadCacheDirty_)
-    {
-        // Scan current frame's UV bounds
-        float minU = quadVertices_[0].texcoord[0], maxU = minU;
-        float minV = quadVertices_[0].texcoord[1], maxV = minV;
-        for (const auto& v : quadVertices_)
-        {
-            minU = std::min(minU, v.texcoord[0]); maxU = std::max(maxU, v.texcoord[0]);
-            minV = std::min(minV, v.texcoord[1]); maxV = std::max(maxV, v.texcoord[1]);
-        }
-
-        // Expand persistent bounds (never shrink). This prevents texture matrix
-        // pops when boundary segments shift the min/max range frame-to-frame.
-        persistMinU_ = std::min(persistMinU_, minU);
-        persistMaxU_ = std::max(persistMaxU_, maxU);
-        persistMinV_ = std::min(persistMinV_, minV);
-        persistMaxV_ = std::max(persistMaxV_, maxV);
-
-        float rangeU = std::max(persistMaxU_ - persistMinU_, 1e-6f);
-        float rangeV = std::max(persistMaxV_ - persistMinV_, 1e-6f);
-
-        vkCachedQuadVerts_.resize(quadVertices_.size());
-        for (size_t i = 0; i < quadVertices_.size(); i++)
-        {
-            const auto& v = quadVertices_[i];
-            rVertex20& rv = vkCachedQuadVerts_[i];
-            rv.position[0] = v.position[0]; rv.position[1] = v.position[1]; rv.position[2] = v.position[2];
-            rv.color[0] = v.color[0]; rv.color[1] = v.color[1]; rv.color[2] = v.color[2]; rv.color[3] = v.color[3];
-            float nu = (v.texcoord[0] - persistMinU_) / rangeU;
-            float nv = (v.texcoord[1] - persistMinV_) / rangeV;
-            rv.texcoord[0] = static_cast<int16_t>(std::max(-32767.0f, std::min(32767.0f, nu * 32767.0f)));
-            rv.texcoord[1] = static_cast<int16_t>(std::max(-32767.0f, std::min(32767.0f, nv * 32767.0f)));
-        }
-        std::memset(vkQuadTexMatrix_, 0, sizeof(vkQuadTexMatrix_));
-        vkQuadTexMatrix_[0]  = rangeU;
-        vkQuadTexMatrix_[5]  = rangeV;
-        vkQuadTexMatrix_[10] = 1.0f;
-        vkQuadTexMatrix_[12] = persistMinU_;
-        vkQuadTexMatrix_[13] = persistMinV_;
-        vkQuadTexMatrix_[15] = 1.0f;
-        vkQuadCacheDirty_ = false;
-    }
+    EnsureQuadCache();
 
     unsigned int texId = RenderGetBoundTexture2D();
     rRenderStateKey state = texId ? rRenderStateKey::Textured(texId, rBlendMode::Alpha)
@@ -202,6 +205,23 @@ void rWallGeometryBufferPacked::RenderQuads()
     state.SetRenderContext(static_cast<int>(sr_GetRenderContext()));
     rRenderQueue::Instance().Submit(rRenderPhase::OpaqueDynamic, state,
                                     vkCachedQuadVerts_.data(), vkCachedQuadVerts_.size());
+}
+
+void rWallGeometryBufferPacked::RenderQuadsHead(uint32_t headSegCount)
+{
+    if (quadVertices_.empty() || headSegCount == 0) return;
+    EnsureQuadCache();
+
+    size_t vertCount = std::min(static_cast<size_t>(headSegCount) * 6, vkCachedQuadVerts_.size());
+    if (vertCount == 0) return;
+
+    unsigned int texId = RenderGetBoundTexture2D();
+    rRenderStateKey state = texId ? rRenderStateKey::Textured(texId, rBlendMode::Alpha)
+                                  : rRenderStateKey::Colored(rBlendMode::Alpha);
+    state.SetTexMatrix(vkQuadTexMatrix_);
+    state.SetRenderContext(static_cast<int>(sr_GetRenderContext()));
+    rRenderQueue::Instance().Submit(rRenderPhase::OpaqueDynamic, state,
+                                    vkCachedQuadVerts_.data(), vertCount);
 }
 
 void rWallGeometryBufferPacked::RenderLines()

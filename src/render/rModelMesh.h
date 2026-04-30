@@ -30,6 +30,7 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 
 #include "defs.h"
 #include <vector>
+#include <cstdint>
 
 //! Interleaved vertex format for model meshes
 //! Layout: position (3f), normal (3f), texcoord (3f) = 36 bytes per vertex
@@ -73,6 +74,12 @@ public:
     //! Check if mesh is valid and ready for rendering
     bool IsValid() const { return valid_; }
 
+    //! Stable mesh identity for renderer cache keying.
+    //! Assigned from a monotonic counter at construction and on every Build()
+    //! call, so each distinct geometry gets a unique ID even if the object is
+    //! reused at the same address after destruction. Never 0.
+    uint64_t GetMeshId() const { return meshId_; }
+
     //! Build mesh from vertex and index data
     //! @param vertices Interleaved vertex data
     //! @param indices Triangle indices
@@ -100,6 +107,9 @@ public:
 private:
     rModelMesh(const rModelMesh&) = delete;
     rModelMesh& operator=(const rModelMesh&) = delete;
+
+    uint64_t meshId_;   //!< monotonic stable ID; re-assigned on every Build()
+    static uint64_t s_nextMeshId_;  //!< global counter, starts at 1
 
     int vertexCount_;
     int indexCount_;

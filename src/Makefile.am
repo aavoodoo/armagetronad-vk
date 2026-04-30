@@ -172,6 +172,7 @@ librender_a_SOURCES=${render_extra} render/rConsole.cpp render/rConsoleGraph.cpp
 	render/vulkan/rVulkanRenderQueue.h render/vulkan/rVulkanRenderQueue.cpp \
 	render/vulkan/rVulkanStagingPool.h render/vulkan/rVulkanStagingPool.cpp \
 	render/vulkan/rVulkanPostProcess.h render/vulkan/rVulkanPostProcess.cpp \
+	render/vulkan/rRenderGraph.h render/vulkan/rRenderGraph.cpp \
 	render/vulkan/rVulkanRender.h render/vulkan/rVulkanRender.cpp \
 	render/utilities/rRenderBucket.h render/utilities/rRenderBucket.cpp \
 	render/utilities/rRenderQueue.h render/utilities/rRenderQueue.cpp \

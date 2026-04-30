@@ -221,8 +221,9 @@ std::vector<uint32_t> rVulkanShader::CompileGLSL(
 
     shaderc_shader_kind kind;
     switch (stage) {
-        case Stage::Vertex:  kind = shaderc_glsl_vertex_shader;  break;
-        default:             kind = shaderc_glsl_fragment_shader; break;
+        case Stage::Vertex:   kind = shaderc_glsl_vertex_shader;   break;
+        case Stage::Compute:  kind = shaderc_glsl_compute_shader;  break;
+        default:              kind = shaderc_glsl_fragment_shader;  break;
     }
 
     auto result = compiler.CompileGlslToSpv(source, kind, sourcePath.c_str(), options);

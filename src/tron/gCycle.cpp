@@ -4667,7 +4667,7 @@ void gCycle::Render(const eCamera *cam){
                 {
                     // Instanced path for moviepack ASE model (single mesh, no wheels)
                     // Check if this model's geometry is cached; if not, prime via legacy render
-                    bool mpCacheReady = sr_IsModelMeshCached(customModel->GetMesh().GetVertices().data());
+                    bool mpCacheReady = sr_IsModelMeshCached(customModel->GetMesh().GetMeshId());
                     if (!mpCacheReady)
                     {
                         PushMatrix();
@@ -4710,7 +4710,7 @@ void gCycle::Render(const eCamera *cam){
                     ci.instance.color[2] = color_.b_;
                     ci.instance.color[3] = 1.0f;
                     customTexture->Select();
-                    ci.geometryKey = customModel->GetMesh().GetVertices().data();
+                    ci.geometryKey = customModel->GetMesh().GetMeshId();
                     ci.textureId = RenderGetBoundTexture2D();
                     rSubmitCycleInstance(ci);
                 }
@@ -4778,9 +4778,9 @@ void gCycle::Render(const eCamera *cam){
                 // model paths). If any part is missing, render via legacy path once
                 // to populate the cache, then switch to instanced next frame.
                 bool cacheReady = sr_useBatchedCycles
-                    && sr_IsModelMeshCached(body->GetMesh().GetVertices().data())
-                    && sr_IsModelMeshCached(rear->GetMesh().GetVertices().data())
-                    && sr_IsModelMeshCached(front->GetMesh().GetVertices().data());
+                    && sr_IsModelMeshCached(body->GetMesh().GetMeshId())
+                    && sr_IsModelMeshCached(rear->GetMesh().GetMeshId())
+                    && sr_IsModelMeshCached(front->GetMesh().GetMeshId());
 
                 if (sr_useBatchedCycles && !cacheReady)
                 {
@@ -4849,7 +4849,7 @@ void gCycle::Render(const eCamera *cam){
                         ci.instance.color[0] = cr; ci.instance.color[1] = cg;
                         ci.instance.color[2] = cb; ci.instance.color[3] = 1.0f;
                         bodyTex->Select();
-                        ci.geometryKey = body->GetMesh().GetVertices().data();
+                        ci.geometryKey = body->GetMesh().GetMeshId();
                         ci.textureId = RenderGetBoundTexture2D();
                         rSubmitCycleInstance(ci);
                     }
@@ -4875,7 +4875,7 @@ void gCycle::Render(const eCamera *cam){
                         ci.instance.color[0] = cr; ci.instance.color[1] = cg;
                         ci.instance.color[2] = cb; ci.instance.color[3] = 1.0f;
                         wheelTex->Select();
-                        ci.geometryKey = rear->GetMesh().GetVertices().data();
+                        ci.geometryKey = rear->GetMesh().GetMeshId();
                         ci.textureId = RenderGetBoundTexture2D();
                         rSubmitCycleInstance(ci);
                     }
@@ -4898,7 +4898,7 @@ void gCycle::Render(const eCamera *cam){
                         }
                         ci.instance.color[0] = cr; ci.instance.color[1] = cg;
                         ci.instance.color[2] = cb; ci.instance.color[3] = 1.0f;
-                        ci.geometryKey = front->GetMesh().GetVertices().data();
+                        ci.geometryKey = front->GetMesh().GetMeshId();
                         ci.textureId = RenderGetBoundTexture2D();
                         rSubmitCycleInstance(ci);
                     }

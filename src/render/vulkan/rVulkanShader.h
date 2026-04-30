@@ -39,7 +39,7 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 class rVulkanShader
 {
 public:
-    enum class Stage { Vertex, Fragment };
+    enum class Stage { Vertex, Fragment, Compute };
 
     rVulkanShader() = default;
     ~rVulkanShader() = default;

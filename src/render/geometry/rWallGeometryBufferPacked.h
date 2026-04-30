@@ -54,6 +54,7 @@ public:
     bool Upload() override;
     bool IsReady() const override;
     void RenderQuads() override;
+    void RenderQuadsHead(uint32_t headSegCount) override;
     void RenderLines() override;
     void Release() override;
     size_t GetQuadCount() const override;
@@ -65,6 +66,7 @@ public:
                         const std::vector<rPackedLineVertex>& lines);
 
 private:
+    void EnsureQuadCache();
     rBufferUsage usage_;
 
     std::vector<rPackedWallVertex> quadVertices_;

@@ -122,7 +122,8 @@ struct rFrameStats
     size_t stateChanges;    //!< Total state changes
     size_t shaderSwitches;  //!< Shader program switches
     size_t textureSwitches; //!< Texture binding changes
-    size_t bytesUploaded;   //!< Total bytes uploaded to GPU
+    size_t bytesUploaded;        //!< Total bytes uploaded to GPU
+    size_t descriptorPoolCount;  //!< Number of live descriptor pools (grows on exhaustion, shrinks when empty)
 
     // Per-phase breakdown
     rPhaseStats phases[static_cast<size_t>(rRenderPhase::COUNT)];
@@ -143,6 +144,7 @@ struct rFrameStats
         , shaderSwitches(0)
         , textureSwitches(0)
         , bytesUploaded(0)
+        , descriptorPoolCount(0)
         , frameNumber(0)
     {
     }
@@ -161,6 +163,7 @@ struct rFrameStats
         shaderSwitches = 0;
         textureSwitches = 0;
         bytesUploaded = 0;
+        descriptorPoolCount = 0;
 
         for (size_t i = 0; i < static_cast<size_t>(rRenderPhase::COUNT); ++i)
         {
@@ -222,6 +225,9 @@ public:
 
     //! Record bytes uploaded
     void AddBytesUploaded(size_t bytes);
+
+    //! Set current descriptor pool count (call once per frame from the renderer)
+    void SetDescriptorPoolCount(size_t count) { currentFrame_.descriptorPoolCount = count; }
 
     //-------------------------------------------------------------------------
     // Query results

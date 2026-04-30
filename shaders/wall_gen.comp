@@ -1,0 +1,100 @@
+/*
+ * wall_gen.comp — GPU compute shader for wall geometry generation (Sprint 3.1)
+ *
+ * Reads compact WallSegmentGPU descriptors from an SSBO and generates 6 rVertex20
+ * vertices per live segment into a device-local output buffer used as a vertex buffer.
+ *
+ * rVertex20 memory layout (20 bytes, 5 × uint32):
+ *   [0] floatBitsToUint(pos.x)
+ *   [1] floatBitsToUint(pos.y)
+ *   [2] floatBitsToUint(pos.z)
+ *   [3] color RGBA8 packed (R in bits 0:7, G 8:15, B 16:23, A 24:31)
+ *   [4] texcoords packed: u as int16 in bits 0:15, v as int16 in bits 16:31
+ *
+ * Wall geometry (constant height = 1, no extrarise):
+ *   Bottom verts: z = 0.0,  V = 32767 (SNORM ≈ 1.0)
+ *   Top    verts: z = 1.0,  V = 0
+ *   Two CCW triangles per segment:
+ *     Tri1: BL(p1,z=0), TL(p1,z=1), TR(p2,z=1)
+ *     Tri2: BL(p1,z=0), TR(p2,z=1), BR(p2,z=0)
+ *
+ * UV normalization: raw ta/te → [0,1] using push constants u_min/u_range,
+ * then encoded as int16 SNORM [0, 32767]. The vertex shader remaps back via
+ * the texture matrix push constant (scale=u_range, translate=u_min).
+ *
+ * Dead segments (flags bit 0 = 0) emit 6 degenerate (zero-area) vertices.
+ */
+
+#version 450
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+// Input: compact wall segment descriptors (std430, 32 bytes each)
+struct WallSeg {
+    vec2  p1;       // segment start XY (world space)
+    vec2  p2;       // segment end XY (world space)
+    float u_start;  // raw U texture coordinate at p1 (ta)
+    float u_end;    // raw U texture coordinate at p2 (te)
+    uint  color;    // RGBA8 packed vertex color
+    uint  flags;    // bit 0 = alive (1) / dead (0)
+};
+layout(std430, set=0, binding=0) readonly buffer SegSSBO {
+    WallSeg segs[];
+};
+
+// Output: rVertex20 flat array (5 uint32s per vertex, 6 vertices per segment)
+layout(std430, set=0, binding=1) writeonly buffer OutVBO {
+    uint verts[];
+};
+
+layout(push_constant) uniform PC {
+    float u_min;      // persistent minimum U across all live segments
+    float u_range;    // u_max - u_min (or 1e-6 if degenerate)
+    uint  seg_count;  // number of segments in the SSBO
+};
+
+// Write one rVertex20 at index idx.
+// u16/v16 are non-negative int16 values in [0, 32767].
+void writeVert(uint idx, vec3 pos, uint rgba, int u16, int v16) {
+    uint base = idx * 5u;
+    verts[base + 0u] = floatBitsToUint(pos.x);
+    verts[base + 1u] = floatBitsToUint(pos.y);
+    verts[base + 2u] = floatBitsToUint(pos.z);
+    verts[base + 3u] = rgba;
+    // Pack two signed 16-bit values into one uint32
+    verts[base + 4u] = (uint(u16) & 0xFFFFu) | ((uint(v16) & 0xFFFFu) << 16u);
+}
+
+void main() {
+    uint sid = gl_GlobalInvocationID.x;
+    if (sid >= seg_count) return;
+
+    WallSeg s    = segs[sid];
+    uint    base = sid * 6u;
+
+    // Dead segment — emit degenerate triangles (zero area, invisible)
+    if ((s.flags & 1u) == 0u) {
+        for (uint i = 0u; i < 6u; i++)
+            writeVert(base + i, vec3(0.0), 0u, 0, 0);
+        return;
+    }
+
+    // Normalize U coordinates to [0, 1] then encode as int16 SNORM
+    float safe_range = max(u_range, 1.0e-6);
+    float nu_s = clamp((s.u_start - u_min) / safe_range, 0.0, 1.0);
+    float nu_e = clamp((s.u_end   - u_min) / safe_range, 0.0, 1.0);
+    int us = int(nu_s * 32767.0);
+    int ue = int(nu_e * 32767.0);
+    int vT =     0;  // top:    V = 0.0
+    int vB = 32767;  // bottom: V = 1.0
+
+    // Triangle 1: BL, TL, TR  (CCW)
+    writeVert(base + 0u, vec3(s.p1, 0.0), s.color, us, vB); // BL
+    writeVert(base + 1u, vec3(s.p1, 1.0), s.color, us, vT); // TL
+    writeVert(base + 2u, vec3(s.p2, 1.0), s.color, ue, vT); // TR
+
+    // Triangle 2: BL, TR, BR  (CCW)
+    writeVert(base + 3u, vec3(s.p1, 0.0), s.color, us, vB); // BL
+    writeVert(base + 4u, vec3(s.p2, 1.0), s.color, ue, vT); // TR
+    writeVert(base + 5u, vec3(s.p2, 0.0), s.color, ue, vB); // BR
+}

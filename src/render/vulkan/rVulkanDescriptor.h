@@ -82,6 +82,13 @@ public:
     //! Destroy all resources
     void Destroy();
 
+    //! Number of live descriptor pools (for monitoring; should stabilize after warmup)
+    uint32_t GetPoolCount() const { return static_cast<uint32_t>(pools_.size()); }
+
+    //! Number of deferred-free slots. MUST equal MAX_FRAMES_IN_FLIGHT in rVulkanRender.h.
+    //! A static_assert in rVulkanRender.cpp enforces this.
+    static constexpr uint32_t PP_MAX_FRAMES = 2;
+
     // Non-copyable
     rVulkanDescriptorManager(const rVulkanDescriptorManager&) = delete;
     rVulkanDescriptorManager& operator=(const rVulkanDescriptorManager&) = delete;
@@ -98,6 +105,11 @@ private:
 
     //! Allocate a fresh pool of poolCapacity_ sets and append it to pools_.
     bool AllocatePool();
+
+    //! Per-pool active set count. Incremented on successful vkAllocateDescriptorSets,
+    //! decremented in DrainDeferred after vkFreeDescriptorSets. When a pool's count
+    //! reaches 0 and it is not the only remaining pool, it is destroyed immediately.
+    std::unordered_map<VkDescriptorPool, uint32_t> poolAllocCounts_;
 
     // Cache: (imageView, sampler) → (owning pool, descriptor set)
     // Both key fields are needed: handles can be reused after deletion+reallocation,
@@ -135,9 +147,6 @@ private:
     // time all frame slots have cycled past the Invalidate call, so no
     // in-flight command buffer can still reference the descriptor sets.
     //
-    // MAX_FRAMES_IN_FLIGHT is hard-coded to 2 in rVulkanRender.h. If that
-    // changes, bump the array size here to match.
-    static constexpr uint32_t PP_MAX_FRAMES = 2;
     std::vector<CacheEntry> deferredFree_[PP_MAX_FRAMES];
 
     // The slot that subsequent InvalidateCache calls should push to.

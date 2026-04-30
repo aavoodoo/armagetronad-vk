@@ -32,8 +32,11 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 #include "rRender.h"
 #endif
 
+uint64_t rModelMesh::s_nextMeshId_ = 1;
+
 rModelMesh::rModelMesh()
-    : vertexCount_(0)
+    : meshId_(s_nextMeshId_++)
+    , vertexCount_(0)
     , indexCount_(0)
     , triangleCount_(0)
     , valid_(false)
@@ -61,6 +64,7 @@ bool rModelMesh::Build(const std::vector<rModelVertex>& vertices,
                        const std::vector<unsigned int>& indices)
 {
 #ifndef DEDICATED
+    meshId_ = s_nextMeshId_++;  // new geometry = new identity
     cpuVertices_ = vertices;
     cpuIndices_ = indices;
     vertexCount_ = static_cast<int>(vertices.size());
@@ -77,6 +81,7 @@ bool rModelMesh::Build(const std::vector<rModelVertex>& vertices,
 bool rModelMesh::Build(const std::vector<rModelVertex>& vertices)
 {
 #ifndef DEDICATED
+    meshId_ = s_nextMeshId_++;  // new geometry = new identity
     cpuVertices_ = vertices;
     cpuIndices_.clear();
     vertexCount_ = static_cast<int>(vertices.size());
@@ -95,6 +100,6 @@ void rModelMesh::Render()
 #ifndef DEDICATED
     if (!valid_ || cpuVertices_.empty()) return;
     unsigned int texId = RenderGetBoundTexture2D();
-    renderer->DrawModelMesh(cpuVertices_, cpuIndices_, texId);
+    renderer->DrawModelMesh(meshId_, cpuVertices_, cpuIndices_, texId);
 #endif
 }
