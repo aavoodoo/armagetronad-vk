@@ -88,6 +88,12 @@ public:
     //! Check if a moviepack is currently active (not "None")
     bool IsMoviepackActive() const { return activeIndex_ > 0; }
 
+    //! Called after the renderer initializes to apply PP effects from the active
+    //! moviepack. ScanMoviepacks() runs before sr_glOut is set, so the renderer-
+    //! dependent part of ActivateMoviepack() (PP activation, effect search path)
+    //! is skipped at startup and must be re-applied once the renderer is ready.
+    void NotifyRendererReady();
+
 #ifndef DEDICATED
     //! Extract and cache preview image for a moviepack
     //! Returns cached texture, or NULL if no preview available
@@ -167,5 +173,18 @@ private:
     void UpdateFromManager();
 };
 #endif
+
+#if !defined(DEDICATED) && defined(HAVE_SHADERC_SHADERC_HPP)
+//! Compile all GLSL shaders in a moviepack ZIP and add pre-compiled SPIR-V alongside the sources.
+//! Only available on platforms with shaderc (macOS/desktop). Prints progress to stdout.
+//! Returns true on success; the ZIP is updated in place.
+bool sr_CompileMoviepack(const char* zipPath);
+#endif
+
+//! True if the active moviepack ships a file at moviepack/<relPath>.
+//! Used by texture-selection sites to fall back to the system default when
+//! a "lighting only" / minimal moviepack does not override every asset.
+//! Returns false when no moviepack is active.
+bool sg_MoviepackHasFile(const char* relPath);
 
 #endif // ArmageTron_MOVIEPACK_H

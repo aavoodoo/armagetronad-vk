@@ -161,7 +161,7 @@ public:
 };
 
 static tConfItem<bool>    ab("ALPHA_BLEND",sr_alphaBlend);
-static tConfItem<bool>    ss("SMOOTH_SHADING",sr_smoothShading);
+// SMOOTH_SHADING removed — Vulkan renderer always uses smooth shading; variable is dead.
 static tConfItem<bool>    to("TEXT_OUT",sr_textOut);
 static tConfItem<bool>    fps("SHOW_FPS",sr_FPSOut);
 // tConfItem<> ("",&);
@@ -169,10 +169,10 @@ static tConfItem<int> fm("FLOOR_MIRROR",sr_floorMirror);
 static tConfItem<int> fd("FLOOR_DETAIL",sr_floorDetail);
 static tConfItem<int> sm("SHADOW_MODE",sr_shadowMode);
 static tConfItem<bool> hr("HIGH_RIM",sr_highRim);
-static tConfItem<bool> dt("DITHER",sr_dither);
+// DITHER removed — GL_DITHER is a no-op in the Vulkan renderer.
 static tConfItem<bool> us("UPPER_SKY",sr_upperSky);
 static tConfItem<bool> ls("LOWER_SKY",sr_lowerSky);
-static tConfItem<bool> wos("SKY_WOBBLE",sr_skyWobble);
+// SKY_WOBBLE removed — variable has no active readers in the Vulkan renderer.
 static tConfItem<bool> ip("INFINITY_PLANE",sr_infinityPlane);
 
 extern bool sg_axesIndicator;
@@ -476,26 +476,7 @@ static void sg_ScreenModeAdvanced()
         sr_keepWindowActive);
 
     // VSync / present mode is now in Performance Tweaks menu (Vulkan present mode)
-
-    uMenuItemSelection<rColorDepth> zd_t
-    (&screen_menu_mode,
-     "$screen_zdepth_text",
-     "$screen_zdepth_help",
-     currentScreensetting.zDepth);
-
-    uSelectEntry<rColorDepth> zd_16(zd_t,"$screen_zdepth_16_text","$screen_zdepth_16_help",ArmageTron_ColorDepth_16);
-    uSelectEntry<rColorDepth> zd_d(zd_t,"$screen_zdepth_desk_text","$screen_zdepth_desk_help",ArmageTron_ColorDepth_Desktop);
-    uSelectEntry<rColorDepth> zd_32(zd_t,"$screen_zdepth_32_text","$screen_zdepth_32_help",ArmageTron_ColorDepth_32);
-
-    uMenuItemSelection<rColorDepth> cd_t
-    (&screen_menu_mode,
-     "$screen_colordepth_text",
-     "$screen_colordepth_help",
-     currentScreensetting.colorDepth);
-
-    uSelectEntry<rColorDepth> cd_16(cd_t,"$screen_colordepth_16_text","$screen_colordepth_16_help",ArmageTron_ColorDepth_16);
-    uSelectEntry<rColorDepth> cd_d(cd_t,"$screen_colordepth_desk_text","$screen_colordepth_desk_help",ArmageTron_ColorDepth_Desktop);
-    uSelectEntry<rColorDepth> cd_32(cd_t,"$screen_colordepth_32_text","$screen_colordepth_32_help",ArmageTron_ColorDepth_32);
+    // Z-Buffer Depth and Color Depth were SDL hints ignored by the Vulkan renderer — removed.
 
     screen_menu_mode.Enter();
 }
@@ -666,11 +647,6 @@ static uSelectEntry<int> mfmc(mfm,"$detail_floor_mirror_ow_text",
 
 static uSelectEntry<int> mfme(mfm,"$detail_floor_mirror_ev_text","$detail_floor_mirror_ev_help",rMIRROR_ALL);
 
-static uMenuItemToggle fs_dither
-(&screen_menu_detail,"$detail_dither_text",
- "$detail_dither_help",
- sr_dither);
-
 // from gWall.cpp
 extern bool sg_simpleTrail;
 static uMenuItemToggle sgm_simpleTrail
@@ -702,11 +678,6 @@ static uMenuItemToggle  abm
 (&screen_menu_detail,"$detail_alpha_text",
  "$detail_alpha_help",
  sr_alphaBlend);
-
-static uMenuItemToggle  ssm
-(&screen_menu_detail,"$detail_smooth_text",
- "$detail_smooth_help",
- sr_smoothShading);
 
 extern bool crash_sparks;		// from gCycle.cpp
 extern bool white_sparks;		// from gSparks.cpp
@@ -761,11 +732,6 @@ static uMenuItemToggle ls2
 uMenuItemToggle fps2
 (&screen_menu_prefs,"$misc_fps_text",
  "$misc_fps_help",sr_FPSOut);
-
-static uMenuItemToggle ws2
-(&screen_menu_prefs,"$pref_skymove_text",
- "$pref_skymove_help",
- sr_skyWobble);
 
 static uMenuItemToggle crexph2
 (&screen_menu_prefs,"$pref_explosion_hud_text",

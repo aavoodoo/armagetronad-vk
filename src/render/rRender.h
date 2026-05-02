@@ -127,7 +127,6 @@ public:
     virtual void EnableState(int capability) = 0;
     virtual void DisableState(int capability) = 0;
     virtual void BlendFunc(int sfactor, int dfactor) = 0;
-    virtual void DepthFunc(int func) = 0;
     virtual void DepthMask(bool write) = 0;
     virtual void FrontFace(int mode) = 0;
     virtual void PolygonOffset(REAL factor, REAL units) = 0;
@@ -186,7 +185,7 @@ public:
     virtual int GetTexLevelParameteriv(int /*target*/, int /*level*/, int /*pname*/) { return 0; }
 
     // System operations (S10.0) - GPU sync, queries, screenshots
-    virtual bool IsFrameStarted() const { return false; }
+    [[nodiscard]] virtual bool IsFrameStarted() const { return false; }
     virtual void Finish() {}
     virtual void Flush() {}
     virtual void ReadPixels(int /*x*/, int /*y*/, int /*width*/, int /*height*/,
@@ -429,10 +428,6 @@ inline void RenderBlendFunc(int sfactor, int dfactor){
     renderer->BlendFunc(sfactor,dfactor);
 }
 
-inline void RenderDepthFunc(int func){
-    renderer->DepthFunc(func);
-}
-
 inline void RenderDepthMask(bool write){
     renderer->DepthMask(write);
 }
@@ -541,10 +536,6 @@ inline void RenderDisableState(rCapability capability){
 
 inline void RenderBlendFunc(rBlendFactor sfactor, rBlendFactor dfactor){
     renderer->BlendFunc(rBlendFactorToInt(sfactor), rBlendFactorToInt(dfactor));
-}
-
-inline void RenderDepthFunc(rCompareFunc func){
-    renderer->DepthFunc(rCompareFuncToInt(func));
 }
 
 inline void RenderAlphaFunc(rCompareFunc func, REAL ref){

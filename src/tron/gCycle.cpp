@@ -27,6 +27,7 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 
 #include "eEventNotification.h"
 #include "gCycle.h"
+#include "gMoviepack.h"
 #include "nConfig.h"
 #include "rModel.h"
 #include "rModelMesh.h"
@@ -4204,7 +4205,12 @@ static rFileTexture dir_eWall_moviepack(rTextureGroups::TEX_WALL,"moviepack/dir_
 
 static void dir_eWall_select()
 {
-    if (sg_MoviePack()){
+    // Use moviepack-shipped dir_wall texture only when the active pack
+    // actually provides it; otherwise fall back to textures/dir_wall.png.
+    // The moviepack-mode texcoord stretch (mp_eWall_stretch) only applies
+    // when we're actually using the moviepack texture — otherwise default
+    // UVs already match textures/dir_wall.png.
+    if (sg_MoviepackHasFile("dir_wall.png")){
         TexMatrix();
         IdentityMatrix();
         ScaleMatrix(1/mp_eWall_stretch,1,1);
@@ -4601,6 +4607,13 @@ void gCycle::Render(const eCamera *cam){
     if (Alive()){
         //con << "Drawing cycle at " << pos << '\n';
 
+        // Set render context so the fragment shader dispatches to hookCycle /
+        // hookCycleEmissive.  Without this, non-batched cycles render with
+        // context Game3D (3) — no hook fires, no emissive glow, making the
+        // asymmetric Blinn-Phong lighting visible as "left side always dark."
+        rRenderContext prevRenderCtx = sr_GetRenderContext();
+        sr_SetRenderContext(rRenderContext::Game3D_Cycles);
+
         // Set up standard cycle lighting (two lights: red/blue)
         rSetupCycleLighting();
         rSetupCycleMaterial();
@@ -4663,12 +4676,11 @@ void gCycle::Render(const eCamera *cam){
             ModelMatrix();
             if ( !blinking )
             {
-                if (sr_useBatchedCycles && customModel && customTexture)
+                if (customModel && customTexture)
                 {
-                    // Instanced path for moviepack ASE model (single mesh, no wheels)
-                    // Check if this model's geometry is cached; if not, prime via legacy render
-                    bool mpCacheReady = sr_IsModelMeshCached(customModel->GetMesh().GetMeshId());
-                    if (!mpCacheReady)
+                    // Moviepack ASE model (single mesh, no wheels).
+                    // Prime cache if needed (first frame renders via legacy path).
+                    if (!sr_IsModelMeshCached(customModel->GetMesh().GetMeshId()))
                     {
                         PushMatrix();
                         customTexture->Select();
@@ -4677,29 +4689,24 @@ void gCycle::Render(const eCamera *cam){
                         PopMatrix();
                     }
 
-                    // Build model matrix: the stack already has translate(p)*scale(0.5)*rotate(dir)*skew(ske)
-                    // For moviepack, there's no translate(-1.5,0,0) offset
+                    // Submit as instanced draw (flushed after RenderAll)
                     float s = 0.5f;
                     float dx = dir.x, dy = dir.y;
                     float sx = ske.x, sy = ske.y;
 
                     rCycleInstance ci{};
-                    // col0
-                    ci.instance.modelMatrix[0]  = s * dx * sx;
-                    ci.instance.modelMatrix[1]  = s * dy * sx;
+                    ci.instance.modelMatrix[0]  = s * dx;
+                    ci.instance.modelMatrix[1]  = s * dy;
                     ci.instance.modelMatrix[2]  = 0;
                     ci.instance.modelMatrix[3]  = 0;
-                    // col1
                     ci.instance.modelMatrix[4]  = s * (-dy * sx);
                     ci.instance.modelMatrix[5]  = s * (dx * sx);
-                    ci.instance.modelMatrix[6]  = s * (-sy);
+                    ci.instance.modelMatrix[6]  = s * sy;
                     ci.instance.modelMatrix[7]  = 0;
-                    // col2
-                    ci.instance.modelMatrix[8]  = s * (-dy * sy);
-                    ci.instance.modelMatrix[9]  = s * (dx * sy);
+                    ci.instance.modelMatrix[8]  = s * (dy * sy);
+                    ci.instance.modelMatrix[9]  = s * (-dx * sy);
                     ci.instance.modelMatrix[10] = s * sx;
                     ci.instance.modelMatrix[11] = 0;
-                    // col3: position (no -1.5 offset for moviepack)
                     ci.instance.modelMatrix[12] = p.x;
                     ci.instance.modelMatrix[13] = p.y;
                     ci.instance.modelMatrix[14] = 0;
@@ -4713,14 +4720,6 @@ void gCycle::Render(const eCamera *cam){
                     ci.geometryKey = customModel->GetMesh().GetMeshId();
                     ci.textureId = RenderGetBoundTexture2D();
                     rSubmitCycleInstance(ci);
-                }
-                else
-                {
-                    PushMatrix();
-                    customTexture->Select();
-                    Color(1,1,1);
-                    customModel->Render();
-                    PopMatrix();
                 }
             }
 
@@ -4777,165 +4776,93 @@ void gCycle::Render(const eCamera *cam){
                 // Each cycle may use different model objects (different moviepacks,
                 // model paths). If any part is missing, render via legacy path once
                 // to populate the cache, then switch to instanced next frame.
-                bool cacheReady = sr_useBatchedCycles
-                    && sr_IsModelMeshCached(body->GetMesh().GetMeshId())
-                    && sr_IsModelMeshCached(rear->GetMesh().GetMeshId())
-                    && sr_IsModelMeshCached(front->GetMesh().GetMeshId());
+                // Prime geometry cache if needed (first frame renders via legacy path)
+                if (!sr_IsModelMeshCached(body->GetMesh().GetMeshId()))
+                { bodyTex->Select(); body->Render(); }
+                if (!sr_IsModelMeshCached(rear->GetMesh().GetMeshId()))
+                { wheelTex->Select(); PushMatrix(); TranslateMatrix(0,0,.73);
+                  REAL mr0[4][4]={{rotationRearWheel.x,0,rotationRearWheel.y,0},{0,1,0,0},{-rotationRearWheel.y,0,rotationRearWheel.x,0},{0,0,0,1}};
+                  MultMatrix(mr0); rear->Render(); PopMatrix(); }
+                if (!sr_IsModelMeshCached(front->GetMesh().GetMeshId()))
+                { wheelTex->Select(); PushMatrix(); TranslateMatrix(1.84,0,.43);
+                  REAL mf0[4][4]={{rotationFrontWheel.x,0,rotationFrontWheel.y,0},{0,1,0,0},{-rotationFrontWheel.y,0,rotationFrontWheel.x,0},{0,0,0,1}};
+                  MultMatrix(mf0); front->Render(); PopMatrix(); }
 
-                if (sr_useBatchedCycles && !cacheReady)
+                // Build model matrix analytically and submit as instanced draws.
+                // All cycles are drawn together after RenderAll via rEndCycleRendering.
+                float s = 0.5f;
+                float dx = dir.x, dy = dir.y;
+                float sx = ske.x, sy = ske.y;
+                float tx = mp ? 0.0f : -1.5f;
+                float offX = tx * dx;
+                float offY = tx * dy;
+
+                auto buildBodyMatrix = [&](float modelMat[16]) {
+                    modelMat[0]  = s * dx;    modelMat[1]  = s * dy;
+                    modelMat[2]  = 0;         modelMat[3]  = 0;
+                    modelMat[4]  = s * (-dy * sx); modelMat[5]  = s * (dx * sx);
+                    modelMat[6]  = s * sy;    modelMat[7]  = 0;
+                    modelMat[8]  = s * (dy * sy);  modelMat[9]  = s * (-dx * sy);
+                    modelMat[10] = s * sx;    modelMat[11] = 0;
+                    modelMat[12] = p.x + s * offX; modelMat[13] = p.y + s * offY;
+                    modelMat[14] = 0;         modelMat[15] = 1;
+                };
+
+                float cr = color_.r_, cg = color_.g_, cb = color_.b_;
+
+                // Body
                 {
-                    // Render via legacy path to populate the cache
-                    bodyTex->Select(); body->Render();
-                    wheelTex->Select();
-                    PushMatrix(); TranslateMatrix(0,0,.73);
-                    REAL mr0[4][4]={{rotationRearWheel.x,0,rotationRearWheel.y,0},{0,1,0,0},{-rotationRearWheel.y,0,rotationRearWheel.x,0},{0,0,0,1}};
-                    MultMatrix(mr0); rear->Render(); PopMatrix();
-                    PushMatrix(); TranslateMatrix(1.84,0,.43);
-                    REAL mf0[4][4]={{rotationFrontWheel.x,0,rotationFrontWheel.y,0},{0,1,0,0},{-rotationFrontWheel.y,0,rotationFrontWheel.x,0},{0,0,0,1}};
-                    MultMatrix(mf0); front->Render(); PopMatrix();
-                }
-
-                if (cacheReady)
-                {
-                    // Instanced path: compute model matrices and submit instances.
-                    // The current modelview stack has: translate(p) * scale(0.5) * rotate(dir) * translate(-1.5,0,0) * skew(ske)
-                    // We need the MODEL matrix only (not the view matrix).
-                    // Build it from the raw transform parameters.
-                    float s = 0.5f;
-                    float dx = dir.x, dy = dir.y;
-                    float sx = ske.x, sy = ske.y;
-                    float tx = mp ? 0.0f : -1.5f;
-
-                    // M = Translate(p) * Scale(s) * Rotate(dir) * Translate(tx,0,0) * Skew(ske)
-                    // Column-major: M[col*4+row]
-                    // Pre-multiply: T*S*R*Tx*Sk
-                    // R*Tx: translate in rotated frame → adds tx*dir to position
-                    // Then scale and translate to world position.
-                    float offX = tx * dx;  // rotated translate offset
-                    float offY = tx * dy;
-
-                    // Base model matrix (body transform), column-major
-                    auto buildBodyMatrix = [&](float modelMat[16]) {
-                        // col0: s * (dx, dy, 0, 0)
-                        modelMat[0]  = s * dx * sx;
-                        modelMat[1]  = s * dy * sx;
-                        modelMat[2]  = 0;
-                        modelMat[3]  = 0;
-                        // col1: s * (-dy*skx + dx*sky, dx*skx + dy*sky, sky, 0) — approximate
-                        // Actually: Rotate(dir) * Skew = [[dx, -dy],[dy, dx]] * [[1,0],[0,skx],[0,-sky]]
-                        // Simplification: skew only affects Y/Z, not X
-                        modelMat[4]  = s * (-dy * sx);
-                        modelMat[5]  = s * (dx * sx);
-                        modelMat[6]  = s * (-sy);
-                        modelMat[7]  = 0;
-                        // col2: skew affects Z axis
-                        modelMat[8]  = s * (-dy * sy);
-                        modelMat[9]  = s * (dx * sy);
-                        modelMat[10] = s * sx;
-                        modelMat[11] = 0;
-                        // col3: position
-                        modelMat[12] = p.x + s * offX;
-                        modelMat[13] = p.y + s * offY;
-                        modelMat[14] = 0;
-                        modelMat[15] = 1;
-                    };
-
-                    float cr = color_.r_, cg = color_.g_, cb = color_.b_;
-
-                    // Body instance
-                    {
-                        rCycleInstance ci{};
-                        buildBodyMatrix(ci.instance.modelMatrix);
-                        ci.instance.color[0] = cr; ci.instance.color[1] = cg;
-                        ci.instance.color[2] = cb; ci.instance.color[3] = 1.0f;
-                        bodyTex->Select();
-                        ci.geometryKey = body->GetMesh().GetMeshId();
-                        ci.textureId = RenderGetBoundTexture2D();
-                        rSubmitCycleInstance(ci);
-                    }
-
-                    // Rear wheel instance: body * translate(0,0,0.73) * rotateWheel
-                    {
-                        rCycleInstance ci{};
-                        buildBodyMatrix(ci.instance.modelMatrix);
-                        // Apply translate(0,0,0.73) and wheel rotation to the matrix
-                        // Simplified: add 0.73 * col2 to col3 (translate along local Z)
-                        ci.instance.modelMatrix[12] += 0.73f * ci.instance.modelMatrix[8];
-                        ci.instance.modelMatrix[13] += 0.73f * ci.instance.modelMatrix[9];
-                        ci.instance.modelMatrix[14] += 0.73f * ci.instance.modelMatrix[10];
-                        // Wheel rotation around local Y axis (XZ plane rotation)
-                        // Apply to col0 and col2
-                        float rwx = rotationRearWheel.x, rwy = rotationRearWheel.y;
-                        float c0[3] = {ci.instance.modelMatrix[0], ci.instance.modelMatrix[1], ci.instance.modelMatrix[2]};
-                        float c2[3] = {ci.instance.modelMatrix[8], ci.instance.modelMatrix[9], ci.instance.modelMatrix[10]};
-                        for (int i = 0; i < 3; i++) {
-                            ci.instance.modelMatrix[i]   = c0[i] * rwx + c2[i] * rwy;    // new col0
-                            ci.instance.modelMatrix[8+i] = -c0[i] * rwy + c2[i] * rwx;   // new col2
-                        }
-                        ci.instance.color[0] = cr; ci.instance.color[1] = cg;
-                        ci.instance.color[2] = cb; ci.instance.color[3] = 1.0f;
-                        wheelTex->Select();
-                        ci.geometryKey = rear->GetMesh().GetMeshId();
-                        ci.textureId = RenderGetBoundTexture2D();
-                        rSubmitCycleInstance(ci);
-                    }
-
-                    // Front wheel instance: body * translate(1.84,0,0.43) * rotateWheel
-                    {
-                        rCycleInstance ci{};
-                        buildBodyMatrix(ci.instance.modelMatrix);
-                        // translate(1.84, 0, 0.43) in local frame
-                        ci.instance.modelMatrix[12] += 1.84f * ci.instance.modelMatrix[0] + 0.43f * ci.instance.modelMatrix[8];
-                        ci.instance.modelMatrix[13] += 1.84f * ci.instance.modelMatrix[1] + 0.43f * ci.instance.modelMatrix[9];
-                        ci.instance.modelMatrix[14] += 1.84f * ci.instance.modelMatrix[2] + 0.43f * ci.instance.modelMatrix[10];
-                        // Front wheel rotation
-                        float fwx = rotationFrontWheel.x, fwy = rotationFrontWheel.y;
-                        float c0[3] = {ci.instance.modelMatrix[0], ci.instance.modelMatrix[1], ci.instance.modelMatrix[2]};
-                        float c2[3] = {ci.instance.modelMatrix[8], ci.instance.modelMatrix[9], ci.instance.modelMatrix[10]};
-                        for (int i = 0; i < 3; i++) {
-                            ci.instance.modelMatrix[i]   = c0[i] * fwx + c2[i] * fwy;
-                            ci.instance.modelMatrix[8+i] = -c0[i] * fwy + c2[i] * fwx;
-                        }
-                        ci.instance.color[0] = cr; ci.instance.color[1] = cg;
-                        ci.instance.color[2] = cb; ci.instance.color[3] = 1.0f;
-                        ci.geometryKey = front->GetMesh().GetMeshId();
-                        ci.textureId = RenderGetBoundTexture2D();
-                        rSubmitCycleInstance(ci);
-                    }
-                }
-                else
-                {
-                    // Legacy path: individual draws
+                    rCycleInstance ci{};
+                    buildBodyMatrix(ci.instance.modelMatrix);
+                    ci.instance.color[0] = cr; ci.instance.color[1] = cg;
+                    ci.instance.color[2] = cb; ci.instance.color[3] = 1.0f;
                     bodyTex->Select();
-                    body->Render();
+                    ci.geometryKey = body->GetMesh().GetMeshId();
+                    ci.textureId = RenderGetBoundTexture2D();
+                    rSubmitCycleInstance(ci);
+                }
 
+                // Rear wheel: body * translate(0,0,0.73) * rotateWheel
+                {
+                    rCycleInstance ci{};
+                    buildBodyMatrix(ci.instance.modelMatrix);
+                    ci.instance.modelMatrix[12] += 0.73f * ci.instance.modelMatrix[8];
+                    ci.instance.modelMatrix[13] += 0.73f * ci.instance.modelMatrix[9];
+                    ci.instance.modelMatrix[14] += 0.73f * ci.instance.modelMatrix[10];
+                    float rwx = rotationRearWheel.x, rwy = rotationRearWheel.y;
+                    float c0[3] = {ci.instance.modelMatrix[0], ci.instance.modelMatrix[1], ci.instance.modelMatrix[2]};
+                    float c2[3] = {ci.instance.modelMatrix[8], ci.instance.modelMatrix[9], ci.instance.modelMatrix[10]};
+                    for (int i = 0; i < 3; i++) {
+                        ci.instance.modelMatrix[i]   = c0[i] * rwx + c2[i] * rwy;
+                        ci.instance.modelMatrix[8+i] = -c0[i] * rwy + c2[i] * rwx;
+                    }
+                    ci.instance.color[0] = cr; ci.instance.color[1] = cg;
+                    ci.instance.color[2] = cb; ci.instance.color[3] = 1.0f;
                     wheelTex->Select();
+                    ci.geometryKey = rear->GetMesh().GetMeshId();
+                    ci.textureId = RenderGetBoundTexture2D();
+                    rSubmitCycleInstance(ci);
+                }
 
-                    PushMatrix();
-                    TranslateMatrix(0,0,.73);
-
-                    REAL mr[4][4]={{rotationRearWheel.x,0,rotationRearWheel.y,0},
-                                   {0,1,0,0},
-                                   {-rotationRearWheel.y,0,rotationRearWheel.x,0},
-                                   {0,0,0,1}};
-
-                    MultMatrix(mr);
-
-                    rear->Render();
-                    PopMatrix();
-
-                    PushMatrix();
-                    TranslateMatrix(1.84,0,.43);
-
-                    REAL mf[4][4]={{rotationFrontWheel.x,0,rotationFrontWheel.y,0},
-                                   {0,1,0,0},
-                                   {-rotationFrontWheel.y,0,rotationFrontWheel.x,0},
-                                   {0,0,0,1}};
-
-                    MultMatrix(mf);
-
-                    front->Render();
-                    PopMatrix();
+                // Front wheel: body * translate(1.84,0,0.43) * rotateWheel
+                {
+                    rCycleInstance ci{};
+                    buildBodyMatrix(ci.instance.modelMatrix);
+                    ci.instance.modelMatrix[12] += 1.84f * ci.instance.modelMatrix[0] + 0.43f * ci.instance.modelMatrix[8];
+                    ci.instance.modelMatrix[13] += 1.84f * ci.instance.modelMatrix[1] + 0.43f * ci.instance.modelMatrix[9];
+                    ci.instance.modelMatrix[14] += 1.84f * ci.instance.modelMatrix[2] + 0.43f * ci.instance.modelMatrix[10];
+                    float fwx = rotationFrontWheel.x, fwy = rotationFrontWheel.y;
+                    float c0[3] = {ci.instance.modelMatrix[0], ci.instance.modelMatrix[1], ci.instance.modelMatrix[2]};
+                    float c2[3] = {ci.instance.modelMatrix[8], ci.instance.modelMatrix[9], ci.instance.modelMatrix[10]};
+                    for (int i = 0; i < 3; i++) {
+                        ci.instance.modelMatrix[i]   = c0[i] * fwx + c2[i] * fwy;
+                        ci.instance.modelMatrix[8+i] = -c0[i] * fwy + c2[i] * fwx;
+                    }
+                    ci.instance.color[0] = cr; ci.instance.color[1] = cg;
+                    ci.instance.color[2] = cb; ci.instance.color[3] = 1.0f;
+                    ci.geometryKey = front->GetMesh().GetMeshId();
+                    ci.textureId = RenderGetBoundTexture2D();
+                    rSubmitCycleInstance(ci);
                 }
             }
             
@@ -4961,6 +4888,9 @@ void gCycle::Render(const eCamera *cam){
         //RenderDisableState(GL_TEXTURE);
         RenderDisableState(rCapability::Texture2D);
         Color(1,1,1);
+
+        // Restore render context (was set to Game3D_Cycles at cycle render start)
+        sr_SetRenderContext(prevRenderCtx);
 
         {
             bool renderPyramid = false;

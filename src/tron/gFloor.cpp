@@ -60,6 +60,7 @@ fb("FLOOR_BLUE",floor_blue);
 #include "rVertex.h"
 #include "rRenderQueue.h"
 #include "rRenderBucket.h"
+#include "gMoviepack.h"
 #include <vector>
 
 #include "nConfig.h"
@@ -138,22 +139,26 @@ public:
     }
 
 
+    // For each floor texture: prefer the moviepack-shipped variant when the
+    // active pack actually provides the file, fall back to the default
+    // textures/<file>.png otherwise. Lets minimal moviepacks (e.g. shader-
+    // only customisations) skip shipping textures they don't touch.
     virtual void SelectFloorTexture(){
-        if (sg_MoviePack())
+        if (sg_MoviepackHasFile("floor.png"))
             ArmageTron_mp_floor.Select();
         else
             ArmageTron_floor.Select();
     }
 
     virtual void SelectFloorTextureA(){
-        if (sg_MoviePack())
+        if (sg_MoviepackHasFile("floor_a.png"))
             mp_floor_a.Select();
         else
             floor_a.Select();
     }
 
     virtual void SelectFloorTextureB(){
-        if (sg_MoviePack())
+        if (sg_MoviepackHasFile("floor_b.png"))
             mp_floor_b.Select();
         else
             floor_b.Select();

@@ -24,7 +24,7 @@ layout(push_constant) uniform PushConstants {
 layout(location = 0) in  vec2 vTexCoord;
 layout(location = 0) out vec4 fragColor;
 
-// Parameter slot assignments (must match bloom.meta):
+// Parameter slot assignments (must match bloom.lua):
 //   FP(0) = intensity   (multiplier applied to the extracted glow)
 //   FP(1) = threshold   (alpha cutoff from emissive attachment)
 #define P_INTENSITY FP(0)

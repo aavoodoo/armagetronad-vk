@@ -80,8 +80,7 @@ shaders/                             # OPTIONAL — shader overrides
     uber.frag                        #   full fragment shader override (advanced)
     postprocess/                     #   post-processing effects
         <effect_name>/
-            <effect_name>.pipeline
-            <effect_name>.meta
+            <effect_name>.lua        #   render graph declaration
             <effect_name>.frag
             ...
 
@@ -230,8 +229,7 @@ shaders/
     uber_hooks.glsl
     postprocess/
         myeffect/
-            myeffect.pipeline
-            myeffect.meta
+            myeffect.lua
             myeffect.frag
             myeffect_blur.frag
 ```
@@ -255,8 +253,7 @@ shaders/
     uber_hooks.glsl
     postprocess/
         bloom/
-            bloom.pipeline
-            bloom.meta
+            bloom.lua
             bloom_extract.frag
             bloom_blur_h.frag
             bloom_blur_v.frag
@@ -346,5 +343,6 @@ Unzip any of these to see working examples of the format.
 ## 14. Related documentation
 
 - `documentation/uber-shader-hooks.md` — Per-component scene shading hooks (color + emissive)
-- `documentation/postprocess-authoring.md` — Post-processing pipeline, framegraph DSL, `.meta` parameters
+- `documentation/postprocess-authoring.md` — Post-processing pipeline, Lua render graph API, parameters
+- `documentation/postprocess-tutorial.md` — Step-by-step tutorial: passthrough → depthviz → bloom
 - `documentation/directories.txt` — Data path search order and directory layout

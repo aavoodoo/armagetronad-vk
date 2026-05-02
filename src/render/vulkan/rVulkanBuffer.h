@@ -44,7 +44,7 @@ struct rVulkanBuffer
     VkDeviceSize   size       = 0;
     void*          mapped     = nullptr;  // Non-null if persistently mapped
 
-    bool IsValid() const { return buffer != VK_NULL_HANDLE; }
+    [[nodiscard]] bool IsValid() const { return buffer != VK_NULL_HANDLE; }
 };
 
 //! Vulkan buffer creation and management utilities
@@ -52,7 +52,7 @@ class rVulkanBufferManager
 {
 public:
     //! Create a buffer with the given usage and memory properties
-    static bool CreateBuffer(rVulkanContext& ctx,
+    [[nodiscard]] static bool CreateBuffer(rVulkanContext& ctx,
                              VkDeviceSize size,
                              VkBufferUsageFlags usage,
                              VkMemoryPropertyFlags memProps,
@@ -62,19 +62,19 @@ public:
     static void DestroyBuffer(VmaAllocator allocator, rVulkanBuffer& buffer);
 
     //! Create a staging buffer (host visible + coherent) with data
-    static bool CreateStagingBuffer(rVulkanContext& ctx,
+    [[nodiscard]] static bool CreateStagingBuffer(rVulkanContext& ctx,
                                     const void* data, VkDeviceSize size,
                                     rVulkanBuffer& outBuffer);
 
     //! Create a device-local buffer and upload data via staging
-    static bool CreateDeviceBuffer(rVulkanContext& ctx,
+    [[nodiscard]] static bool CreateDeviceBuffer(rVulkanContext& ctx,
                                    VkCommandPool cmdPool,
                                    const void* data, VkDeviceSize size,
                                    VkBufferUsageFlags usage,
                                    rVulkanBuffer& outBuffer);
 
     //! Upload data to a host-visible buffer (map → memcpy → unmap, or direct if persistently mapped)
-    static bool UploadToBuffer(VmaAllocator allocator, rVulkanBuffer& buffer,
+    [[nodiscard]] static bool UploadToBuffer(VmaAllocator allocator, rVulkanBuffer& buffer,
                                const void* data, VkDeviceSize size, VkDeviceSize offset = 0);
 
     //! Execute a one-shot command buffer synchronously (blocks until GPU is done).

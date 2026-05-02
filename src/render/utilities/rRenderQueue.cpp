@@ -29,6 +29,7 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 
 #ifndef DEDICATED
 #include "rRender.h"              // For rRenderer
+#include "rRendererState.h"       // For sr_GetCameraWorldPos
 #include "rScreen.h"              // For sr_screenWidth/Height
 #endif
 
@@ -339,11 +340,82 @@ void rRenderQueue::ExecutePhase(rRenderPhase phase)
             }
         }
 
-        // Sort by state key (opaque first, then by texture)
-        std::sort(phaseData.sortedBuckets.begin(), phaseData.sortedBuckets.end(),
-                  [](const rRenderBucket* a, const rRenderBucket* b) {
-                      return a->GetState() < b->GetState();
-                  });
+        // Phase-aware sorting policy:
+        //   - Transparent: alpha blend (src*a + dst*(1-a)) depends on the
+        //     pixel underneath, so overlapping translucent surfaces
+        //     (zones) need BACK-TO-FRONT order to composite correctly.
+        //   - OpaqueStatic / OpaqueDynamic: depth-test resolves visibility,
+        //     but FRONT-TO-BACK lets the GPU's early-Z reject occluded
+        //     fragments before shading them. Cheap CPU sort, free GPU win
+        //     in fragment-bound scenes. State-batching is sacrificed but
+        //     bucket counts in this engine are small (~5-15 typical).
+        //   - Effects: additive blend is commutative AND depth-tested, so
+        //     order doesn't matter; keep state-sort for batching.
+        //   - HUD / Sky: no depth, draw in submission order via state-sort.
+        enum class SortMode { State, FrontToBack, BackToFront };
+        SortMode sortMode = SortMode::State;
+        if (phase == rRenderPhase::Transparent)
+            sortMode = SortMode::BackToFront;
+        else if (phase == rRenderPhase::OpaqueStatic ||
+                 phase == rRenderPhase::OpaqueDynamic)
+            sortMode = SortMode::FrontToBack;
+
+        if (sortMode != SortMode::State)
+        {
+            // Pull the current camera world position once. This is the
+            // value pushed by eCamera::Render via sr_SetCameraWorldPos;
+            // for HUD-only callers it stays at its last value (harmless,
+            // we only sort when geometry exists in the phase).
+            float camX = 0.0f, camY = 0.0f, camZ = 0.0f;
+            sr_GetCameraWorldPos(camX, camY, camZ);
+
+            // Compute one squared-distance key per bucket from its
+            // vertex centroid. O(N) over phase vertices — typically a few
+            // thousand at most. Sorting is O(B log B) over bucket count.
+            auto bucketDistSq = [camX, camY, camZ](const rRenderBucket* b) -> float {
+                const auto& tri  = b->GetTriangleVertices();
+                const auto& line = b->GetLineVertices();
+                const size_t n = tri.size() + line.size();
+                if (n == 0) return 0.0f;
+                double sx = 0.0, sy = 0.0, sz = 0.0;
+                for (const auto& v : tri)  { sx += v.position[0]; sy += v.position[1]; sz += v.position[2]; }
+                for (const auto& v : line) { sx += v.position[0]; sy += v.position[1]; sz += v.position[2]; }
+                const float cx = static_cast<float>(sx / n);
+                const float cy = static_cast<float>(sy / n);
+                const float cz = static_cast<float>(sz / n);
+                const float dx = cx - camX, dy = cy - camY, dz = cz - camZ;
+                return dx*dx + dy*dy + dz*dz;
+            };
+
+            // Decorate-sort-undecorate to avoid recomputing the centroid
+            // on every comparison.
+            std::vector<std::pair<float, rRenderBucket*>> keyed;
+            keyed.reserve(phaseData.sortedBuckets.size());
+            for (rRenderBucket* b : phaseData.sortedBuckets)
+                keyed.emplace_back(bucketDistSq(b), b);
+
+            const bool b2f = (sortMode == SortMode::BackToFront);
+            std::sort(keyed.begin(), keyed.end(),
+                      [b2f](const auto& a, const auto& b) {
+                          // Transparent: far first (composite closer on top).
+                          // Opaque: near first (early-Z rejects occluded).
+                          return b2f ? (a.first > b.first) : (a.first < b.first);
+                      });
+
+            phaseData.sortedBuckets.clear();
+            for (auto& kv : keyed)
+                phaseData.sortedBuckets.push_back(kv.second);
+        }
+        else
+        {
+            // Sort by state key (opaque first, then by texture) so adjacent
+            // buckets share pipeline / texture state and the renderer can
+            // batch binds.
+            std::sort(phaseData.sortedBuckets.begin(), phaseData.sortedBuckets.end(),
+                      [](const rRenderBucket* a, const rRenderBucket* b) {
+                          return a->GetState() < b->GetState();
+                      });
+        }
         phaseData.sortDirty = false;
     }
 

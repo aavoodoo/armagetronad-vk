@@ -114,7 +114,7 @@ class vkRenderer : public rRenderer
 {
 public:
     vkRenderer();
-    virtual ~vkRenderer();
+    ~vkRenderer() override;
 
     //! Initialize the Vulkan renderer
     [[nodiscard]] bool Init(SDL_Window* window);
@@ -207,7 +207,6 @@ public:
     void EnableState(int capability) override;
     void DisableState(int capability) override;
     void BlendFunc(int sfactor, int dfactor) override;
-    void DepthFunc(int func) override;
     void DepthMask(bool write) override;
     void FrontFace(int mode) override;
     void PolygonOffset(REAL factor, REAL units) override;
@@ -330,7 +329,6 @@ private:
     bool cullFaceEnabled_;
     bool frontFaceCW_;       // true = CW front face (default for Y-flipped Vulkan)
     int blendSrc_, blendDst_;
-    int depthFunc_;
     float cachedFrameTime_;  // tSysTimeFloat() cached once per frame
 
     // Bound texture (shadow cache)

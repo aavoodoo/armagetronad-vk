@@ -72,13 +72,13 @@ public:
     ~rModelMesh();
 
     //! Check if mesh is valid and ready for rendering
-    bool IsValid() const { return valid_; }
+    [[nodiscard]] bool IsValid() const { return valid_; }
 
     //! Stable mesh identity for renderer cache keying.
     //! Assigned from a monotonic counter at construction and on every Build()
     //! call, so each distinct geometry gets a unique ID even if the object is
     //! reused at the same address after destruction. Never 0.
-    uint64_t GetMeshId() const { return meshId_; }
+    [[nodiscard]] uint64_t GetMeshId() const { return meshId_; }
 
     //! Build mesh from vertex and index data
     //! @param vertices Interleaved vertex data
@@ -99,10 +99,10 @@ public:
     void Release();
 
     //! Get number of triangles
-    int GetTriangleCount() const { return triangleCount_; }
+    [[nodiscard]] int GetTriangleCount() const { return triangleCount_; }
 
     //! Get number of vertices
-    int GetVertexCount() const { return vertexCount_; }
+    [[nodiscard]] int GetVertexCount() const { return vertexCount_; }
 
 private:
     rModelMesh(const rModelMesh&) = delete;
@@ -125,7 +125,7 @@ private:
 
 public:
     //! Get CPU vertices (for instanced rendering cache key)
-    const std::vector<rModelVertex>& GetVertices() const { return cpuVertices_; }
+    [[nodiscard]] const std::vector<rModelVertex>& GetVertices() const { return cpuVertices_; }
 };
 
 #endif // RMODELMESH_H

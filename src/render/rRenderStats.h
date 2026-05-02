@@ -186,7 +186,7 @@ public:
     static rRenderStats& Instance();
 
     //! Check if statistics collection is enabled
-    bool IsEnabled() const { return enabled_; }
+    [[nodiscard]] bool IsEnabled() const { return enabled_; }
 
     //! Enable/disable statistics collection
     void SetEnabled(bool enabled) { enabled_ = enabled; }
@@ -234,19 +234,19 @@ public:
     //-------------------------------------------------------------------------
 
     //! Get statistics for the last completed frame
-    const rFrameStats& GetLastFrameStats() const { return lastFrame_; }
+    [[nodiscard]] const rFrameStats& GetLastFrameStats() const { return lastFrame_; }
 
     //! Get statistics for the current (incomplete) frame
-    const rFrameStats& GetCurrentFrameStats() const { return currentFrame_; }
+    [[nodiscard]] const rFrameStats& GetCurrentFrameStats() const { return currentFrame_; }
 
     //! Get average statistics over recent frames
-    rFrameStats GetAverageStats(int frameCount = 60) const;
+    [[nodiscard]] rFrameStats GetAverageStats(int frameCount = 60) const;
 
     //! Get current FPS (based on rolling average)
-    float GetFPS() const;
+    [[nodiscard]] float GetFPS() const;
 
     //! Get frame number
-    uint64_t GetFrameNumber() const { return frameNumber_; }
+    [[nodiscard]] uint64_t GetFrameNumber() const { return frameNumber_; }
 
     //-------------------------------------------------------------------------
     // Debug rendering
@@ -257,15 +257,15 @@ public:
 
     //! Set overlay visibility
     void SetOverlayVisible(bool visible) { overlayVisible_ = visible; }
-    bool IsOverlayVisible() const { return overlayVisible_; }
+    [[nodiscard]] bool IsOverlayVisible() const { return overlayVisible_; }
 
     //! Set overdraw visualization mode
     void SetOverdrawMode(bool enabled) { overdrawMode_ = enabled; }
-    bool IsOverdrawMode() const { return overdrawMode_; }
+    [[nodiscard]] bool IsOverdrawMode() const { return overdrawMode_; }
 
     //! Set wireframe mode
     void SetWireframeMode(bool enabled) { wireframeMode_ = enabled; }
-    bool IsWireframeMode() const { return wireframeMode_; }
+    [[nodiscard]] bool IsWireframeMode() const { return wireframeMode_; }
 
 private:
     rRenderStats();
@@ -303,7 +303,7 @@ private:
     bool wireframeMode_;
 
     // Get current time in milliseconds
-    double GetTimeMs() const;
+    [[nodiscard]] double GetTimeMs() const;
 };
 
 //=============================================================================

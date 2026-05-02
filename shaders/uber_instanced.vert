@@ -65,14 +65,11 @@ void main()
 {
     mat4 model = mat4(aModelCol0, aModelCol1, aModelCol2, aModelCol3);
 
-    // Full clip-space position: P * V * M * pos
-    vec4 clipPos = pc.uMVP * model * vec4(aPosition, 1.0);
-
-    // Vulkan clip space: Y is inverted vs OpenGL
-    clipPos.y = -clipPos.y;
-    // Vulkan depth range [0,1]; GLM/OpenGL produces [-w,+w] — remap
-    clipPos.z = (clipPos.z + clipPos.w) * 0.5;
-    gl_Position = clipPos;
+    // Full clip-space position: P * V * M * pos.
+    // GL→Vulkan depth remap + reverse-Z baked into the projection matrix
+    // (VkClipReverseZ in rVulkanRender.cpp). Y-flip handled by the
+    // rasterizer via VK_KHR_maintenance1 negative-height viewport.
+    gl_Position = pc.uMVP * model * vec4(aPosition, 1.0);
 
     vModelPos = aPosition;
 

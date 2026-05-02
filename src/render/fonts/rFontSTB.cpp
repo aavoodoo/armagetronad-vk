@@ -196,6 +196,15 @@ bool rFontSTB::Load(const char* path, int size)
             new rFontAtlasMTSDF(INITIAL_ATLAS_WIDTH, INITIAL_ATLAS_HEIGHT, MAX_ATLAS_SIZE));
     }
 
+    // Batch mode: accumulate all glyph data on the CPU side during the
+    // preload loop.  No GPU uploads or VkImage re-creations happen until
+    // endBatch(), which does a single synchronous full-texture upload.
+    // This eliminates the 1-frame flash caused by atlas grows creating a
+    // new VkImage while subsequent glyph TexSubImage2D calls are deferred.
+    if (atlasSDF_)        atlasSDF_->beginBatch();
+    else if (atlasMSDF_)  atlasMSDF_->beginBatch();
+    else if (atlasMTSDF_) atlasMTSDF_->beginBatch();
+
     // Pre-load ASCII characters synchronously for better performance
     initializing_ = true;
     for (unsigned int c = 32; c < 127; ++c)
@@ -203,6 +212,11 @@ bool rFontSTB::Load(const char* path, int size)
         LoadGlyph(c);
     }
     initializing_ = false;  // Switch to async mode for on-demand glyphs
+
+    // End batch: upload the complete atlas to the GPU in one shot.
+    if (atlasSDF_)        atlasSDF_->endBatch();
+    else if (atlasMSDF_)  atlasMSDF_->endBatch();
+    else if (atlasMTSDF_) atlasMTSDF_->endBatch();
 
     // Flush texture uploads to GPU before marking font as valid
     RenderFlush();
@@ -707,7 +721,11 @@ bool rFontSTB::LoadMSDFGlyph(unsigned int codepoint)
 
     if (!packed)
     {
-        glyphCache_[codepoint] = cached;
+        // Only cache as NOT_LOADED if the atlas truly can't grow (max size).
+        // If grow was deferred (atlasGrowPending_), leave the glyph uncached
+        // so LoadMSDFGlyph retries after BeginFrame() performs the grow.
+        if (!atlasGrowPending_)
+            glyphCache_[codepoint] = cached;
         return false;
     }
 
@@ -734,6 +752,9 @@ unsigned int rFontSTB::GetActiveTextureId() const
 // mid-frame would corrupt already-batched vertex UV coordinates.
 void rFontSTB::BeginFrame()
 {
+    // Upload any glyphs completed by background MSDF generation threads.
+    ProcessPendingGlyphs();
+
     if (!atlasGrowPending_) return;
     atlasGrowPending_ = false;
 

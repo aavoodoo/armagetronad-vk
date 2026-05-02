@@ -44,7 +44,7 @@ class rVulkanContext;
 class rVulkanSwapchain;
 class rVulkanPipelineManager;
 
-//! Metadata for a single tunable shader parameter, parsed from a .meta file.
+//! Metadata for a single tunable shader parameter declared in the effect's .lua script.
 struct rPostProcessParam
 {
     enum Type { Float, Int, Vec4 };
@@ -74,7 +74,7 @@ enum class rPostProcessFormat
     R8,       //!< VK_FORMAT_R8_UNORM — single-channel mask
 };
 
-//! One intermediate render target declared by an effect's .pipeline file.
+//! One intermediate render target declared by an effect's .lua script.
 //! Resolution is expressed as a fraction of the swapchain extent, so the
 //! pool automatically reallocates on window resize without the effect
 //! having to know about pixel sizes.
@@ -85,9 +85,9 @@ struct rPostProcessResourceDecl
     float              scale  = 1.0f; // swapchain-relative (0.5 = half res)
 };
 
-//! One sampler binding declaration parsed from a PASS entry's SAMPLER line.
+//! One sampler binding declaration from an effect's .lua script.
 //! `source` is either an intermediate resource name declared earlier in the
-//! .pipeline file, or one of the built-in names (SCENE_COLOR, SCENE_EMISSIVE,
+//! script, or one of the built-in names (SCENE_COLOR, SCENE_EMISSIVE,
 //! SCENE_DEPTH). Resolved to a concrete VkImageView at effect load time.
 struct rPostProcessSamplerDecl
 {
@@ -95,8 +95,8 @@ struct rPostProcessSamplerDecl
     std::string source;
 };
 
-//! One pass declared by an effect's .pipeline file.
-//! `shader` is a basename resolved to shaders/postprocess/<effect>/<shader>.frag.spv
+//! One pass declared by an effect's .lua script.
+//! `shader` is a basename resolved to shaders/postprocess/<effect>/<shader>.frag
 //! `target` is either an intermediate resource name or "SWAPCHAIN" (the final
 //! composite pass).
 struct rPostProcessPassDecl
@@ -106,7 +106,7 @@ struct rPostProcessPassDecl
     std::vector<rPostProcessSamplerDecl> samplers;
 };
 
-//! Fully parsed .pipeline file. Produced by ParsePipelineFile().
+//! Fully built effect descriptor, produced by running the effect's .lua script.
 struct rPostProcessPipelineDesc
 {
     std::vector<rPostProcessResourceDecl> resources;
@@ -114,7 +114,7 @@ struct rPostProcessPipelineDesc
 };
 
 //! Owns a set of named intermediate render targets for a post-process effect.
-//! The pool is populated from the effect's .pipeline RESOURCE declarations at
+//! The pool is populated from the effect's .lua RESOURCE declarations at
 //! effect load time and reallocated on swapchain resize. Each resource owns its
 //! VkImage, memory, and view. Destruction is idempotent — safe to call multiple
 //! times and on partially-built pools after an allocation failure.
@@ -144,10 +144,10 @@ public:
     void Destroy(VmaAllocator allocator, VkDevice device);
 
     //! Look up a resource by name. Returns nullptr if not found.
-    const Resource* Get(const std::string& name) const;
+    [[nodiscard]] const Resource* Get(const std::string& name) const;
 
     //! Expose the map for iteration (descriptor set binding, etc.).
-    const std::unordered_map<std::string, Resource>& All() const { return resources_; }
+    [[nodiscard]] const std::unordered_map<std::string, Resource>& All() const { return resources_; }
 
 private:
     std::unordered_map<std::string, Resource> resources_;
@@ -173,7 +173,6 @@ struct rPostProcessPass
     bool                  targetsSwapchain = false;
     uint32_t              samplerCount   = 0; // number of bindings populated
 
-    // Debug: source shader and target name from the .pipeline file.
     std::string           debugShader;
     std::string           debugTarget;
 };
@@ -380,15 +379,15 @@ private:
 
     // --- Per-effect state ---
 
-    //! One loaded effect: parsed pipeline descriptor, allocated intermediate
+    //! One loaded effect: descriptor built from .lua script, allocated intermediate
     //! render targets, per-pass GPU resources, tunable parameters, and a
     //! per-effect descriptor pool owning the pass descriptor sets.
     struct Effect
     {
-        rPostProcessPipelineDesc      desc;          // parsed .pipeline file
+        rPostProcessPipelineDesc      desc;          // built from .lua script
         rPostProcessResourcePool      pool;          // intermediate render targets
-        std::vector<rPostProcessPass> passes;        // one per PASS entry, execution order
-        std::vector<rPostProcessParam> params;       // parsed .meta file
+        std::vector<rPostProcessPass> passes;        // one per pass, execution order
+        std::vector<rPostProcessParam> params;       // declared in .lua script
         VkDescriptorPool              descriptorPool = VK_NULL_HANDLE;
     };
 
@@ -397,12 +396,11 @@ private:
     void SeedEffectDefaults(const Effect& ef);
 
     // Load an effect on demand. Returns a pointer into the effects_ map, or
-    // nullptr on failure. The loader:
-    //   1. Parses the effect's .pipeline file (or synthesizes a default 1-pass
-    //      descriptor if missing — reads SCENE_COLOR+SCENE_DEPTH, writes SWAPCHAIN)
+    // nullptr on failure (script not found, syntax error, or GPU resource
+    // allocation failure). The loader:
+    //   1. Runs the effect's .lua script via tLuaState
     //   2. Allocates intermediate render targets from the pool
-    //   3. Builds one rPostProcessPass per PASS entry
-    //   4. Parses the effect's .meta file into params (missing is OK)
+    //   3. Builds one rPostProcessPass per declared pass
     Effect* EnsureEffectLoaded(const std::string& name);
 
     // Build one pass (shader + render pass + framebuffer + pipeline + descriptor
@@ -435,18 +433,6 @@ private:
 
     // Destroy a single effect's owned Vulkan objects and clear its state.
     void DestroyEffect(Effect& ef);
-
-    // Parse an effect's .meta sidecar file. Missing file is OK — just leaves
-    // the param list empty.
-    static void ParseMetaFile(const std::string& path,
-                              std::vector<rPostProcessParam>& outParams);
-
-    // Parse an effect's .pipeline file into a descriptor. Returns false on
-    // parse failure with the error in outError. Missing file is a caller
-    // decision — handled by EnsureEffectLoaded as a synthesized default.
-    static bool ParsePipelineFile(const std::string& path,
-                                  rPostProcessPipelineDesc& outDesc,
-                                  std::string& outError);
 
     std::unordered_map<std::string, Effect> effects_;
     std::string activeEffect_ = "passthrough";

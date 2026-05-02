@@ -49,15 +49,16 @@ VkShaderModule rVulkanShader::LoadFromFile(VkDevice device, const char* path)
         return VK_NULL_HANDLE;
     }
 
-    return LoadFromMemory(device, reinterpret_cast<const uint32_t*>(code.data()), code.size());
+    return LoadFromMemory(device, std::span<const uint32_t>{
+        reinterpret_cast<const uint32_t*>(code.data()), code.size() / sizeof(uint32_t)});
 }
 
-VkShaderModule rVulkanShader::LoadFromMemory(VkDevice device, const uint32_t* code, size_t sizeBytes)
+VkShaderModule rVulkanShader::LoadFromMemory(VkDevice device, std::span<const uint32_t> code)
 {
     VkShaderModuleCreateInfo createInfo{};
     createInfo.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
-    createInfo.codeSize = sizeBytes;
-    createInfo.pCode = code;
+    createInfo.codeSize = code.size_bytes();
+    createInfo.pCode = code.data();
 
     VkShaderModule module;
     if (vkCreateShaderModule(device, &createInfo, nullptr, &module) != VK_SUCCESS)
@@ -263,7 +264,7 @@ VkShaderModule rVulkanShader::CompileFromFile(
     auto spirv = CompileGLSLFromFile(path, stage, includePaths, outError);
     if (spirv.empty())
         return VK_NULL_HANDLE;
-    return LoadFromMemory(device, spirv.data(), spirv.size() * sizeof(uint32_t));
+    return LoadFromMemory(device, spirv);
 }
 
 #endif // HAVE_SHADERC_SHADERC_HPP

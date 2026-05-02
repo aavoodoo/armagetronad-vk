@@ -30,6 +30,7 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 
 #include "gWall.h"
 #include "gStuff.h"
+#include "gMoviepack.h"
 #include "eGrid.h"
 #include "eWall.h"
 #include "math.h"
@@ -193,7 +194,11 @@ static void gWallRim_helper(eCoord p1,eCoord p2,REAL tBeg,REAL tEnd,REAL h,
                             std::vector<rVertex20> wallQuads[5], int &texBucket){
 
     int bucket = 4; // default texture
-    if (sg_MoviePack()){
+    // Moviepack rim-wall buckets (0..3) only kick in when the active pack
+    // actually ships moviepack/rim_wall_a.png. A minimal pack that customises
+    // shaders only (e.g. customGouraud) falls through to bucket 4 and uses
+    // the default rim wall texture instead of rendering missing.
+    if (sg_MoviepackHasFile("rim_wall_a.png")){
         int t=int(floor((tBeg+tEnd)/2));
         tBeg-=t;
         tEnd-=t;
@@ -363,7 +368,9 @@ void gWallRim::RenderReal(const eCamera *cam){
         bool transparency = sg_bugTransparency || ( sg_bugTransparencyDemand && renderHeight_ < height );
         REAL h = transparency ? height : renderHeight_;
 
-      if (sg_MoviePack()){
+      // Same gate as the bucket logic above: only use moviepack stretch
+      // values when the moviepack actually provides rim wall textures.
+      if (sg_MoviepackHasFile("rim_wall_a.png")){
             X_SCALE=sg_MPRimStretchX;
             Z_SCALE=sg_MPRimStretchY;
         }
@@ -523,7 +530,9 @@ void gWallRim::RenderReal(const eCamera *cam){
             uint8_t wb = static_cast<uint8_t>(rwb * 255.0f);
             int texBucket = 0;
 
-            if (sg_MoviePack()){
+            // Same gate as the helper above. Without moviepack rim_wall
+            // textures, fall back to the single-default-texture path.
+            if (sg_MoviepackHasFile("rim_wall_a.png")){
                 bool sw=false;
 
                 if (tBeg>tEnd){
@@ -1287,8 +1296,6 @@ void gNetPlayerWall::RenderNormal(const eCoord &p1,const eCoord &p2,REAL ta,REAL
                 collector->AddDeathQuad(v0, v1, v2, v3);
             else
             {
-                // AddNormalQuad returns false for the first segment (bridge to streaming).
-                // Only add to GPU compute batch when it went to the static buffer.
                 if (collector->AddNormalQuad(v0, v1, v2, v3))
                     sr_AddWallComputeSegment(p1.x, p1.y, p2.x, p2.y, ta, te, r, g, b);
             }

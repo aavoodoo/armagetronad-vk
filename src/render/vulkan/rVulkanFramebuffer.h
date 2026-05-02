@@ -53,9 +53,9 @@ public:
     //! Destroy all resources
     void Destroy(rVulkanContext& ctx);
 
-    VkRenderPass  GetRenderPass()              const { return renderPass_; }
-    VkFramebuffer GetFramebuffer(uint32_t idx) const { return framebuffers_[idx]; }
-    VkFormat      GetDepthFormat()             const { return depthFormat_; }
+    [[nodiscard]] VkRenderPass  GetRenderPass()              const { return renderPass_; }
+    [[nodiscard]] VkFramebuffer GetFramebuffer(uint32_t idx) const { return framebuffers_[idx]; }
+    [[nodiscard]] VkFormat      GetDepthFormat()             const { return depthFormat_; }
 
     // Non-copyable
     rVulkanFramebuffer(const rVulkanFramebuffer&) = delete;

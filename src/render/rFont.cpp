@@ -97,7 +97,7 @@ static rCallbackBeforeScreenModeChange reloadft(&sr_ReloadFont);
 class rFontContainer : public std::map<int, std::unique_ptr<rIFont>> {
     typedef std::map<int, std::unique_ptr<rIFont>> BaseMap;
     rIFont* GetOrCreateFont(int size);
-    tString GetFontPath() const;
+    [[nodiscard]] tString GetFontPath() const;
 public:
     void clear() {
         BaseMap::clear();

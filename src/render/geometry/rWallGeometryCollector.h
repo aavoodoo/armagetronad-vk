@@ -64,10 +64,8 @@ public:
     static REAL CalculateStableThreshold(REAL cycleDistance, REAL segmentLength, REAL beginLength);
 
     //! Add a normal (stable) wall segment quad.
-    //! The very first call per BeginFrame is routed to the streaming buffer (bridges
-    //! the gap between the begin/gradient zone and the static buffer).
     //! @return true  = added to static buffer (caller should also call sr_AddWallComputeSegment)
-    //! @return false = added to streaming buffer (skip sr_AddWallComputeSegment)
+    //! @return false = collecting not active or no static buffer
     bool AddNormalQuad(const rPackedWallVertex& v0, const rPackedWallVertex& v1,
                        const rPackedWallVertex& v2, const rPackedWallVertex& v3);
 
@@ -137,7 +135,6 @@ private:
 
     bool staticNeedsRebuild_;
     bool collecting_;
-    bool firstNormalAdded_;   //!< True once the bridge segment has been sent to streaming
 
     // Per-collector GPU compute wall tracking.
     // Each collector occupies a contiguous slice of the global sg_wallSegsCurrent_ array.

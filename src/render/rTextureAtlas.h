@@ -127,7 +127,7 @@ struct TextureAtlasRegion
     float v1 = 0.0f;  //!< Bottom UV coordinate [0,1]
 
     //!< Check if region is valid
-    bool valid() const { return width > 0 && height > 0; }
+    [[nodiscard]] bool valid() const { return width > 0 && height > 0; }
 };
 
 //! Generalized SDF texture atlas using configurable packing
@@ -198,28 +198,42 @@ public:
     void reset();
 
     //! Get OpenGL texture ID
-    unsigned int textureId() const { return textureId_; }
+    [[nodiscard]] unsigned int textureId() const { return textureId_; }
 
     //! Get current atlas width
-    int width() const { return width_; }
+    [[nodiscard]] int width() const { return width_; }
 
     //! Get current atlas height
-    int height() const { return height_; }
+    [[nodiscard]] int height() const { return height_; }
 
     //! Get maximum atlas size
-    int maxSize() const { return config_.maxSize; }
+    [[nodiscard]] int maxSize() const { return config_.maxSize; }
 
     //! Get configuration
-    const TextureAtlasConfig& config() const { return config_; }
+    [[nodiscard]] const TextureAtlasConfig& config() const { return config_; }
 
     //! Check if atlas needs to be re-uploaded after grow
-    bool needsReupload() const { return needsReupload_; }
+    [[nodiscard]] bool needsReupload() const { return needsReupload_; }
 
     //! Clear reupload flag
     void clearReuploadFlag() { needsReupload_ = false; }
 
     //! Compute UV coordinates for a region
     void computeUVs(Region& region) const;
+
+    //! Begin batch mode: all updates are CPU-only (no GPU uploads).
+    //! Use during bulk glyph loading to avoid partial GPU state and redundant
+    //! VkImage re-creations. Call endBatch() when done to flush everything
+    //! to the GPU in a single synchronous upload.
+    void beginBatch() { batchMode_ = true; }
+
+    //! End batch mode and upload the complete CPU-side atlas to the GPU.
+    void endBatch()
+    {
+        batchMode_ = false;
+        createTexture();
+        needsReupload_ = false;
+    }
 
 private:
     void createTexture();
@@ -232,6 +246,7 @@ private:
     std::unique_ptr<Packer> packer_;
     std::vector<Pixel> data_;  // CPU-side copy for regrowth
     bool needsReupload_ = false;
+    bool batchMode_ = false;   //!< When true, skip GPU uploads (CPU-only updates)
 };
 
 // Convenient type aliases
@@ -400,6 +415,9 @@ void rTextureAtlas<Pixel, Packer>::upload(int x, int y, int w, int h, const Pixe
     }
 
 #ifndef DEDICATED
+    // In batch mode, skip GPU upload — endBatch() will upload everything.
+    if (batchMode_) return;
+
     // Update GPU texture
     RenderBindTexture(rGLConst::Texture2D, textureId_);
     RenderPixelStorei(rGLConst::UnpackAlignment, 1);
@@ -439,15 +457,19 @@ bool rTextureAtlas<Pixel, Packer>::grow()
         }
     }
 
-    // Update state
+    // Update state — preserve packing history so new glyphs don't
+    // overlap old ones.  Resize() adds a skyline node for the empty
+    // strip on the right; increased height_ lets the packer use the
+    // space below existing content too.
     width_ = newWidth;
     height_ = newHeight;
     data_ = std::move(newData);
-    packer_ = std::unique_ptr<Packer>(new Packer(width_, height_));
+    packer_->Resize(width_, height_);
     needsReupload_ = true;
 
-    // Recreate GPU texture
-    createTexture();
+    // In batch mode, defer GPU work — endBatch() will upload everything.
+    if (!batchMode_)
+        createTexture();
 
     return true;
 }

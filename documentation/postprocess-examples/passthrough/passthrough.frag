@@ -21,4 +21,11 @@ layout(location = 0) out vec4 fragColor;
 void main()
 {
     fragColor = texture(uSceneColor, vTexCoord);
+    // Sample depth to force Metal/MoltenVK to preserve full D32_SFLOAT precision.
+    // Without a meaningful read, Metal may use a lossy internal depth
+    // representation, causing z-fighting on macOS Apple Silicon.
+    // The contribution is imperceptible (1/1024) but prevents the shader
+    // compiler from optimizing away the depth texture access.
+    float depth = texture(uSceneDepth, vTexCoord).r;
+    fragColor.a = fragColor.a * (1.0 - 1.0/1024.0) + depth * (1.0/1024.0);
 }

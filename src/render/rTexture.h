@@ -81,9 +81,9 @@ private:
 
     // accessors
 public:
-    inline SDL_Surface * GetSurface( void ) const;	                     //!< Gets the surface itself
+    [[nodiscard]] inline SDL_Surface * GetSurface( void ) const;	                     //!< Gets the surface itself
     inline rSurface const & GetSurface( SDL_Surface * & surface ) const; //!< Gets the surface itself
-    inline int const & GetFormat( void ) const;	                     //!< Gets openGL texture format to use
+    [[nodiscard]] inline int const & GetFormat( void ) const;	                     //!< Gets openGL texture format to use
     inline rSurface const & GetFormat( int & format ) const;	         //!< Gets openGL texture format to use
 protected:
     inline rSurface & SetSurface( SDL_Surface * surface );	             //!< Sets the surface itself
@@ -141,7 +141,7 @@ class rISurfaceTexture: public rITexture
 public:
     rISurfaceTexture(int group, bool repx=0, bool repy=0,
                      bool storeAlpha=false);        //!< constructor setting flags
-    virtual ~rISurfaceTexture();                    //!< destructor
+    ~rISurfaceTexture() override;                    //!< destructor
 
     bool Loaded(){ return textureModeLast_ >= 0; }  //!< returns whether the texture is currently loaded
 
@@ -152,7 +152,7 @@ protected:
 
     void Upload( rSurface const & surface );        //!< Uploads the passed surface to OpenGL (for use in OnSelect)
 
-    virtual void OnSelect(bool enforce);            //!< Selects the texture for rendering
+    void OnSelect(bool enforce) override;            //!< Selects the texture for rendering
 
     //! Selects the texture for rendering (core part).
     //!
@@ -160,7 +160,7 @@ protected:
     //! into memory and using the Upload() function to upload it to OpenGL.
     virtual void OnSelectCore() = 0;
 
-    virtual void OnUnload();                        //!< Unloads the texture from OpenGL and memory
+    void OnUnload() override;                        //!< Unloads the texture from OpenGL and memory
 
     void StoreAlpha();                              //!< sets the alpha store flag
 
@@ -184,16 +184,16 @@ class rFileTexture: public rISurfaceTexture
 public:
     rFileTexture(int group, char const * fileName, bool repx=0, bool repy=0,
                  bool storeAlpha=false, tPath const *path = &tDirectories::Data());    //!< constructor setting flags
-    virtual ~rFileTexture();                //!< destructor
+    ~rFileTexture() override;                //!< destructor
 
 protected:
-    virtual void OnSelectCore();            //!< Selects the texture for rendering (core part)
+    void OnSelectCore() override;            //!< Selects the texture for rendering (core part)
 private:
     tString fileName_;                      //!< the texture's filename
     tPath const *path_;
 
 public:
-    inline tString const & GetFileName( void ) const;	                  //!< Gets the texture's filename
+    [[nodiscard]] inline tString const & GetFileName( void ) const;	                  //!< Gets the texture's filename
     inline rFileTexture const & GetFileName( tString & fileName ) const;  //!< Gets the texture's filename
 protected:
 private:
@@ -255,15 +255,15 @@ class rSurfaceTexture: public rISurfaceTexture
 public:
     rSurfaceTexture(int group, rSurface const & surface, bool repx=0, bool repy=0,
                     bool storeAlpha=false );    //!< constructor setting flags
-    virtual ~rSurfaceTexture();                 //!< destructor
+    ~rSurfaceTexture() override;                 //!< destructor
 
 protected:
-    virtual void OnSelectCore();                //!< Selects the texture for rendering (core part)
+    void OnSelectCore() override;                //!< Selects the texture for rendering (core part)
 private:
     rSurface const & surface_;                  //!< Surface to use as texture data
 
 public:
-    inline const rSurface & GetSurface( void ) const; //!< Gets surface to use as texture data
+    [[nodiscard]] inline const rSurface & GetSurface( void ) const; //!< Gets surface to use as texture data
 protected:
 private:
 };

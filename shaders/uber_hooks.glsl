@@ -84,6 +84,12 @@ vec3 hookCycleWallEmissive(vec4 color, vec2 texCoord, vec3 modelPos)
     return color.rgb * 0.8;
 }
 
+// Called for rim wall fragments. Default: no glow (rim walls are background).
+vec3 hookRimWallEmissive(vec4 color, vec2 texCoord, vec3 modelPos)
+{
+    return vec3(0.0);
+}
+
 // Called for zone fragments. Default: 60% of zone color (they're already
 // alpha-blended so too strong a glow reads as overbright).
 vec3 hookZoneEmissive(vec4 color, vec2 texCoord, vec3 modelPos)

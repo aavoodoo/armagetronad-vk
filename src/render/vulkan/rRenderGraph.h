@@ -198,7 +198,7 @@ private:
     // -------------------------------------------------------------------------
 
     //! Find pass index by name (-1 if not found).
-    int FindPass(const std::string& name) const;
+    [[nodiscard]] int FindPass(const std::string& name) const;
 
     //! Return the layout and barrier info a reader of `id` requires.
     static void GetReadLayout(RGResourceId id,

@@ -54,6 +54,7 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 #endif
 #include <memory>
 #include <vector>
+#include <string>
 
 #ifndef DEDICATED
 // SDL3: Include via rSDL.h for proper header path
@@ -127,6 +128,26 @@ static int    s_videooutDest=fileno(stdout);
 static bool png_screenshot=true;
 static tConfItem<bool> pns("PNG_SCREENSHOT",png_screenshot);
 
+// --- Golden image test mode --------------------------------------------------
+// Enabled by --screenshot-frame / --screenshot-out / --exit-after-frame CLI args.
+// All counters are reset at -1 (disabled).
+static int     s_goldenFrame   = -1;   //!< capture PNG at this rendered frame index
+static std::string s_goldenOut;        //!< absolute path for the output PNG
+static int     s_exitAfterFrame = -1;  //!< exit after this many rendered frames
+static int     s_renderedFrames = 0;   //!< incremented in SwapGL each rendered frame
+
+void sr_SetGoldenScreenshot(int frame, const char* outPath)
+{
+    s_goldenFrame = frame;
+    s_goldenOut   = outPath ? outPath : "";
+}
+
+void sr_SetExitAfterFrame(int frame)
+{
+    s_exitAfterFrame = frame;
+}
+// -----------------------------------------------------------------------------
+
 // Minimum seconds between on_time() Lua calls (default 1 s). Set to 0 to
 // fire every frame (equivalent to on_frame). Configurable at runtime via
 // aa_config_set("LUA_TIME_INTERVAL", "0.5") from Lua or config files.
@@ -137,9 +158,9 @@ static double s_lastLuaTimeHook = -1.0;
 #ifndef DEDICATED
 
 // Async screenshot saving - runs on background thread
-static void SaveScreenshotAsync(std::shared_ptr<std::vector<unsigned char>> pixels,
+static void SaveScreenshotAsync(const std::shared_ptr<std::vector<unsigned char>>& pixels,
                                  int width, int height, int channels,
-                                 tString baseName, bool usePng)
+                                 const tString& baseName, bool usePng)
 {
     // Find unused filename (done in background to avoid blocking)
     int number = 0;
@@ -230,6 +251,33 @@ static void make_screenshot(){
             SaveScreenshotAsync(pixels, width, height, channels, baseName, usePng);
         });
     }
+}
+
+// Synchronous golden-image capture. Reads pixels, flips Y, writes PNG to
+// s_goldenOut. Called from SwapGL() when s_renderedFrames == s_goldenFrame.
+static void TakeGoldenScreenshot()
+{
+    if (s_goldenOut.empty()) return;
+
+    int width    = sr_screenWidth;
+    int height   = sr_screenHeight;
+    int channels = SCREENSHOT_BYTES_PER_PIXEL;
+
+    std::vector<uint8_t> pixels(width * height * channels);
+    RenderReadPixels(0, 0, width, height, rGLConst::RGB, rGLConst::UnsignedByte, pixels.data());
+
+    // Flip Y: RenderReadPixels returns bottom-to-top (GL convention)
+    std::vector<uint8_t> flipped(width * height * channels);
+    for (int y = 0; y < height; y++)
+        memcpy(flipped.data() + y * width * channels,
+               pixels.data() + (height - 1 - y) * width * channels,
+               width * channels);
+
+    if (!stbi_write_png(s_goldenOut.c_str(), width, height, channels,
+                        flipped.data(), width * channels))
+        std::cerr << "[Golden] Failed to write PNG: " << s_goldenOut << "\n";
+    else
+        std::cout << "[Golden] Screenshot saved: " << s_goldenOut << "\n";
 }
 #endif
 
@@ -375,13 +423,13 @@ public:
     }
 
     // returns the current minimum
-    REAL GetMin() const
+    [[nodiscard]] REAL GetMin() const
     {
         return min_;
     }
 
     // returns sublevel minimum
-    REAL GetSubMin(int level) const
+    [[nodiscard]] REAL GetSubMin(int level) const
     {
         return levels_[level].GetMin();
     }
@@ -436,7 +484,7 @@ private:
         }
 
         // returns the current minimum
-        REAL GetMin() const
+        [[nodiscard]] REAL GetMin() const
         {
             return value[0] < value[1] ? value[0] : value[1];
         }
@@ -1233,6 +1281,18 @@ void rSysDep::SwapGL(){
     }
     else if (s_videoout)
         make_screenshot();
+
+    // Golden image test: capture at the configured frame.
+    s_renderedFrames++;
+    if (s_goldenFrame >= 0 && s_renderedFrames == s_goldenFrame)
+        TakeGoldenScreenshot();
+    // Exit trigger: post SDL_QUIT so the event filter does a clean shutdown.
+    if (s_exitAfterFrame >= 0 && s_renderedFrames >= s_exitAfterFrame)
+    {
+        SDL_Event quitEvent;
+        quitEvent.type = SDL_EVENT_QUIT;
+        SDL_PushEvent(&quitEvent);
+    }
 
     // Motion blur is a legacy GL1/2 effect that no longer functions under
     // the Vulkan renderer (see sr_MotionBlur above). Always swap.

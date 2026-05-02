@@ -339,7 +339,11 @@ VkPipeline rVulkanPipelineManager::CreatePipeline(const rVulkanPipelineKey& key)
     depthStencil.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
     depthStencil.depthTestEnable = key.depthTest ? VK_TRUE : VK_FALSE;
     depthStencil.depthWriteEnable = key.depthWrite ? VK_TRUE : VK_FALSE;
-    depthStencil.depthCompareOp = VK_COMPARE_OP_LESS_OR_EQUAL;
+    // Reverse-Z: near = 1, far = 0; closer fragments have GREATER depth.
+    // Pairs with the VkClipReverseZ projection matrix (rVulkanRender.cpp)
+    // and depth clear value 0.0 in the main scene render passes.
+    // Shadow maps stay on forward-Z (separate pipeline, see BuildShadowPipeline).
+    depthStencil.depthCompareOp = VK_COMPARE_OP_GREATER_OR_EQUAL;
     depthStencil.depthBoundsTestEnable = VK_FALSE;
     depthStencil.stencilTestEnable = VK_FALSE;
 

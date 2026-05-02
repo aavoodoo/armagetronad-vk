@@ -67,7 +67,7 @@ struct rScreenSize
     bool operator ==( rScreenSize const & other ) const; //!< comparison operator
     bool operator !=( rScreenSize const & other ) const; //!< comparison operator
 
-    int Compare( rScreenSize const & other ) const; //!< comparison function
+    [[nodiscard]] int Compare( rScreenSize const & other ) const; //!< comparison function
 };
 
 class rScreenSettings

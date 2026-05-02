@@ -63,7 +63,13 @@ static const char* const VALIDATION_LAYERS[] = {
 };
 
 static const char* const DEVICE_EXTENSIONS[] = {
-    VK_KHR_SWAPCHAIN_EXTENSION_NAME
+    VK_KHR_SWAPCHAIN_EXTENSION_NAME,
+    // Negative viewport height (vp.height < 0) — fold the GL→VK Y-flip into
+    // the rasterizer instead of the vertex shader. Promoted to core in 1.1;
+    // we still request 1.0 in apiVersion for broad compatibility, so enable
+    // it explicitly here. Universally supported on modern desktop / mobile
+    // drivers (including MoltenVK).
+    VK_KHR_MAINTENANCE_1_EXTENSION_NAME,
 };
 
 // ============================================================================
@@ -403,7 +409,8 @@ bool rVulkanContext::CreateLogicalDevice()
     createInfo.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
     createInfo.queueCreateInfoCount = static_cast<uint32_t>(queueInfos.size());
     createInfo.pQueueCreateInfos = queueInfos.data();
-    createInfo.enabledExtensionCount = 1;
+    createInfo.enabledExtensionCount =
+        static_cast<uint32_t>(sizeof(DEVICE_EXTENSIONS) / sizeof(DEVICE_EXTENSIONS[0]));
     createInfo.ppEnabledExtensionNames = DEVICE_EXTENSIONS;
     createInfo.pEnabledFeatures = &features;
 
@@ -418,19 +425,6 @@ bool rVulkanContext::CreateLogicalDevice()
     vkGetDeviceQueue(device_, presentFamily_, 0, &presentQueue_);
 
     return true;
-}
-
-uint32_t rVulkanContext::FindMemoryType(uint32_t typeFilter, VkMemoryPropertyFlags properties) const
-{
-    for (uint32_t i = 0; i < memoryProperties_.memoryTypeCount; i++)
-    {
-        if ((typeFilter & (1 << i)) &&
-            (memoryProperties_.memoryTypes[i].propertyFlags & properties) == properties)
-        {
-            return i;
-        }
-    }
-    return UINT32_MAX;
 }
 
 #endif // DEDICATED

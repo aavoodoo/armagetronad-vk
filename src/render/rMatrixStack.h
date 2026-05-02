@@ -89,18 +89,18 @@ public:
     void Ortho2D(float left, float right, float bottom, float top);
 
     //! Get current matrix as column-major float[16]
-    const float* Get() const;
+    [[nodiscard]] const float* Get() const;
 
     //! Get current matrix as glm::mat4 reference
 #ifndef DEDICATED
-    const glm::mat4& GetMat4() const { return current_; }
+    [[nodiscard]] const glm::mat4& GetMat4() const { return current_; }
 #endif
 
     //! Check if stack is empty (only has initial matrix)
-    bool IsEmpty() const;
+    [[nodiscard]] bool IsEmpty() const;
 
     //! Get stack depth
-    size_t Depth() const;
+    [[nodiscard]] size_t Depth() const;
 
 private:
 #ifndef DEDICATED

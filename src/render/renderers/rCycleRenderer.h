@@ -39,9 +39,6 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 //! - Per-cycle instance data collection
 //! - Future: instanced rendering for multiple cycles
 
-//! Configuration: enable batched cycle rendering (future optimization)
-extern bool sr_useBatchedCycles;
-
 //=============================================================================
 // Lighting setup
 //=============================================================================

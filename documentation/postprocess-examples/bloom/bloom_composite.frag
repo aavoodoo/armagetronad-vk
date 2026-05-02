@@ -19,7 +19,7 @@ layout(push_constant) uniform PushConstants {
 layout(location = 0) in  vec2 vTexCoord;
 layout(location = 0) out vec4 fragColor;
 
-// Parameter slot assignments (must match bloom.meta):
+// Parameter slot assignments (must match bloom.lua):
 //   FP(0) = intensity            (duplicated from extract; final multiplier)
 //   FP(1) = threshold            (from extract pass)
 //   FP(2) = radius               (from blur passes)

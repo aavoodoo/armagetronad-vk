@@ -116,7 +116,7 @@ public:
 
     virtual ~rTextField(); // for future extensions (buffered console?)
 
-    REAL GetCHeight() const {
+    [[nodiscard]] REAL GetCHeight() const {
         return cheight;
     }
 
@@ -128,15 +128,15 @@ public:
         top = l;
     }
     
-    REAL GetTop() const{
+    [[nodiscard]] REAL GetTop() const{
         return top;
     }
-    REAL GetBottom() const{
+    [[nodiscard]] REAL GetBottom() const{
         return top - cheight * y;
     }
 
 
-    REAL GetLeft() const{
+    [[nodiscard]] REAL GetLeft() const{
         return left;
     }
 
@@ -144,7 +144,7 @@ public:
         width=w;
     }
 
-    float GetWidth() const {
+    [[nodiscard]] float GetWidth() const {
         return width;
     }
 
@@ -152,7 +152,7 @@ public:
         parIndent=i;
     }
 
-    int GetIndent() const {
+    [[nodiscard]] int GetIndent() const {
         return parIndent;
     }
 
@@ -186,7 +186,7 @@ public:
     }
 
     inline rTextField & SetColor( tColor const & color );	//!< Sets current color
-    inline tColor const & GetColor( void ) const;	//!< Gets current color
+    [[nodiscard]] inline tColor const & GetColor( void ) const;	//!< Gets current color
     inline rTextField const & GetColor( tColor & color ) const;	//!< Gets current color
     static void SetDefaultColor( tColor const & defaultColor );	//!< Sets default color
     static tColor const & GetDefaultColor( void );	//!< Gets default color

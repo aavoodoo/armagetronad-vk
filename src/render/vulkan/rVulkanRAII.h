@@ -130,8 +130,8 @@ public:
         vec.clear();
     }
 
-    bool empty(uint32_t slot) const { return slots_[slot % DEFERRED_QUEUE_SLOTS].empty(); }
-    size_t size(uint32_t slot) const { return slots_[slot % DEFERRED_QUEUE_SLOTS].size(); }
+    [[nodiscard]] bool empty(uint32_t slot) const { return slots_[slot % DEFERRED_QUEUE_SLOTS].empty(); }
+    [[nodiscard]] size_t size(uint32_t slot) const { return slots_[slot % DEFERRED_QUEUE_SLOTS].size(); }
 
     // Drain ALL slots (for shutdown)
     template<auto DestroyFn>

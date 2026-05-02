@@ -1435,13 +1435,11 @@ void sr_ResetRenderState(bool menu){
     }
     else{
         RenderEnableState(rGLConst::DepthTest);
-        RenderDepthFunc(rGLConst::LEqual);
+        // Depth compare op is fixed in the Vulkan pipeline cache —
+        // GREATER_OR_EQUAL for the reverse-Z main scene path. The
+        // legacy GL DepthFunc setter has been removed; this branch
+        // just enables depth testing.
     }
-
-    if (sr_dither)
-        RenderEnableState(0x0BD0);
-    else
-        RenderDisableState(0x0BD0);
 
     RenderDisableState(rGLConst::Lighting);
 

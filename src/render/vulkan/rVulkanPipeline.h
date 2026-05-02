@@ -110,7 +110,7 @@ public:
     VkPipeline GetPipeline(const rVulkanPipelineKey& key);
 
     //! Get the pipeline layout (shared across all pipelines)
-    VkPipelineLayout GetLayout() const { return layout_; }
+    [[nodiscard]] VkPipelineLayout GetLayout() const { return layout_; }
 
     //! Switch active render pass (cheap — just updates pointer, cache survives)
     void SetRenderPass(VkRenderPass rp);

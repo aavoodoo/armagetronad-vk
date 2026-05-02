@@ -78,4 +78,14 @@ public:
 
 extern tString sr_screenshotName;
 
+#ifndef DEDICATED
+//! Configure golden-image test mode (call before the first frame).
+//! @param frame   render frame number at which to capture; -1 = disabled
+//! @param outPath absolute path for the PNG file (written synchronously)
+void sr_SetGoldenScreenshot(int frame, const char* outPath);
+
+//! Exit cleanly after this many rendered frames (-1 = run indefinitely).
+void sr_SetExitAfterFrame(int frame);
+#endif
+
 #endif

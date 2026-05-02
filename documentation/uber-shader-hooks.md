@@ -172,9 +172,9 @@ vec4 hookFloor(vec4 color, vec2 texCoord, vec3 modelPos)
 }
 ```
 
-The parameter slot must be declared in your post-process effect's `.meta` file (same slot-numbering rules as post-process shaders — see §5 of `postprocess-authoring.md`). This is the idiomatic way to expose tunable knobs that affect both scene shading and bloom simultaneously: set `MVP_FLOOR_TINT` once and it drives both ends.
+The parameter slot must be declared in your post-process effect's `.lua` script (same slot-numbering rules as post-process shaders — see §4 of `postprocess-authoring.md`). This is the idiomatic way to expose tunable knobs that affect both scene shading and bloom simultaneously: set `MVP_<EFFECT>_FLOOR_TINT` once and it drives both ends.
 
-If your moviepack ships hooks but no post-process effect, you can still use `FP()`/`IP()`/`FP4()` — the UBO is always bound. But without a `.meta` file to declare defaults you'll be reading uninitialized memory, so the only portable thing to do is not read from params in that case.
+If your moviepack ships hooks but no post-process effect, you can still use `FP()`/`IP()`/`FP4()` — the UBO is always bound. But without a `.lua` script to declare defaults you'll be reading uninitialized memory, so the only portable thing to do is not read from params in that case.
 
 ---
 
@@ -263,7 +263,7 @@ Zip the two files into `neonfloor.aamvp.zip`, drop it in `moviepacks/`, and acti
 - Re-zip the pack (or edit in place and re-activate — the moviepack extractor re-extracts on each activation).
 - In-game, switch away from the pack and back to trigger a shader reload. Changes are live within a second or two.
 
-If you want to expose `speed` and `intensity` as tunable parameters, add a `shaders/postprocess/neon/neon.meta` file declaring `PARAM_FLOAT speed 0 6.28 0.0 30.0 pulse rate` and read `FP(0)` in your hook. The MVP registry will pick it up automatically when the moviepack loads.
+If you want to expose `speed` and `intensity` as tunable parameters, add a `shaders/postprocess/neon/neon.lua` script declaring `effect:param_float("speed", 0, 6.28, 0.0, 30.0, "pulse rate")` and read `FP(0)` in your hook. The MVP registry will pick it up automatically when the moviepack loads.
 
 ---
 
@@ -316,7 +316,7 @@ Did you re-activate the moviepack after editing? Hot reload only fires on moviep
 
 ## 9. Related documentation
 
-- `documentation/postprocess-authoring.md` — The post-processing pipeline. Read §5 (`.meta` parameters), §7 (hook ↔ PP interaction), and §8 (packaging) for topics that overlap with this document.
+- `documentation/postprocess-authoring.md` — The post-processing pipeline. Read §4 (Lua render graph + parameters), §7 (hook ↔ PP interaction), and §8 (packaging) for topics that overlap with this document.
 - `shaders/uber_hooks.glsl` — The authoritative hook interface. Whatever is in this file is what the engine compiles against if no moviepack override exists.
 - `shaders/uber.frag` — The main fragment shader. You don't override this, but reading it helps you understand exactly where and how hooks are called.
 - `shaders/postprocess_params.glsl` — The shared `MVP_*` UBO declaration and `FP()`/`IP()`/`FP4()` macros. Include this in your hooks if you want tunable parameters.

@@ -58,13 +58,6 @@ public:
     //! Set blend function in cache and return true if state changed
     bool SetBlendFunc(int sfactor, int dfactor);
 
-    //! Get cached depth function
-    //! Returns -1 if not cached
-    int GetDepthFunc() const;
-
-    //! Set depth function in cache and return true if state changed
-    bool SetDepthFunc(int func);
-
     //! Get cached depth mask
     //! Returns -1 if not cached
     int GetDepthMask() const;
@@ -123,7 +116,6 @@ private:
     int blendDst_ = -1;
 
     // Depth state
-    int depthFunc_ = -1;
     int depthMask_ = -1;
 
     // Culling

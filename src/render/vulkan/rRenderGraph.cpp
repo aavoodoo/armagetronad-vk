@@ -101,12 +101,16 @@ void rRenderGraph::GetReadLayout(RGResourceId id,
     case RGResourceId::ShadowMap0:
     case RGResourceId::ShadowMap1:
         outLayout    = VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;
+        // Assumes reads occur in fragment shader. If a future compute pass reads
+        // depth/shadow, change this to VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT.
         outDstStage  = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
         outDstAccess = VK_ACCESS_SHADER_READ_BIT;
         break;
 
     default:  // color resources (SceneColor, SceneEmissive, SwapchainOut)
         outLayout    = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        // Assumes reads occur in fragment shader. If a future compute post-process
+        // pass reads SceneColor/Emissive, change to VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT.
         outDstStage  = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
         outDstAccess = VK_ACCESS_SHADER_READ_BIT;
         break;

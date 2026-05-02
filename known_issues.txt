@@ -291,6 +291,255 @@ Remaining P2 items (low priority):
   - P2-5/6: Clip space remap and Y-flip documentation comments
   - P2-16: rVulkanRender.cpp decomposition (3,400 lines, deferred)
 
+REVERSE-Z MIGRATION (2026-05-02)
+--------------------------------
+
+Status: Done for the main scene path; one residual asymmetry left for follow-up.
+
+Why: forward-Z + tiny zNear (0.0001) + float32 wasted depth precision near the
+far plane. All scattered depth workarounds (zNear *= .3f shrink, macOS force-PP
+passthrough, depth-sampling kludge in passthrough.frag, periodic depth-precision
+logging in eCamera) were symptoms. Reverse-Z gives uniform float precision
+across the whole range and obviates those workarounds.
+
+Changes:
+  - rVulkanRender.cpp: new VkClipReverseZ() static, baked into Frustum/Ortho/
+    Perspective. Composite of GL→VK depth remap + reverse-Z (no Y-flip — see
+    below). Y-flip stays per-vertex in uber.vert / uber_instanced.vert.
+  - rVulkanPipeline.cpp: depthCompareOp = GREATER_OR_EQUAL for all main scene
+    pipelines. Shadow pipeline kept on LESS_OR_EQUAL (independent forward-Z).
+  - All main-scene depth clear values flipped 1.0f → 0.0f (rVulkanRender.cpp
+    BeginFrame / Clear / BeginViewportFBO / EndViewportFBO,
+    rVulkanPostProcess.cpp). Shadow clears stay at 1.0f.
+  - rVulkanRender.cpp::PolygonOffset negates inputs so existing GL-style
+    callers (sr_DepthOffset(-2,-5)) still pull decals toward the camera.
+  - shaders/uber.vert and uber_instanced.vert: removed per-vertex
+    (z+w)*0.5 GL→VK depth remap (now in the matrix). Y-flip kept in shader
+    because the HUD phase (rRenderQueue.cpp:294-299 SetupPhase) sets
+    projection to identity, bypassing Frustum/Ortho/Perspective; baking
+    the Y-flip in the matrix would leave HUD upside-down.
+  - shaders/postprocess/passthrough/passthrough.frag: removed depth-sampling
+    kludge that existed only to defeat MoltenVK's dead-code elimination
+    under fragile float precision.
+  - eCamera.cpp: zNear floor 0.0001 → 0.05 (precision pressure removed,
+    floor only needs to clear the player's cycle model). Periodic
+    [DEPTH] zNear/zFar/ratio logging removed (its math assumed forward-Z
+    and would print misleading values under reverse-Z).
+  - shaders/uber.frag: DEBUG_DEPTH_VIZ block updated to compute linearized
+    view-space distance (forward-Z visual convention: near = black, far =
+    white) so the visualization is interpretable when enabled.
+
+Verification: client + server rebuilt clean for Linux (build_client +
+build_server reconfigured because the pre-existing Makefiles had macOS
+homebrew paths and protoc-26 .pb.h files that referenced runtime_version.h
+absent from system protobuf 3.21). Multiple frames captured via
+baseline.aarec playback and inspected with depthviz on/off, with and
+without customBloom moviepack. Geometry orientation correct, depth
+ordering correct, no visible regression vs. forward-Z without PP.
+
+Offscreen RP cross-frame sync (FIXED 2026-05-02):
+  The offscreen render pass previously had only an OUTGOING subpass
+  dependency, while the swapchain render pass (rVulkanFramebuffer.cpp:
+  138-163) had both incoming and outgoing. With the offscreen depth/
+  color/emissive images being single shared images (not per-frame),
+  this allowed frame N's depth-clear to race frame N-1's PP-composite
+  shader read of the same depth image — pre-existing but a likely
+  source of residual z-fighting / occasional all-black frames when a
+  moviepack with PP was active.
+
+  Fix: added an EXTERNAL→subpass-0 incoming dependency at
+  rVulkanPostProcess.cpp:663-680. srcStageMask=FRAGMENT_SHADER,
+  srcAccessMask=SHADER_READ → dstStageMask=COLOR_ATTACHMENT_OUTPUT |
+  EARLY_FRAGMENT_TESTS, dstAccessMask=COLOR_ATTACHMENT_WRITE |
+  DEPTH_STENCIL_ATTACHMENT_WRITE. Both binaries rebuilt clean and
+  smoke-tested with customBloom moviepack via baseline.aarec playback.
+
+  If artifacts still recur, option 2 (make offscreen images per-frame
+  with MAX_FRAMES_IN_FLIGHT×3 allocations) fully decouples frames and
+  pairs with the dependency above.
+
+Transparent back-to-front sort (DONE 2026-05-02):
+  rRenderQueue::ExecutePhase now distance-sorts buckets in the
+  Transparent phase only (other phases keep state-only sort for
+  binding batching). Effects is intentionally NOT sorted — it uses
+  additive blend, which is commutative, and depth-test alone is
+  enough to occlude particles behind walls. Opaque phases rely on
+  depth-test for visibility resolution.
+
+  Camera world position is fetched via the new sr_GetCameraWorldPos /
+  sr_vkGetCameraWorldPos pair (added alongside the existing setter);
+  centroid-vs-camera squared distance is computed once per bucket per
+  execute via a decorate-sort-undecorate pattern. Far buckets render
+  first so closer overlays composite on top — fixes alpha-blend
+  wrongness on overlapping zones. Cost: O(N) pass over Transparent-
+  phase vertices + O(B log B) sort, sub-millisecond at typical counts.
+
+DepthFunc API removed (DONE 2026-05-02):
+  vkRenderer::DepthFunc was a silent no-op while the pipeline cache
+  hardcoded the compare op — a footgun for any caller expecting GL-
+  style behaviour. Deleted: rRender.h::DepthFunc virtual + both
+  RenderDepthFunc inline helpers (int and rCompareFunc overloads),
+  vkRenderer::DepthFunc declaration / implementation / depthFunc_
+  member / initializer, and the single caller in rScreen.cpp:1438
+  (it passed LEqual which under reverse-Z would be wrong anyway —
+  the active path is GREATER_OR_EQUAL fixed in the pipeline cache).
+  The depthFunc accessor on rRenderState (utilities/rRenderState.cpp)
+  is internal dead code; left in place as no callers reference it.
+
+Moviepack .spv refresh (DONE 2026-05-02):
+  All four shipped moviepacks (customBloom, customCelShading,
+  customMSDFTexture, customProceduralTexture) regenerated via
+  ./armagetronad_main --compile-moviepack <pack>. Stock shader
+  .spv files now reflect the reverse-Z source: uber.vert.spv shrank
+  2976 → 2828 B and uber_instanced.vert.spv 2600 → 2480 B,
+  consistent with the two removed per-vertex remap instructions.
+  Smoke-tested via baseline.aarec playback with customBloom active —
+  scene renders correctly.
+
+  RELEASE-PROCESS NOTE (Android only): re-run --compile-moviepack
+  on each shipped pack after any change to shaders/uber.vert /
+  uber.frag / uber_instanced.vert. Linux/macOS use libshaderc at
+  runtime and ignore the .spv inside zips, so this only matters
+  for Android builds where the .spv is consumed directly.
+
+  Future-proofing options if this footgun bites again (NOT NEEDED
+  RIGHT NOW since the four shipped packs are up-to-date):
+    A. Build-system integration — add a Makefile rule that runs
+       --compile-moviepack against every moviepacks/*.aamvp.zip
+       when any of shaders/uber.{vert,frag} or uber_instanced.vert
+       changes. Awkward chicken-and-egg (binary regenerates its
+       own zip inputs) but eliminates the failure mode at source.
+    B. Runtime detection — stamp a SHA of the stock shader sources
+       into both the engine binary and a small metadata file in
+       each compiled .aamvp.zip; mismatch at load time on Android
+       triggers a fallback to the APK-asset .spv plus a warning.
+
+Front-to-back opaque sort (DONE 2026-05-02):
+  rRenderQueue::ExecutePhase now distance-sorts OpaqueStatic and
+  OpaqueDynamic phases front-to-back (closest first) so the GPU's
+  early-Z rejects fragments of farther geometry without shading
+  them. Reuses the centroid + camera-distance machinery from the
+  Transparent sort. Effects keeps state-sort (additive blend +
+  depth-test makes order irrelevant); HUD/Sky keep state-sort (no
+  depth test). Cost is a small CPU sort; benefit scales with
+  fragment-shader cost and overdraw — modest for Tron's simple
+  shaders but free in dense scenes.
+
+VK_KHR_maintenance1 negative viewport height (DONE 2026-05-02):
+  Y-flip moved out of the vertex shaders and into the rasterizer.
+  Implementation:
+    - VK_KHR_MAINTENANCE_1_EXTENSION_NAME added to DEVICE_EXTENSIONS
+      in rVulkanContext.cpp (api version stays 1.0; promoted to core
+      in 1.1, but the extension is universally supported on modern
+      desktop / mobile / MoltenVK drivers).
+    - All four main-scene VkViewport setups in rVulkanRender.cpp
+      switched to negative height: vp.y = bottom-of-region (y_top + h
+      in framebuffer space), vp.height = -h. Sites:
+        * Viewport2D shim (line 1429)
+        * Viewport shim (line 1882)
+        * BeginViewportFBO (line 4044)
+        * Main RP resume after viewport FBO (line 4135)
+    - Shadow viewport (line 3903) keeps positive height — shadow
+      uses its own forward-Z clip matrix that already bakes in the
+      Y-flip and shadow.vert outputs Vulkan-correct coords directly.
+    - PP fullscreen-quad viewport (rVulkanPostProcess.cpp:857) keeps
+      positive height — fullscreen.vert writes NDC directly without
+      a Y-flip and the offscreen image is already Y-correct from
+      the negative-viewport scene render.
+    - uber.vert: dropped `gl_Position.y = -gl_Position.y;` line.
+    - uber_instanced.vert: same.
+  Cull-face direction was the main risk: removing the shader Y-flip
+  AND adding the negative-viewport Y-flip both reverse winding once,
+  so they cancel — the effective framebuffer-space winding is
+  unchanged from the previous setup. No FrontFace mapping change
+  needed. Empirically verified: cycles still render correctly (their
+  meshes use cull-face on), HUD stays right-side up, baseline.aarec
+  playback with customBloom moviepack shows no regression across
+  6 frames.
+
+Profiling pass (DONE 2026-05-02, no issues found):
+  Ran ./armagetronad_main --benchmark --playback baseline.aarec
+  --exit-after-frame 3000 with VK_LAYER_KHRONOS_validation enabled.
+    - Frame rate: pinned at 59.9 fps with and without customBloom
+      moviepack, with VULKAN_PRESENT_MODE 2 (Immediate) and the NVIDIA
+      __GL_SYNC_TO_VBLANK=0 / Mesa vblank_mode=0 env vars. The 60 fps
+      cap survives all attempts to bypass it, and CPU load on the
+      game process stays low while it holds. Conclusion: the game is
+      not CPU- or GPU-bound at typical settings; the cap is being
+      enforced by the platform's display path (compositor / driver
+      compositing layer), not by the renderer. Headroom is large.
+    - Validation: zero VUID errors / warnings during a 500-frame
+      playback run. Reverse-Z migration, the new sorts, the offscreen
+      RP incoming subpass dependency, and the negative-viewport switch
+      all pass validation cleanly.
+    - Frame visuals: six-frame baseline.aarec sample (200/350/500/700/
+      900/1100) with bloom active — menu, mid-game, mid-game with
+      explosion, close wall view, round-end overlay, round restart —
+      all render correctly with no visible artifacts.
+  No actionable issues found.
+
+Depth pre-pass (NOT IMPLEMENTED, analysis sufficient for now):
+  A "fully correct" depth pre-pass on this codebase requires a
+  depth-only pipeline variant (no fragment shader, or empty FS, or
+  colorWriteMask=0 + depthWrite-only) plus running OpaqueStatic +
+  OpaqueDynamic phases twice (prepass + color). Maintenance budget:
+  ~1-2 hours of careful work across rVulkanPipeline.cpp,
+  rVulkanRender.cpp, rRenderQueue.cpp.
+
+  Expected benefit on this game: negligible. Reasons:
+    - Fragment shaders are simple (unlit floor/walls, simple lit
+      cycles, hooks for emissive). Not the kind of expensive PBR
+      where prepass shines.
+    - Profiling shows the game is not GPU-bound — frame rate is
+      capped by the platform display path, not by fragment work.
+    - Overdraw in typical Tron view is modest (camera looks down at
+      floor + walls, walls are mostly disjoint).
+    - The colorWriteMask=0 shortcut would still run the fragment
+      shader during prepass, doubling its CPU cost on the GPU command
+      stream for zero shading saved.
+
+  Recommended trigger to revisit: if a future moviepack adds an
+  expensive PBR-style fragment hook AND profiling shows fragment work
+  dominates frame time in dense gameplay scenes, then implement.
+  Until then, the existing front-to-back opaque sort already gives
+  the GPU's hardware early-Z most of the benefit a CPU-driven prepass
+  would.
+
+customGouraud moviepack + texture fallback (DONE 2026-05-02):
+  Added moviepacks/customGouraud.aamvp.zip — a minimal "lighting only"
+  pack that replaces the per-fragment Blinn-Phong + half-Lambert + specular
+  + shadow on cycle bodies with clamped-Lambert diffuse only, recreating
+  the original game's flat-lit look. Implementation is a single
+  uber_hooks.glsl with a custom hookCycle; all other components and the
+  vertex shader stay default. POST_PROCESS_ENABLED 0.
+
+  To support minimal moviepacks like this one without forcing them to
+  bundle the full texture set, added a sg_MoviepackHasFile(relPath) helper
+  in gMoviepack and rewired the texture-selection sites:
+    - gFloor.cpp::SelectFloorTexture / SelectFloorTextureA / SelectFloorTextureB
+      use the moviepack's floor*.png only when the pack ships them; fall
+      back to textures/floor*.png otherwise.
+    - gWall.cpp's rim-wall bucket logic and stretch parameters gate on
+      sg_MoviepackHasFile("rim_wall_a.png"). When the moviepack lacks the
+      rim_wall_a/b/c/d set, geometry routes to the default-texture bucket
+      (4) and uses the system rim wall texture.
+    - eAdvWall.cpp passes the default rim wall texture into FlushBatch
+      whenever the moviepack doesn't ship its own rim walls.
+    - gCycle.cpp::dir_eWall_select() (the cycle-trail / "directional"
+      wall texture) gates on sg_MoviepackHasFile("dir_wall.png") and
+      falls back to textures/dir_wall.png. Sky textures already had a
+      hand-rolled fallback (eDisplay.cpp se_Sky / se_UpperSky) — left
+      as is since they predate this helper and use the same idiom.
+
+  Net result: customGouraud is ~16 KB (settings.cfg + hooks + .spv) and
+  renders the entire scene correctly — cycles with diffuse-only lighting
+  (no specular highlights), default textured floor + rim walls + dir
+  walls. Verified via baseline.aarec playback at frames 350/700/900.
+
+Outstanding work for a future pass (lower priority):
+  - Long-term moviepack .spv staleness detection (see "Moviepack .spv
+    refresh" section above for options A/B).
+
 NOTES
 -----
 

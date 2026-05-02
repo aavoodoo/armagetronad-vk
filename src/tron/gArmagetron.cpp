@@ -112,6 +112,12 @@ public:
     bool     windowed_;
     bool     use_directx_;
     bool     dont_use_directx_;
+#ifndef DEDICATED
+    int      screenshotFrame_;       //!< capture PNG at this frame; -1 = disabled
+    tString  screenshotOut_;         //!< output path for --screenshot-out
+    int      exitAfterFrame_;        //!< exit after N frames; -1 = disabled
+    tString  compileMoviepackPath_;  //!< non-empty → compile-moviepack mode
+#endif
 
     gMainCommandLineAnalyzer()
     {
@@ -119,6 +125,10 @@ public:
         fullscreen_ = false;
         use_directx_ = false;
         dont_use_directx_ = false;
+#ifndef DEDICATED
+        screenshotFrame_ = -1;
+        exitAfterFrame_  = -1;
+#endif
     }
 
 
@@ -146,6 +156,26 @@ private:
             dont_use_directx_=true;
         }
 #endif
+#ifndef DEDICATED
+        else if ( tString val; parser.GetOption( val, "--screenshot-frame" ) )
+        {
+            screenshotFrame_ = atoi( val.c_str() );
+        }
+        else if ( tString val; parser.GetOption( val, "--screenshot-out" ) )
+        {
+            screenshotOut_ = val;
+        }
+        else if ( tString val; parser.GetOption( val, "--exit-after-frame" ) )
+        {
+            exitAfterFrame_ = atoi( val.c_str() );
+        }
+#ifdef HAVE_SHADERC_SHADERC_HPP
+        else if ( tString val; parser.GetOption( val, "--compile-moviepack" ) )
+        {
+            compileMoviepackPath_ = val;
+        }
+#endif
+#endif
         else
         {
             return false;
@@ -159,6 +189,15 @@ private:
 #ifndef DEDICATED
         s << "-f, --fullscreen             : start in fullscreen mode\n";
         s << "-w, --window, --windowed     : start in windowed mode\n\n";
+#ifndef DEDICATED
+        s << "--screenshot-frame N         : capture PNG screenshot at rendered frame N\n";
+        s << "--screenshot-out path        : output path for --screenshot-frame PNG\n";
+        s << "--exit-after-frame N         : exit after N rendered frames\n\n";
+#ifdef HAVE_SHADERC_SHADERC_HPP
+        s << "--compile-moviepack path     : compile all GLSL shaders in a moviepack ZIP\n";
+        s << "                               and add pre-compiled SPIR-V to the ZIP\n\n";
+#endif
+#endif
 #ifdef WIN32
         s << "+directx, -directx           : enable/disable usage of DirectX for screen\n"
         << "                               initialisation under MS Windows\n\n";
@@ -727,6 +766,15 @@ int main(int argc,char **argv){
             return 0;
         }
 
+        // Early-exit for --compile-moviepack: run as standalone tool, skip all game init.
+        // tDirectories::Data() is ready after commandLine.Analyse (DoInitialize runs there).
+#if !defined(DEDICATED) && defined(HAVE_SHADERC_SHADERC_HPP)
+        if ( commandLineAnalyzer.compileMoviepackPath_.Len() > 1 )
+        {
+            bool ok = sr_CompileMoviepack( commandLineAnalyzer.compileMoviepackPath_.c_str() );
+            return ok ? 0 : 1;
+        }
+#endif
 
         {
             // embed version in recording
@@ -855,6 +903,13 @@ int main(int argc,char **argv){
             sr_useDirectX                       = true;
         if ( commandLineAnalyzer.dont_use_directx_ )
             sr_useDirectX                       = false;
+#ifndef DEDICATED
+        if ( commandLineAnalyzer.screenshotFrame_ >= 0 )
+            sr_SetGoldenScreenshot( commandLineAnalyzer.screenshotFrame_,
+                                    commandLineAnalyzer.screenshotOut_.c_str() );
+        if ( commandLineAnalyzer.exitAfterFrame_ >= 0 )
+            sr_SetExitAfterFrame( commandLineAnalyzer.exitAfterFrame_ );
+#endif
 
         //gAICharacter::LoadAll(tString( "aiplayers.cfg" ) );
         gAICharacter::LoadAll( aiPlayersConfig );
@@ -914,7 +969,12 @@ int main(int argc,char **argv){
             SDLCleanup sdlCleanup; // call SDL_Quit later
 
                 sr_vkRendererInit();
-    
+
+            // ScanMoviepacks() ran before sr_glOut was set, so the renderer-
+            // dependent part of ActivateMoviepack() (PP activation, effect
+            // search path) was skipped. Re-apply it now that the renderer is up.
+            gMoviepackManager::Get().NotifyRendererReady();
+
             SDL_SetEventFilter(&filter, 0);
             //std::cout << "set filter\n";
 

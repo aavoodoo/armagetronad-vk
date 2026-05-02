@@ -31,6 +31,7 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 
 #include "rVulkanDescriptor.h"
 #include <iostream>
+#include <format>
 
 bool rVulkanDescriptorManager::Init(VkDevice device, uint32_t maxSets)
 {
@@ -75,7 +76,7 @@ bool rVulkanDescriptorManager::AllocatePool()
     VkDescriptorPool pool;
     if (vkCreateDescriptorPool(device_, &poolInfo, nullptr, &pool) != VK_SUCCESS)
     {
-        std::cerr << "[Vulkan] Failed to create descriptor pool (chain len=" << pools_.size() << ")" << std::endl;
+        std::cerr << std::format("[Vulkan] Failed to create descriptor pool (chain len={})\n", pools_.size());
         return false;
     }
 
@@ -88,7 +89,7 @@ VkDescriptorSet rVulkanDescriptorManager::GetOrCreateTextureSet(VkImageView imag
 {
     CacheKey key{imageView, sampler};
     auto it = cache_.find(key);
-    if (it != cache_.end())
+    if (it != cache_.end()) [[likely]]
         return it->second.set;
 
     // Allocate from the latest pool only. If exhausted, grow.
@@ -111,7 +112,7 @@ VkDescriptorSet rVulkanDescriptorManager::GetOrCreateTextureSet(VkImageView imag
         }
         else if (result != VK_ERROR_OUT_OF_POOL_MEMORY && result != VK_ERROR_FRAGMENTED_POOL)
         {
-            std::cerr << "[Vulkan] Failed to allocate descriptor set (vkResult=" << result << ")" << std::endl;
+            std::cerr << std::format("[Vulkan] Failed to allocate descriptor set (vkResult={})\n", static_cast<int>(result));
             return VK_NULL_HANDLE;
         }
     }

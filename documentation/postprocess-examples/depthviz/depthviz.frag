@@ -10,7 +10,7 @@
 // Activate:     POST_PROCESS_ENABLED 1
 //               POST_PROCESS_EFFECT  depthviz
 //
-// Tunables (see depthviz.meta):
+// Tunables (see depthviz.lua):
 //   FP(0) size        — overlay width as a fraction of the screen (0..1)
 //   FP(1) rawMin      — raw depth value mapped to WHITE (nearest)
 //   FP(2) rawMax      — raw depth value mapped to BLACK (farthest)
@@ -43,7 +43,7 @@ layout(push_constant) uniform PushConstants {
 layout(location = 0) in  vec2 vTexCoord;
 layout(location = 0) out vec4 fragColor;
 
-// Parameter slot assignments — must match depthviz.meta.
+// Parameter slot assignments — must match depthviz.lua.
 #define P_SIZE         FP(0)
 #define P_RAW_MIN      FP(1)
 #define P_RAW_MAX      FP(2)

@@ -1705,17 +1705,25 @@ void eCamera::Render(){
         REAL zFar;
         {
             eRectangle const & arena = eWallRim::GetBounds();
-            eCoord extent = arena.GetHigh() - arena.GetLow();
-            REAL diag = extent.Norm();
-            // eRectangle is initialised with low_=1e30, high_=-1e30 (inverted sentinel).
-            // Before the first UpdateBounds() call, high_-low_ is large and negative,
-            // producing a huge diag (~2.83e30). The isfinite/diag>1e6 guards catch both
-            // that uninitialized state and any corrupted arena geometry.
+            eCoord lo = arena.GetLow();
+            eCoord hi = arena.GetHigh();
+            REAL diag = (hi - lo).Norm();
             if (!std::isfinite(diag) || diag <= 0 || diag > 1.0e6f)
-                diag = 1000.0f; // fallback — bounds not yet initialised or degenerate
-            REAL altitude = z > 0 ? z : 0;
-            zFar = 4.0f * diag + 2.0f * altitude;
-            if (zFar < 200.0f)   zFar = 200.0f;
+                zFar = 1000.0f;
+            else
+            {
+                REAL maxDist = 0;
+                REAL cx = pos.x, cy = pos.y, cz = z;
+                REAL corners[4][2] = {{lo.x,lo.y}, {hi.x,lo.y}, {lo.x,hi.y}, {hi.x,hi.y}};
+                for (auto& c : corners)
+                {
+                    REAL dx = c[0] - cx, dy = c[1] - cy;
+                    REAL dist = sqrt(dx*dx + dy*dy + cz*cz);
+                    if (dist > maxDist) maxDist = dist;
+                }
+                zFar = maxDist * 1.2f;
+            }
+            if (zFar < 100.0f)   zFar = 100.0f;
             if (zFar > 20000.0f) zFar = 20000.0f;
         }
 
@@ -1753,11 +1761,14 @@ void eCamera::Render(){
 
         // Shrink zNear for the NEXT frame. The current frame used the
         // previous frame's (smaller) zNear, which safely clears the
-        // player's cycle model. This matches the original GL code.
+        // player's cycle model when the camera moves toward walls between
+        // frames. The renderer uses reverse-Z so float depth precision is
+        // uniform across the range — this shrink is now only a movement /
+        // cycle-clearance safety margin, not a precision compensation.
         zNear *= .3f;
-        if ( zNear < 0.0001f )
+        if ( zNear < 0.05f )
         {
-            zNear = 0.0001f;
+            zNear = 0.05f;
         }
 
         if (c) c->RenderCockpitVirtual();

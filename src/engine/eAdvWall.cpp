@@ -35,6 +35,7 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 #include "eRectangle.h"
 #include "rRender.h"
 #include "../tron/gWall.h"
+#include "../tron/gMoviepack.h"
 
 #include <vector>
 
@@ -152,8 +153,10 @@ void eWallRim::RenderAll( eCamera * camera )
         se_rimWalls(i)->RenderReal( camera );
     }
 
-    // Submit and render all accumulated geometry
-    rITexture* defaultTex = sg_MoviePack() ? nullptr
+    // Submit and render all accumulated geometry. Pass nullptr only when
+    // the moviepack actually provides its own rim wall textures; otherwise
+    // pass the default so missing-texture moviepacks fall back gracefully.
+    rITexture* defaultTex = sg_MoviepackHasFile("rim_wall_a.png") ? nullptr
         : &( se_RimWrapY ? se_RimWallWrap : se_RimWallNoWrap );
     gWallRim_FlushBatch(defaultTex);
 

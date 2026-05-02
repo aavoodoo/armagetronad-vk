@@ -43,11 +43,13 @@ void main()
     // render context ID if they need to distinguish.
     vModelPos = aPosition;
 
+    // The GL→Vulkan depth remap + reverse-Z is baked into the projection
+    // matrix (see VkClipReverseZ in rVulkanRender.cpp). Pipelines pair
+    // this with depthCompareOp = GREATER_OR_EQUAL. The Y-flip is handled
+    // by the rasterizer via VK_KHR_maintenance1 negative-height viewport
+    // (see VkViewport setup in rVulkanRender.cpp), so the shader just
+    // outputs GL-style (Y-up) clip coords directly.
     gl_Position = pc.uMVP * vec4(aPosition, 1.0);
-    // Vulkan clip space Y is inverted vs OpenGL
-    gl_Position.y = -gl_Position.y;
-    // Vulkan depth range is [0,1], OpenGL/GLM produces [-w,+w] → remap
-    gl_Position.z = (gl_Position.z + gl_Position.w) * 0.5;
 
     // Lighting flag in push constant uTexMatrix[2][3] — per-draw, not shared UBO
     if (pc.uTexMatrix[2][3] > 0.5)

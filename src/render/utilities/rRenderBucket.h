@@ -229,7 +229,7 @@ struct rRenderStateKey
     }
 
     //! Get the embedded render context (0 = not set, use global fallback)
-    float GetRenderContext() const { return texMatrix[9]; }
+    [[nodiscard]] float GetRenderContext() const { return texMatrix[9]; }
 
     //! Clear texture matrix and disable UseTexMatrix flag
     void ClearTexMatrix()
@@ -279,7 +279,7 @@ struct rRenderStateKey
     bool operator!=(const rRenderStateKey& other) const { return !(*this == other); }
 
     //! Hash function for use in unordered containers
-    size_t Hash() const
+    [[nodiscard]] size_t Hash() const
     {
         // FNV-1a hash
         size_t hash = 14695981039346656037ULL;
@@ -377,7 +377,7 @@ public:
     rRenderBucket& operator=(rRenderBucket&& other) noexcept;
 
     //! Get the render state key for this bucket
-    const rRenderStateKey& GetState() const { return state_; }
+    [[nodiscard]] const rRenderStateKey& GetState() const { return state_; }
 
     //! Set the render state key
     void SetState(const rRenderStateKey& state) { state_ = state; }
@@ -417,22 +417,22 @@ public:
     void AddLineLoop(const rVertex20* vertices, size_t count);
 
     //! Get triangle vertex data
-    const std::vector<rVertex20>& GetTriangleVertices() const { return triangleVertices_; }
+    [[nodiscard]] const std::vector<rVertex20>& GetTriangleVertices() const { return triangleVertices_; }
 
     //! Get line vertex data
-    const std::vector<rVertex20>& GetLineVertices() const { return lineVertices_; }
+    [[nodiscard]] const std::vector<rVertex20>& GetLineVertices() const { return lineVertices_; }
 
     //! Get counts
-    size_t GetTriangleVertexCount() const { return triangleVertices_.size(); }
-    size_t GetLineVertexCount() const { return lineVertices_.size(); }
-    size_t GetTriangleCount() const { return triangleVertices_.size() / 3; }
-    size_t GetLineCount() const { return lineVertices_.size() / 2; }
+    [[nodiscard]] size_t GetTriangleVertexCount() const { return triangleVertices_.size(); }
+    [[nodiscard]] size_t GetLineVertexCount() const { return lineVertices_.size(); }
+    [[nodiscard]] size_t GetTriangleCount() const { return triangleVertices_.size() / 3; }
+    [[nodiscard]] size_t GetLineCount() const { return lineVertices_.size() / 2; }
 
     //! Check if bucket is empty
-    bool IsEmpty() const { return triangleVertices_.empty() && lineVertices_.empty(); }
+    [[nodiscard]] bool IsEmpty() const { return triangleVertices_.empty() && lineVertices_.empty(); }
 
     //! Get approximate memory usage
-    size_t GetMemoryUsage() const
+    [[nodiscard]] size_t GetMemoryUsage() const
     {
         return triangleVertices_.capacity() * sizeof(rVertex20) +
                lineVertices_.capacity() * sizeof(rVertex20);

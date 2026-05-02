@@ -96,6 +96,12 @@ using rPreviewTexture = rRawPixelTexture;
 static tString sg_moviepackName;
 static tConfItem<tString> sg_moviepackNameConf("MOVIEPACK_NAME", sg_moviepackName);
 
+// Post-process effect requested by the active moviepack's settings.cfg.
+// Populated by the POST_PROCESS_EFFECT key in the pack's cfg during activation.
+// Not a user-configurable item — read here and forwarded to the renderer.
+static tString sg_moviepackPPEffect;
+static tConfItemLine sg_moviepackPPEffectCI("POST_PROCESS_EFFECT", sg_moviepackPPEffect);
+
 // Forward declaration for cleanup
 static void RemoveDirectoryRecursive(const tString& path);
 
@@ -510,7 +516,6 @@ bool gMoviepackManager::ActivateMoviepack()
             {
                 // File doesn't exist yet — save current settings
                 static const char* moviepackKeys[] = {
-                    "POST_PROCESS_ENABLED", "POST_PROCESS_EFFECT",
                     "MOVIEPACK_FLOOR_RED", "MOVIEPACK_FLOOR_GREEN", "MOVIEPACK_FLOOR_BLUE",
                     "MOVIEPACK_RIM_WALL_STRETCH_X", "MOVIEPACK_RIM_WALL_STRETCH_Y",
                     "MOVIEPACK_WALL_STRETCH", "GRID_SIZE_MOVIEPACK", "FLOOR_DETAIL",
@@ -536,8 +541,8 @@ bool gMoviepackManager::ActivateMoviepack()
         // pack or user changes left behind. Values match the C++ default initializers.
         {
             tCurrentAccessLevel elevate(tAccessLevel_Owner, true);
+            tNoisinessSetter silent(false);
             static const char* resetLines =
-                "POST_PROCESS_ENABLED 0\n"
                 "POST_PROCESS_EFFECT \n"
                 "MOVIEPACK_FLOOR_RED 0.5\n"
                 "MOVIEPACK_FLOOR_GREEN 0.5\n"
@@ -557,6 +562,7 @@ bool gMoviepackManager::ActivateMoviepack()
             if (applyFile.good())
             {
                 tCurrentAccessLevel elevate(tAccessLevel_Owner, true);
+                tNoisinessSetter silent(false);
                 tConfItemBase::LoadAll(applyFile, false);
             }
         }
@@ -587,11 +593,20 @@ bool gMoviepackManager::ActivateMoviepack()
         // Notify the post-process system so it can reload effects from
         // the new moviepack directory and register MVP_* tSettingItems
         // for any shader parameters declared by .meta files in the pack.
-        // Derive a simple name from the active moviepack for config path.
         extern void sr_vkPostProcessOnMoviepackActivated(const char* name);
         const gMoviepack* activePack = moviepacks_(activeIndex_);
         sr_vkPostProcessOnMoviepackActivated(
             activePack ? static_cast<const char*>(activePack->name) : nullptr);
+
+        // Activate post-processing with the effect requested by the moviepack's cfg.
+        // sg_moviepackPPEffect was populated by POST_PROCESS_EFFECT in the settings.cfg
+        // loaded above. If the key wasn't present, the string is empty and PP stays off.
+        extern void sr_vkPostProcessActivate(const char* effectName);
+        extern void sr_vkPostProcessDeactivate();
+        if (sg_moviepackPPEffect.Len() > 0)
+            sr_vkPostProcessActivate(static_cast<const char*>(sg_moviepackPPEffect));
+        else
+            sr_vkPostProcessDeactivate();
     }
 #endif
 
@@ -600,6 +615,34 @@ bool gMoviepackManager::ActivateMoviepack()
     sg_moviepackUse = true;
 
     return true;
+}
+
+void gMoviepackManager::NotifyRendererReady()
+{
+#ifndef DEDICATED
+    // Only act if a moviepack is active and the renderer is up
+    if (activeIndex_ <= 0 || !sr_glOut) return;
+
+    const gMoviepack* activePack = moviepacks_(activeIndex_);
+
+    // Tell the PP system which moviepack is active so it uses the correct
+    // shader directory when loading effect scripts (bloom.lua etc.).
+    // This is the same call that ActivateMoviepack() makes inside its
+    // if (sr_glOut) block, which was skipped at startup because sr_glOut
+    // was 0 when ScanMoviepacks() ran.
+    extern void sr_vkPostProcessOnMoviepackActivated(const char*);
+    sr_vkPostProcessOnMoviepackActivated(
+        activePack ? static_cast<const char*>(activePack->name) : nullptr);
+
+    // Queue the PP effect from the moviepack's settings.cfg for activation
+    // on the next BeginFrame.
+    extern void sr_vkPostProcessActivate(const char*);
+    extern void sr_vkPostProcessDeactivate();
+    if (sg_moviepackPPEffect.Len() > 0)
+        sr_vkPostProcessActivate(static_cast<const char*>(sg_moviepackPPEffect));
+    else
+        sr_vkPostProcessDeactivate();
+#endif
 }
 
 void gMoviepackManager::DeactivateMoviepack()
@@ -614,8 +657,16 @@ void gMoviepackManager::DeactivateMoviepack()
     // effect data after the reload.
     if (hadMoviepackActive && sr_glOut)
     {
+        // Wait for all in-flight GPU work to finish before destroying pipelines,
+        // descriptor pools, and framebuffers used by the active PP effect.
+        // Without this, vkDestroyPipeline/vkDestroyDescriptorPool fire while
+        // command buffers are still in flight → validation errors.
+        extern void sr_vkWaitIdle();
+        sr_vkWaitIdle();
         extern void sr_vkPostProcessOnMoviepackDeactivated();
         sr_vkPostProcessOnMoviepackDeactivated();
+        extern void sr_vkPostProcessDeactivate();
+        sr_vkPostProcessDeactivate();
     }
 #endif
 
@@ -960,4 +1011,265 @@ void gMoviepackMenuItem::UpdateFromManager()
 {
     selectionIndex_ = gMoviepackManager::Get().GetActiveIndex();
 }
-#endif // DEDICATED
+
+#endif // DEDICATED (end of non-dedicated section)
+
+// =============================================================================
+// --compile-moviepack: offline GLSL → SPIR-V compilation tool
+// =============================================================================
+// Compiles all shaders referenced by a moviepack and writes the SPIR-V back
+// into the ZIP alongside the GLSL sources.  iOS/Android can then load the
+// pre-compiled .spv files instead of using shaderc at runtime.
+//
+// Usage:  armagetronad --compile-moviepack path/to/pack.aamvp.zip
+// =============================================================================
+
+#if !defined(DEDICATED) && defined(HAVE_SHADERC_SHADERC_HPP)
+
+#include "vulkan/rVulkanShader.h"
+#include <filesystem>
+#include <iostream>
+
+namespace
+{
+
+std::vector<uint32_t> compileShaderFile(
+    const std::string& src,
+    rVulkanShader::Stage stage,
+    const std::vector<std::string>& includePaths,
+    const std::vector<std::pair<std::string, std::string>>& defines = {})
+{
+    std::string err;
+    auto spv = rVulkanShader::CompileGLSLFromFile(src, stage, includePaths, defines, &err);
+    if (spv.empty())
+        std::cerr << "  FAIL  " << src << "\n" << err << "\n";
+    else
+        std::cout << "  OK    " << src << "  (" << spv.size() * 4 << " B)\n";
+    return spv;
+}
+
+bool writeSPVFile(const std::string& path, const std::vector<uint32_t>& spv)
+{
+    std::filesystem::create_directories(std::filesystem::path(path).parent_path());
+    std::ofstream f(path, std::ios::binary);
+    if (!f) return false;
+    f.write(reinterpret_cast<const char*>(spv.data()), spv.size() * sizeof(uint32_t));
+    return f.good();
+}
+
+} // namespace
+
+bool sr_CompileMoviepack(const char* zipPath)
+{
+    namespace fs = std::filesystem;
+
+    std::cout << "[compile-moviepack] " << zipPath << "\n";
+
+    // ── 1. Extract ZIP to temp dir ────────────────────────────────────────────
+    char tmpl[] = "/tmp/aamvp_XXXXXX";
+    char* tmpBuf = mkdtemp(tmpl);
+    if (!tmpBuf)
+    {
+        std::cerr << "Error: cannot create temp dir\n";
+        return false;
+    }
+    std::string tmp = tmpBuf;
+
+    {
+        mz_zip_archive zip;
+        memset(&zip, 0, sizeof(zip));
+        if (!mz_zip_reader_init_file(&zip, zipPath, 0))
+        {
+            std::cerr << "Error: cannot open ZIP: " << zipPath << "\n";
+            fs::remove_all(tmp);
+            return false;
+        }
+        int n = static_cast<int>(mz_zip_reader_get_num_files(&zip));
+        for (int i = 0; i < n; i++)
+        {
+            mz_zip_archive_file_stat st;
+            if (!mz_zip_reader_file_stat(&zip, i, &st)) continue;
+            std::string dest = tmp + "/" + st.m_filename;
+            if (mz_zip_reader_is_file_a_directory(&zip, i))
+                fs::create_directories(dest);
+            else
+            {
+                fs::create_directories(fs::path(dest).parent_path());
+                mz_zip_reader_extract_to_file(&zip, i, dest.c_str(), 0);
+            }
+        }
+        mz_zip_reader_end(&zip);
+    }
+
+    // ── 2. Locate system shaders directory ────────────────────────────────────
+    std::string sysShaderDir;
+    {
+        tString sv = tDirectories::Data().GetReadPath("shaders/uber.vert");
+        if (sv.Len() > 1)
+        {
+            std::string p = static_cast<const char*>(sv);
+            sysShaderDir = p.substr(0, p.find_last_of('/'));
+        }
+    }
+    if (sysShaderDir.empty())
+    {
+        // Fallback: try "shaders" relative to CWD (convenient when run from source tree)
+        if (fs::exists("shaders/uber.vert"))
+            sysShaderDir = "shaders";
+    }
+    if (sysShaderDir.empty())
+    {
+        std::cerr << "Error: system shaders directory not found.\n"
+                     "  Hint: use --datadir <path-to-data> to specify the data directory.\n"
+                     "  Example (dev build): --datadir ../../ --compile-moviepack ...\n";
+        fs::remove_all(tmp);
+        return false;
+    }
+    std::cout << "  System shaders: " << sysShaderDir << "\n";
+
+    // ── 3. Compile uber + shadow + compute shaders ────────────────────────────
+    std::string mvShadersDir = tmp + "/shaders";
+    fs::create_directories(mvShadersDir);
+    std::vector<std::string> uberInc = { mvShadersDir, sysShaderDir };
+
+    // Pick from moviepack if present, otherwise fall back to system shader.
+    auto pickSrc = [&](const std::string& name) -> std::string {
+        std::string mv = mvShadersDir + "/" + name;
+        return fs::exists(mv) ? mv : sysShaderDir + "/" + name;
+    };
+
+    // Compile and save; silently skip if the source doesn't exist at all.
+    auto compileAndSave = [&](const std::string& src,
+                               rVulkanShader::Stage stage,
+                               const std::vector<std::string>& inc,
+                               const std::string& outRelative,
+                               const std::vector<std::pair<std::string,std::string>>& defs = {})
+    {
+        if (!fs::exists(src)) { std::cout << "  SKIP  " << src << " (not found)\n"; return; }
+        auto spv = compileShaderFile(src, stage, inc, defs);
+        if (!spv.empty()) writeSPVFile(mvShadersDir + "/" + outRelative, spv);
+    };
+
+    using S = rVulkanShader::Stage;
+    compileAndSave(pickSrc("uber.vert"),           S::Vertex,   uberInc, "uber.vert.spv");
+    compileAndSave(pickSrc("uber_instanced.vert"), S::Vertex,   uberInc, "uber_instanced.vert.spv");
+    compileAndSave(pickSrc("uber.frag"),           S::Fragment, uberInc, "uber.frag.spv");
+    compileAndSave(pickSrc("uber.frag"),           S::Fragment, uberInc, "uber.frag.emissive.spv",
+                   {{"USE_EMISSIVE_OUT", "1"}});
+    compileAndSave(pickSrc("shadow.vert"),         S::Vertex,   uberInc, "shadow.vert.spv");
+    compileAndSave(pickSrc("shadow.frag"),         S::Fragment, uberInc, "shadow.frag.spv");
+    compileAndSave(pickSrc("wall_gen.comp"),       S::Compute,  uberInc, "wall_gen.comp.spv");
+
+    // ── 4. Compile post-process shaders ───────────────────────────────────────
+    std::string mvPPDir  = mvShadersDir + "/postprocess";
+    std::string sysPPDir = sysShaderDir + "/postprocess";
+    fs::create_directories(mvPPDir);
+
+    // Shared fullscreen.vert (used by every PP pass)
+    {
+        std::string src = fs::exists(mvPPDir + "/fullscreen.vert")
+                          ? mvPPDir + "/fullscreen.vert"
+                          : sysPPDir + "/fullscreen.vert";
+        if (fs::exists(src))
+        {
+            auto spv = compileShaderFile(src, S::Vertex, {mvPPDir, sysPPDir, sysShaderDir});
+            if (!spv.empty()) writeSPVFile(mvPPDir + "/fullscreen.vert.spv", spv);
+        }
+    }
+
+    // Per-effect .frag shaders
+    if (fs::is_directory(mvPPDir))
+    {
+        for (const auto& effEntry : fs::directory_iterator(mvPPDir))
+        {
+            if (!effEntry.is_directory()) continue;
+            std::string effDir    = effEntry.path().string();
+            std::string effName   = effEntry.path().filename().string();
+            std::string sysEffDir = sysPPDir + "/" + effName;
+            std::vector<std::string> ppInc = { effDir, sysEffDir, sysPPDir, sysShaderDir };
+
+            for (const auto& fe : fs::directory_iterator(effDir))
+            {
+                if (!fe.is_regular_file()) continue;
+                std::string fname = fe.path().filename().string();
+                if (fname.size() < 5 || fname.substr(fname.size() - 5) != ".frag") continue;
+
+                std::string src = fe.path().string();
+                auto spv = compileShaderFile(src, S::Fragment, ppInc);
+                if (!spv.empty()) writeSPVFile(src + ".spv", spv);
+            }
+        }
+    }
+
+    // ── 5. Rebuild ZIP from temp dir ──────────────────────────────────────────
+    std::string newZipPath = std::string(zipPath) + ".new";
+    bool zipOk = false;
+    {
+        mz_zip_archive writer;
+        memset(&writer, 0, sizeof(writer));
+        if (!mz_zip_writer_init_file(&writer, newZipPath.c_str(), 0))
+        {
+            std::cerr << "Error: cannot create output ZIP\n";
+        }
+        else
+        {
+            zipOk = true;
+            for (const auto& fe : fs::recursive_directory_iterator(tmp))
+            {
+                if (!fe.is_regular_file()) continue;
+                std::string full = fe.path().string();
+                std::string arc  = full.substr(tmp.size() + 1);
+                if (!mz_zip_writer_add_file(&writer, arc.c_str(), full.c_str(),
+                                             nullptr, 0, MZ_DEFAULT_COMPRESSION))
+                {
+                    std::cerr << "  Warning: failed to add " << arc << " to ZIP\n";
+                    zipOk = false;
+                }
+            }
+            if (!mz_zip_writer_finalize_archive(&writer))
+            {
+                std::cerr << "Error: cannot finalize ZIP\n";
+                zipOk = false;
+            }
+            mz_zip_writer_end(&writer);
+        }
+    }
+
+    // ── 6. Replace original ZIP ───────────────────────────────────────────────
+    if (zipOk)
+    {
+        if (rename(newZipPath.c_str(), zipPath) != 0)
+        {
+            std::cerr << "Error: cannot replace original ZIP\n";
+            zipOk = false;
+        }
+        else
+        {
+            std::cout << "[compile-moviepack] Done: " << zipPath << "\n";
+        }
+    }
+    if (!zipOk)
+        std::remove(newZipPath.c_str());
+
+    fs::remove_all(tmp);
+    return zipOk;
+}
+
+#endif // !DEDICATED && HAVE_SHADERC_SHADERC_HPP
+
+bool sg_MoviepackHasFile(const char* relPath)
+{
+    // No-op when no moviepack is active. Callers can drop the explicit
+    // sg_MoviePack() guard and let this be the single switch.
+    if (!sg_MoviePack())
+        return false;
+    if (!relPath || !*relPath)
+        return false;
+
+    tString full = tString("moviepack/") + tString(relPath);
+    tString resolved = tDirectories::Data().GetReadPath(full);
+    // GetReadPath returns an empty / single-NUL tString when the file is
+    // not found in any data search root. The same idiom is used elsewhere
+    // in this file (see ScanMoviepacks) to detect missing moviepack files.
+    return resolved.Len() > 1;
+}

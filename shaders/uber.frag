@@ -1,7 +1,9 @@
 #version 450
 
 // Debug: set to 1 to visualize depth buffer as grayscale.
-// Closer objects = bright (near z≈1 reversed-Z), farther = dark (z≈0).
+// Reverse-Z + linearization: near surfaces read BLACK, far surfaces read
+// WHITE (forward-Z mental model). See the DEBUG_DEPTH_VIZ block at the
+// bottom of main() for the linearization formula and tunable n/f window.
 #define DEBUG_DEPTH_VIZ 0
 
 layout(set = 0, binding = 0) uniform sampler2D uTexture;
@@ -221,20 +223,48 @@ void main()
     {
         vec4 texColor = texture(uTexture, vTexCoord);
 
+        // Pre-shadow base color for emissive hooks. Shadows attenuate the visible
+        // fragColor but must NOT suppress bloom — a face in shadow still glows.
+        // For the lit (cycle body) path this is texColor; for the unlit (wall) path
+        // it is vColor*texColor captured before the shadow multiply.
+        vec4 emissiveBase = texColor;
+
         // Lighting flag in push constant uTexMatrix[2][3] (per-draw, not shared UBO)
         if (pc.uTexMatrix[2][3] > 0.5)
         {
-            // Blinn-Phong lighting matching GL3 formula:
-            //   color = texColor * vColor * (ambient + diffuse) + specular
-            // vColor acts as effective material (GL_COLOR_MATERIAL behavior).
-            // Specular is additive and NOT modulated by texture color.
+            // Blinn-Phong lighting.
+            // Material color sourcing (partial-tint model):
+            //   Non-instanced path: vColor = white (uber.vert lit path hardcodes vec4(1.0));
+            //     materialDiffuse_ (team color) is in pc.uNormalMatrix[3].rgb.
+            //     matColor = white * team_color = team_color.
+            //   Instanced path: vColor = aInstanceColor (team color per instance);
+            //     pc.uNormalMatrix[3].rgb = white (DrawInstancedModelMesh sets it to 1,1,1).
+            //     matColor = team_color * white = team_color.
+            //   In both cases matColor = team_color for diffuse/specular lighting.
+            //
+            // The texture is pre-processed by gTextureCycle::ProcessImage: transparent areas
+            // are filled with the team color; opaque (highlight) areas keep their original
+            // white/gray color. Lighting modulates that pre-tinted texture — the texColor
+            // multiplication does NOT include vColor because the tint is already baked in.
             vec3 N = normalize(vNormal);
             vec3 V = vec3(0.0, 0.0, 1.0);  // infinite viewer (+Z toward camera in view space)
 
-            // Per-draw material color lives in the 4th column of normalMatrix
-            // (push constant = per-draw, unlike UBO which is per-frame and
-            // would make all cycles share the last-written color).
-            vec3 matColor = pc.uNormalMatrix[3].rgb;
+            // Two-sided lighting: flip normal if it faces away from the camera.
+            // Models (ASE, .mod) may have faces with inconsistent winding; after
+            // disabling face culling they render with normals pointing into the screen.
+            // gl_FrontFacing is unreliable here (pipeline key normalizes frontFaceCW=true
+            // when cullFace=false, swapping the convention). Camera-space dot product is
+            // winding-convention-independent.
+            if (dot(N, V) < 0.0) N = -N;
+
+            // matColor = white (neutral lighting).
+            // Team color comes from gTextureCycle::ProcessImage which bakes the player
+            // color into the transparent areas of the texture before GPU upload.
+            // Opaque (white/gray highlight) pixels are left untouched by ProcessImage
+            // and must not be re-tinted here — white lighting keeps them white.
+            // Using team_color as matColor (the old "BUGFIX" approach) makes the
+            // lighting itself team-colored, washing out all highlights to solid team color.
+            vec3 matColor = vec3(1.0);
 
             vec3 diffuseLight = vec3(0.15);  // base ambient
             vec3 specularLight = vec3(0.0);
@@ -263,13 +293,16 @@ void main()
             float shadowFactor = computeShadow(vModelPos);
             vec3 ambient = vec3(0.15);
             vec3 directDiffuse = diffuseLight - ambient; // separate direct from ambient
-            fragColor.rgb = texColor.rgb * vColor.rgb * (ambient + directDiffuse * shadowFactor) + specularLight * shadowFactor;
-            fragColor.a = texColor.a * vColor.a;
+            // texColor carries the pre-baked partial tint from ProcessImage;
+            // don't multiply by vColor again (that would double-tint).
+            fragColor.rgb = texColor.rgb * (ambient + directDiffuse * shadowFactor) + specularLight * shadowFactor;
+            fragColor.a = texColor.a;
         }
         else
         {
             // Normal unlit rendering: vertex color * texture
             fragColor = vColor * texColor;
+            emissiveBase = fragColor;  // save before shadow for emissive hooks
 
             // Shadow mapping on unlit surfaces (floor, cycle walls)
             if (lighting.shadowEnabled != 0)
@@ -307,8 +340,9 @@ void main()
         vec3 em = vec3(0.0);
         switch (uRenderContext)
         {
-            case 7:  em = hookCycleWallEmissive(fragColor, vTexCoord, vModelPos); break;
-            case 8:  em = hookCycleEmissive    (fragColor, vTexCoord, vModelPos, vNormal); break;
+            case 6:  em = hookRimWallEmissive  (fragColor, vTexCoord, vModelPos); break;
+            case 7:  em = hookCycleWallEmissive(emissiveBase, vTexCoord, vModelPos); break;
+            case 8:  em = hookCycleEmissive    (emissiveBase, vTexCoord, vModelPos, vNormal); break;
             case 9:  em = hookZoneEmissive     (fragColor, vTexCoord, vModelPos); break;
             default: break;
         }
@@ -319,11 +353,27 @@ void main()
         if (pc.uTexMatrix[2][2] > 0.5 && fragColor.a < 0.01) discard;
 
 #if DEBUG_DEPTH_VIZ
-        // Overwrite color with depth for visualization.
-        // Reversed-Z: z≈1 = near (bright), z≈0 = far (dark).
-        // Amplify low values so differences at gameplay distance are visible.
-        float d = gl_FragCoord.z;
-        fragColor = vec4(d, d, d, 1.0);
+        // Reverse-Z linearized depth visualization.
+        // Reverse-Z maps near = 1.0, far = 0.0 in the buffer; raw values
+        // cluster near 0 for typical gameplay distances, leaving little
+        // visible contrast. We linearize back to view-space distance and
+        // normalize so close geometry reads as BLACK and the zFar plane
+        // reads as WHITE — the forward-Z mental model.
+        //
+        // d = (n*f) / (n + z_buf * (f - n))  is the inverse of the
+        // reverse-Z projection. n,f below are visualization hardcoded
+        // values, NOT the actual rendering near/far — they only choose
+        // the "interesting" distance band that maps to the gradient.
+        const float dN = 0.05;
+        const float dF = 50.0;
+        float zb = gl_FragCoord.z;
+        float d_lin = (dN * dF) / (dN + zb * (dF - dN));
+        float v = clamp(d_lin / dF, 0.0, 1.0);
+        fragColor = vec4(v, v, v, 1.0);
+        // Zero out emissive too so post-process bloom doesn't dump glow
+        // on top of the depth gradient, which would otherwise bias the
+        // visual reading when a moviepack with bloom is active.
+        WRITE_EMISSIVE(vec4(0.0));
 #endif
     }
 }

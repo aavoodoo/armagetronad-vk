@@ -47,6 +47,7 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 #include "tLuaState.h"
 #include <cstring>
 #include <iostream>
+#include <format>
 #include <algorithm>
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
@@ -112,42 +113,15 @@ static bool s_lastFrameWasInGame = false;
 static bool sr_vulkanValidation = false;
 static tConfItem<bool> sr_vulkanValidationCI("VULKAN_ENABLE_VALIDATION", sr_vulkanValidation);
 
-// Post-processing config. The renderer object reads these on each frame via
-// getters below, so ordering between config load and renderer init doesn't
-// matter — whichever comes first wins, and the other catches up.
-static bool    sr_postProcessEnabled = false;
-static tString sr_postProcessEffect  = tString("passthrough");
-
-// Forward-declared callback — actual renderer state is applied by the
-// renderer itself on the next frame. We just flip a sticky dirty flag here.
-static bool s_postProcessConfigDirty = true;
-static void sr_postProcessConfigChanged() { s_postProcessConfigDirty = true; }
-
-static tConfItem<bool> sr_postProcessEnabledCI(
-    "POST_PROCESS_ENABLED", sr_postProcessEnabled, &sr_postProcessConfigChanged);
-static tConfItemLine sr_postProcessEffectCI(
-    "POST_PROCESS_EFFECT", sr_postProcessEffect, &sr_postProcessConfigChanged);
-
-// Renderer-side accessors (used from vkRenderer::BeginFrame to pick up changes).
-static bool sr_vkPostProcessEnabled() {
-#if defined(__APPLE__) && !(TARGET_OS_IOS)
-    // On macOS MoltenVK, post-process must always be active during in-game
-    // rendering. The offscreen render pass with STORE+SAMPLED_BIT on depth,
-    // followed by a composite pass that binds the depth texture, forces Metal
-    // to preserve full D32_SFLOAT precision. Without this, Metal uses lossy
-    // memoryless depth storage, causing z-fighting on Apple Silicon.
-    return true;
-#else
-    return sr_postProcessEnabled;
-#endif
-}
-static const char* sr_vkPostProcessEffect() { return sr_postProcessEffect; }
-static bool sr_vkPostProcessConfigTakeDirty()
-{
-    bool d = s_postProcessConfigDirty;
-    s_postProcessConfigDirty = false;
-    return d;
-}
+// Post-processing activation state.
+// No config items — driven exclusively by:
+//   • sr_vkPostProcessActivate / sr_vkPostProcessDeactivate (C++ API, called by moviepack)
+//   • aa_pp_enable / aa_pp_disable (Lua API, exposed via gLuaBindings)
+//   • macOS BeginFrame block (force-enables passthrough for depth preservation)
+// All callers run on the render thread, so no mutex is needed.
+static bool   s_pendingPPEnabled = false;
+static std::string s_pendingPPEffect;
+static bool   s_pendingPPDirty   = true;  // apply on first BeginFrame
 
 // ============================================================================
 // Constructor / Destructor
@@ -164,7 +138,6 @@ vkRenderer::vkRenderer()
     , frontFaceCW_(false) // default matches game's normal-play GL_CCW front face
     , blendSrc_(1) // ONE
     , blendDst_(0) // ZERO
-    , depthFunc_(rGLConst::Less)
     , boundTexture2D_(0)
     , commandPool_(VK_NULL_HANDLE)
     , currentFrame_(0)
@@ -441,8 +414,7 @@ bool vkRenderer::Init(SDL_Window* window)
             auto spvPlain = rVulkanShader::CompileGLSLFromFile(
                 fragPathStr, rVulkanShader::Stage::Fragment, includePaths, {}, &fragErr);
             if (!spvPlain.empty())
-                fragShader_ = rVulkanShader::LoadFromMemory(
-                    device, spvPlain.data(), spvPlain.size() * sizeof(uint32_t));
+                fragShader_ = rVulkanShader::LoadFromMemory(device, spvPlain);
             if (fragShader_ == VK_NULL_HANDLE)
                 std::cerr << "[Vulkan] Fragment compile failed (plain):\n" << fragErr << "\n";
 
@@ -452,8 +424,7 @@ bool vkRenderer::Init(SDL_Window* window)
                 fragPathStr, rVulkanShader::Stage::Fragment, includePaths,
                 {{"USE_EMISSIVE_OUT", "1"}}, &fragErrEm);
             if (!spvEmissive.empty())
-                fragShaderEmissive_ = rVulkanShader::LoadFromMemory(
-                    device, spvEmissive.data(), spvEmissive.size() * sizeof(uint32_t));
+                fragShaderEmissive_ = rVulkanShader::LoadFromMemory(device, spvEmissive);
             if (fragShaderEmissive_ == VK_NULL_HANDLE)
                 std::cerr << "[Vulkan] Fragment compile failed (emissive):\n" << fragErrEm << "\n";
         }
@@ -486,9 +457,8 @@ bool vkRenderer::Init(SDL_Window* window)
     // Validate push constant capacity (we use 192 bytes: MVP + texMatrix + normalMatrix)
     if (context_.GetDeviceProperties().limits.maxPushConstantsSize < 192)
     {
-        std::cerr << "[Vulkan] GPU maxPushConstantsSize="
-                  << context_.GetDeviceProperties().limits.maxPushConstantsSize
-                  << " < 192 required" << std::endl;
+        std::cerr << std::format("[Vulkan] GPU maxPushConstantsSize={} < 192 required\n",
+                  context_.GetDeviceProperties().limits.maxPushConstantsSize);
         return false;
     }
 
@@ -661,7 +631,7 @@ bool vkRenderer::Init(SDL_Window* window)
             lightingUBOMapped_[i] = vmaAllocInfo.pMappedData;
             if (!lightingUBOMapped_[i])
             {
-                std::cerr << "[Vulkan] VMA persistent map failed for lightingUBO[" << i << "]\n";
+                std::cerr << std::format("[Vulkan] VMA persistent map failed for lightingUBO[{}]\n", i);
                 return false;
             }
             memcpy(lightingUBOMapped_[i], &initUBO, sizeof(initUBO));
@@ -735,6 +705,11 @@ bool vkRenderer::RecreateSwapchain(int width, int height)
     // cached and deferred descriptor sets still formally "reference" their
     // views, and vkDestroyImageView triggers VUID-01026.
     descriptorManager_.FlushAllDeferred();
+    // The dummy descriptor set is allocated from the same pools and is now
+    // freed.  Rebuild it immediately so draws that fall back to "no texture"
+    // never bind a stale handle.
+    dummyDescriptorSet_ = descriptorManager_.GetOrCreateTextureSet(
+        dummyTexture_.view, dummyTexture_.sampler);
 
     // Destroy viewport FBOs — they're sized to viewport dimensions which change
     DestroyViewportFBOs();
@@ -780,12 +755,8 @@ bool vkRenderer::RecreateSwapchain(int width, int height)
     // Re-activate the effect — OnSwapchainResized cleared all effects and
     // set activeEffectPtr_ to nullptr. Without this, the composite pass
     // doesn't run and swapchain images stay UNDEFINED (magenta screen).
-    if (postProcess_.IsEnabled())
-    {
-        const char* effectName = sr_vkPostProcessEffect();
-        if (effectName && *effectName)
-            postProcess_.SetActiveEffect(effectName);
-    }
+    if (postProcess_.IsEnabled() && !s_pendingPPEffect.empty())
+        postProcess_.SetActiveEffect(s_pendingPPEffect.c_str());
 
     // Resize semaphores if swapchain image count changed
     uint32_t newImageCount = swapchain_.GetImageCount();
@@ -954,7 +925,8 @@ bool vkRenderer::CreateDummyTexture()
 
     // Upload via staging buffer
     rVulkanBuffer staging;
-    rVulkanBufferManager::CreateStagingBuffer(context_, whitePixel, 4, staging);
+    if (!rVulkanBufferManager::CreateStagingBuffer(context_, whitePixel, 4, staging))
+        return false;
 
     VkCommandBuffer cmd = rVulkanBufferManager::BeginSingleTimeCommands(device, commandPool_);
 
@@ -1073,26 +1045,25 @@ void vkRenderer::BeginFrame()
         }
     }
 
-    // Pick up any pending post-process config changes from POST_PROCESS_ENABLED /
-    // POST_PROCESS_EFFECT. The dirty flag is set by tConfItem callbacks on the
-    // console thread; we apply on the render thread at a safe point (before
-    // acquiring the next swapchain image).
-    if (sr_vkPostProcessConfigTakeDirty())
-    {
-        const char* effectName = sr_vkPostProcessEffect();
-        if (effectName && *effectName)
-            postProcess_.SetActiveEffect(effectName);
-        postProcess_.SetEnabled(sr_vkPostProcessEnabled());
-    }
 #if defined(__APPLE__) && !(TARGET_OS_IOS)
-    // On macOS, force post-process ON every frame. The offscreen target needs
-    // valid dimensions, so we pass the current swapchain extent. SetEnabled's
-    // early return prevents redundant rebuilds once it's built.
+    // On macOS, force post-process ON every frame. Must run BEFORE the pending
+    // handler below so the offscreen target exists when SetActiveEffect is called
+    // (otherwise SetActiveEffect defers the load and the pending handler can't
+    // immediately load a custom effect like "bloom").
     if (!postProcess_.IsEnabled())
     {
+        // OnSwapchainResized destroys ALL cached effect pipelines/framebuffers/
+        // render passes.  Those objects may be referenced by the previous frame's
+        // command buffer, which hasn't been fence-waited yet (fence wait is below
+        // at line ~1125).  Wait for all GPU work to complete first so we don't
+        // destroy objects still in use.
+        vkDeviceWaitIdle(context_.GetDevice());
         auto ext = swapchain_.GetExtent();
         postProcess_.OnSwapchainResized(context_, ext.width, ext.height,
                                         framebuffer_.GetRenderPass());
+        // Use passthrough as the bootstrap effect. If a custom effect is pending
+        // (s_pendingPPDirty), the pending handler below will overwrite it immediately
+        // after the offscreen is built.
         postProcess_.SetActiveEffect("passthrough");
         // Reset enabled_ to force SetEnabled to re-enter the build path
         postProcess_.SetEnabled(false);
@@ -1115,6 +1086,24 @@ void vkRenderer::BeginFrame()
     }
 #endif
 
+    // Apply pending post-process activation requests.
+    // s_pendingPPDirty is set by sr_vkPostProcessActivate / sr_vkPostProcessDeactivate.
+    // On macOS this runs after the force-enable block, so the offscreen is already
+    // built and SetActiveEffect loads the effect immediately (no deferral).
+    if (s_pendingPPDirty)
+    {
+        s_pendingPPDirty = false;
+        if (!s_pendingPPEffect.empty())
+            postProcess_.SetActiveEffect(s_pendingPPEffect.c_str());
+#if defined(__APPLE__) && !(TARGET_OS_IOS)
+        // macOS: PP must always be enabled (depth preservation for MoltenVK).
+        // Already handled by the force-enable block above.
+        (void)s_pendingPPEnabled;
+#else
+        postProcess_.SetEnabled(s_pendingPPEnabled);
+#endif
+    }
+
     VkDevice device = context_.GetDevice();
 
     // Wait for previous frame using this slot's fence (5-second timeout to detect GPU hangs)
@@ -1128,7 +1117,7 @@ void vkRenderer::BeginFrame()
     }
     if (fenceResult != VK_SUCCESS)
     {
-        std::cerr << "[Vulkan] vkWaitForFences error: " << fenceResult << "\n";
+        std::cerr << std::format("[Vulkan] vkWaitForFences error: {}\n", static_cast<int>(fenceResult));
         if (fenceResult == VK_ERROR_DEVICE_LOST)
         {
             std::cerr << "[Vulkan] GPU device lost — rendering stopped. Restart the game.\n";
@@ -1240,12 +1229,12 @@ void vkRenderer::BeginFrame()
     if (postProcessActive)
     {
         clearValues[1].color = {{0.0f, 0.0f, 0.0f, 0.0f}};   // emissive clears to 0
-        clearValues[2].depthStencil = {1.0f, 0};
+        clearValues[2].depthStencil = {0.0f, 0};             // reverse-Z: clear to far
         rpInfo.clearValueCount = 3;
     }
     else
     {
-        clearValues[1].depthStencil = {1.0f, 0};
+        clearValues[1].depthStencil = {0.0f, 0};             // reverse-Z: clear to far
         rpInfo.clearValueCount = 2;  // swapchain: 2 attachments
     }
     rpInfo.pClearValues = clearValues;
@@ -1437,11 +1426,15 @@ void vkRenderer::BeginFrame()
 
         int vkY = screenH - y - h;
 
+        // Negative-height viewport (VK_KHR_maintenance1): puts y=+1 (GL "up")
+        // at the top of the screen region, replacing the per-vertex Y-flip
+        // that uber.vert / uber_instanced.vert used to apply. vp.y is the
+        // *bottom* of the region in framebuffer space; vp.height is negative.
         VkViewport vp{};
         vp.x = static_cast<float>(x);
-        vp.y = static_cast<float>(vkY);
+        vp.y = static_cast<float>(vkY + h);
         vp.width = static_cast<float>(w);
-        vp.height = static_cast<float>(h);
+        vp.height = -static_cast<float>(h);
         vp.minDepth = 0.0f;
         vp.maxDepth = 1.0f;
         vkCmdSetViewport(cmd, 0, 1, &vp);
@@ -1480,7 +1473,7 @@ void vkRenderer::SwapBuffers()
 
 void vkRenderer::EndFrame()
 {
-    if (!frameStarted_) return;
+    if (!frameStarted_) [[unlikely]] return;
 
     VkCommandBuffer cmd = commandBuffers_[currentFrame_];
 
@@ -1696,23 +1689,75 @@ void vkRenderer::RotateMatrix(REAL angle, REAL x, REAL y, REAL z)
     currentStack_->Rotate(angle, x, y, z);
 }
 
+// GL→VK depth remap + reverse-Z, applied on top of GLM's GL-style projection:
+// maps GL-depth [-w,w] → VK-depth [w,0] (reverse-Z, near = w / far = 0).
+// Float depth precision is then uniform across the whole range, removing the
+// precision pressure that drove the eCamera zNear *= .3f shrink and the macOS
+// depth-sampling kludge.
+//
+// Composite of glToVk * reverseZ:
+//   GL→VK depth | 1 0 0   0  |   z' = (z + w) / 2
+//               | 0 1 0   0  |
+//               | 0 0 0.5 0.5|
+//               | 0 0 0   1  |
+//   Reverse-Z   | 1 0  0 0 |    z' = w - z
+//               | 0 1  0 0 |
+//               | 0 0 -1 1 |
+//               | 0 0  0 1 |
+// = reverseZ * glToVk =
+//   | 1 0  0    0  |
+//   | 0 1  0    0  |
+//   | 0 0 -0.5  0.5|
+//   | 0 0  0    1  |
+//
+// Y-flip is NOT here. It is performed by the rasterizer via
+// VK_KHR_maintenance1 negative-height viewport (vp.height < 0) — see the
+// VkViewport setup in this file. Baking Y-flip into the projection matrix
+// would leave the HUD phase upside-down because rRenderQueue::SetupPhase
+// loads an identity projection for HUD, bypassing Frustum/Ortho/Perspective.
+// The negative viewport flips Y at the rasterizer regardless of matrix,
+// catching every path uniformly.
+//
+// Pipelines pair this with depthCompareOp = GREATER_OR_EQUAL and clear depth
+// = 0.0. Shadow maps still use forward-Z (separate VP matrix in
+// ComputeShadowVPMatrices, separate pipeline in BuildShadowPipeline) and a
+// positive-height viewport.
+static glm::mat4 VkClipReverseZ()
+{
+    glm::mat4 c(1.0f);
+    // Only depth remap + reverse-Z here. Y-flip is in the negative-height
+    // viewport (see vkCmdSetViewport call sites in this file).
+    c[2][2] = -0.5f;
+    c[3][2] =  0.5f;
+    return c;
+}
+
 void vkRenderer::Ortho(REAL left, REAL right, REAL bottom, REAL top, REAL zNear, REAL zFar)
 {
-    currentStack_->Ortho(left, right, bottom, top, zNear, zFar);
+    glm::mat4 m = glm::ortho(static_cast<float>(left), static_cast<float>(right),
+                              static_cast<float>(bottom), static_cast<float>(top),
+                              static_cast<float>(zNear), static_cast<float>(zFar));
+    glm::mat4 vk = VkClipReverseZ() * m;
+    currentStack_->Mult(glm::value_ptr(vk));
 }
 
 void vkRenderer::Frustum(REAL left, REAL right, REAL bottom, REAL top, REAL zNear, REAL zFar)
 {
-    // GLM frustum
     glm::mat4 f = glm::frustum(static_cast<float>(left), static_cast<float>(right),
                                 static_cast<float>(bottom), static_cast<float>(top),
                                 static_cast<float>(zNear), static_cast<float>(zFar));
-    currentStack_->Mult(glm::value_ptr(f));
+    glm::mat4 vk = VkClipReverseZ() * f;
+    currentStack_->Mult(glm::value_ptr(vk));
 }
 
 void vkRenderer::Perspective(REAL fovy, REAL aspect, REAL zNear, REAL zFar)
 {
-    currentStack_->Perspective(fovy, aspect, zNear, zFar);
+    glm::mat4 p = glm::perspective(glm::radians(static_cast<float>(fovy)),
+                                    static_cast<float>(aspect),
+                                    static_cast<float>(zNear),
+                                    static_cast<float>(zFar));
+    glm::mat4 vk = VkClipReverseZ() * p;
+    currentStack_->Mult(glm::value_ptr(vk));
 }
 
 void vkRenderer::LookAt(REAL eyeX, REAL eyeY, REAL eyeZ,
@@ -1792,25 +1837,28 @@ void vkRenderer::DisableState(int cap)
 }
 
 void vkRenderer::BlendFunc(int sfactor, int dfactor) { blendSrc_ = sfactor; blendDst_ = dfactor; }
-void vkRenderer::DepthFunc(int func) { depthFunc_ = func; }
 void vkRenderer::DepthMask(bool write) { depthWriteEnabled_ = write; }
 // Match GL convention directly: game-CW → Vulkan CW, game-CCW → Vulkan CCW.
-// Even though the vertex shader applies gl_Position.y = -gl_Position.y, the
-// Y-flip does NOT swap effective winding for culling purposes in practice:
-// passing CCW through unchanged produces correct front-face selection for
-// this project's meshes. (Verified empirically — inverting produced the
-// wrong culling side.)
+// The Y-flip from the negative-height viewport (VK_KHR_maintenance1) reverses
+// framebuffer-space winding compared to NDC. Removing the previous shader
+// Y-flip and adding the rasterizer Y-flip both reverse winding once, so the
+// effective screen-space winding is unchanged from the original GL layout.
+// Pass-through CCW therefore still produces correct front-face selection.
 void vkRenderer::FrontFace(int mode) { frontFaceCW_ = (mode == 0x0900); } // GL_CW (0x0900) → Vulkan CW
 
-// Dead code — zero call sites, kept as empty overrides for interface compliance
 void vkRenderer::PolygonOffset(REAL factor, REAL units)
 {
-    if (!frameStarted_) return;
+    if (!frameStarted_) [[unlikely]] return;
     VkCommandBuffer cmd = commandBuffers_[currentFrame_];
     // OpenGL: depthBias = factor * maxSlope + units * minResolvable
     // Vulkan: depthBias = slopeFactor * maxSlope + constantFactor * minResolvable [+ clamp]
-    // Mapping: slopeFactor = factor, constantFactor = units
-    vkCmdSetDepthBias(cmd, static_cast<float>(units), 0.0f, static_cast<float>(factor));
+    // Mapping: slopeFactor = factor, constantFactor = units.
+    //
+    // Reverse-Z sign flip: callers pass GL-convention values where negative
+    // bias pulls a fragment TOWARD the camera (smaller depth = closer in
+    // forward-Z). Under reverse-Z, closer = larger depth, so the same intent
+    // requires the opposite sign. Negate here so callers stay unchanged.
+    vkCmdSetDepthBias(cmd, -static_cast<float>(units), 0.0f, -static_cast<float>(factor));
 }
 // ============================================================================
 // Viewport / Scissor / Clear
@@ -1838,16 +1886,21 @@ void vkRenderer::Viewport(int x, int y, int w, int h)
         }
         int vkY = targetH - y - h;
 
+        // Negative-height viewport (VK_KHR_maintenance1) — see the matching
+        // block above for rationale. vp.y is the bottom of the region in
+        // framebuffer space, vp.height is negative.
         VkViewport vp{};
         vp.x = static_cast<float>(x);
-        vp.y = static_cast<float>(vkY);
+        vp.y = static_cast<float>(vkY + h);
         vp.width = static_cast<float>(w);
-        vp.height = static_cast<float>(h);
+        vp.height = -static_cast<float>(h);
         vp.minDepth = 0.0f;
         vp.maxDepth = 1.0f;
         vkCmdSetViewport(cmd, 0, 1, &vp);
 
-        // Keep scissor in sync with viewport, clamped to valid Vulkan bounds
+        // Keep scissor in sync with viewport, clamped to valid Vulkan bounds.
+        // Scissor uses framebuffer-space coords, NOT NDC, so it stays
+        // unaffected by the negative-height trick.
         int scX = std::max(x, 0);
         int scY = std::max(vkY, 0);
         int scRight  = std::min(x + w, targetW);
@@ -1868,7 +1921,7 @@ void vkRenderer::GetViewport(int vp[4])
 
 void vkRenderer::Scissor(int x, int y, int w, int h)
 {
-    if (!frameStarted_) return;
+    if (!frameStarted_) [[unlikely]] return;
     VkCommandBuffer cmd = commandBuffers_[currentFrame_];
     // Convert from OpenGL bottom-origin to Vulkan top-origin
     int targetH, targetW;
@@ -1900,7 +1953,7 @@ void vkRenderer::ClearColor(REAL r, REAL g, REAL b, REAL a)
 
 void vkRenderer::Clear(bool color, bool depth, bool /*stencil*/)
 {
-    if (!frameStarted_) return;
+    if (!frameStarted_) [[unlikely]] return;
     VkCommandBuffer cmd = commandBuffers_[currentFrame_];
 
     // Color clears always use full framebuffer extent.
@@ -1924,12 +1977,12 @@ void vkRenderer::Clear(bool color, bool depth, bool /*stencil*/)
     // (OpaqueStatic phase) don't wipe other viewports' depth values.
     // Without this, geometry from one viewport can "invade" another because
     // a later viewport's depth clear erases the earlier viewport's depth,
-    // leaving stale depth=1.0 that passes LEQUAL for any subsequent draw.
+    // leaving stale depth that passes the depth test for any subsequent draw.
     if (depth)
     {
         VkClearAttachment clr{};
         clr.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
-        clr.clearValue.depthStencil = {1.0f, 0};
+        clr.clearValue.depthStencil = {0.0f, 0};   // reverse-Z: clear to far
 
         int screenH = static_cast<int>(swapchain_.GetExtent().height);
         int vkY = screenH - cachedViewport_[1] - cachedViewport_[3];
@@ -2224,7 +2277,11 @@ void vkRenderer::TexImage2D(int target, int level, int /*internalFormat*/,
         // Upload via staging buffer (DEVICE_LOCAL + OPTIMAL tiling)
         VkDeviceSize imageSize = (VkDeviceSize)width * height * 4;
         rVulkanBuffer staging;
-        rVulkanBufferManager::CreateStagingBuffer(context_, rgbaData.data(), imageSize, staging);
+        if (!rVulkanBufferManager::CreateStagingBuffer(context_, rgbaData.data(), imageSize, staging))
+        {
+            vmaDestroyImage(context_.GetAllocator(), newImage, newAllocation);
+            return;
+        }
 
         VkCommandBuffer cmd = rVulkanBufferManager::BeginSingleTimeCommands(device, commandPool_);
 
@@ -3731,7 +3788,7 @@ uint32_t vkRenderer::GetWallComputeCurrentCount() const
 void vkRenderer::DrawComputedWallsRange(unsigned int textureId, uint32_t startSeg, uint32_t segCount)
 {
     if (!wallComputeReady_ || segCount == 0) return;
-    if (!frameStarted_) return;
+    if (!frameStarted_) [[unlikely]] return;
 
     VkCommandBuffer cmd = commandBuffers_[currentFrame_];
 
@@ -3947,10 +4004,18 @@ void vkRenderer::BeginViewportFBO(int index, int totalViewports, int x, int y, i
     // Ensure the frame is started (BeginFrame creates the main render pass
     // that we need to end before starting the viewport FBO render pass).
     if (!frameStarted_) BeginFrame();
-    if (!frameStarted_) return;
+    if (!frameStarted_) [[unlikely]] return;
 
-    // Create/resize FBO if needed (per-frame to avoid race with in-flight frames)
+    // Create/resize FBO for the current frame slot.
+    // Also eagerly pre-create the same FBO for every OTHER frame slot so that
+    // later frames don't pay the creation cost on their first use — which
+    // caused a visible flicker on the first round of multi-viewport mode.
+    // Pre-creation is safe here: the fence wait in BeginFrame guarantees the
+    // other slots' previous submissions are complete.
     if (!CreateViewportFBO(currentFrame_, index, w, h)) return;
+    for (int f = 0; f < MAX_FRAMES_IN_FLIGHT; f++)
+        if (f != currentFrame_)
+            CreateViewportFBO(f, index, w, h);  // best-effort; ignore failure
     viewportFBOCount_ = std::max(viewportFBOCount_, index + 1);
 
     VkCommandBuffer cmd = commandBuffers_[currentFrame_];
@@ -3962,7 +4027,7 @@ void vkRenderer::BeginViewportFBO(int index, int totalViewports, int x, int y, i
     ViewportFBO& vfbo = viewportFBOs_[currentFrame_][index];
     VkClearValue clears[2]{};
     clears[0].color = {{clearColor_[0], clearColor_[1], clearColor_[2], clearColor_[3]}};
-    clears[1].depthStencil = {1.0f, 0};
+    clears[1].depthStencil = {0.0f, 0};   // reverse-Z: clear to far
 
     VkRenderPassBeginInfo rpInfo{};
     rpInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
@@ -3978,10 +4043,15 @@ void vkRenderer::BeginViewportFBO(int index, int totalViewports, int x, int y, i
     // Pipeline manager needs to know about the render pass for pipeline cache
     pipelineManager_.SetRenderPass(viewportRenderPass_);
 
-    // Set viewport/scissor to full FBO size (not screen sub-region)
+    // Set viewport/scissor to full FBO size (not screen sub-region).
+    // Negative-height viewport (VK_KHR_maintenance1) — scene shaders no
+    // longer apply a per-vertex Y-flip; the rasterizer does it via the
+    // negative height. vp.y is the bottom of the FBO in framebuffer space.
     VkViewport vp{};
+    vp.x = 0;
+    vp.y = static_cast<float>(h);
     vp.width = static_cast<float>(w);
-    vp.height = static_cast<float>(h);
+    vp.height = -static_cast<float>(h);
     vp.minDepth = 0; vp.maxDepth = 1;
     vkCmdSetViewport(cmd, 0, 1, &vp);
     VkRect2D scissor{{0, 0}, {static_cast<uint32_t>(w), static_cast<uint32_t>(h)}};
@@ -4018,7 +4088,7 @@ void vkRenderer::EndViewportFBO()
     {
         VkClearAttachment depthClear{};
         depthClear.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
-        depthClear.clearValue.depthStencil = {1.0f, 0};
+        depthClear.clearValue.depthStencil = {0.0f, 0};   // reverse-Z: clear to far
         VkClearRect rect{};
         rect.rect.extent = {static_cast<uint32_t>(viewportFBOs_[currentFrame_][activeViewportFBO_].width),
                             static_cast<uint32_t>(viewportFBOs_[currentFrame_][activeViewportFBO_].height)};
@@ -4046,7 +4116,7 @@ void vkRenderer::EndViewportFBO()
     VkClearValue clears[3]{};
     clears[0].color = {{clearColor_[0], clearColor_[1], clearColor_[2], clearColor_[3]}};
     clears[1].color = {{0.0f, 0.0f, 0.0f, 0.0f}};  // emissive (ignored for 2-attachment RP)
-    clears[2].depthStencil = {1.0f, 0};
+    clears[2].depthStencil = {0.0f, 0};   // reverse-Z: clear to far
 
     VkRenderPassBeginInfo rpInfo{};
     rpInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
@@ -4065,9 +4135,12 @@ void vkRenderer::EndViewportFBO()
     cachedViewport_[2] = static_cast<int>(swapchain_.GetExtent().width);
     cachedViewport_[3] = static_cast<int>(swapchain_.GetExtent().height);
 
+    // Negative-height viewport (VK_KHR_maintenance1) — see other call sites.
     VkViewport vp{};
+    vp.x = 0;
+    vp.y = static_cast<float>(swapchain_.GetExtent().height);
     vp.width = static_cast<float>(swapchain_.GetExtent().width);
-    vp.height = static_cast<float>(swapchain_.GetExtent().height);
+    vp.height = -static_cast<float>(swapchain_.GetExtent().height);
     vp.minDepth = 0; vp.maxDepth = 1;
     vkCmdSetViewport(cmd, 0, 1, &vp);
     VkRect2D scissor{{0, 0}, swapchain_.GetExtent()};
@@ -4433,7 +4506,7 @@ void vkRenderer::DrawBatchTriangles(const void* vertices, size_t vertexCount,
                                     const void* stateKey)
 {
     if (!frameStarted_) BeginFrame();
-    if (!frameStarted_) return;
+    if (!frameStarted_) [[unlikely]] return;
 
     const rVertex20* verts = static_cast<const rVertex20*>(vertices);
     const rRenderStateKey& state = *static_cast<const rRenderStateKey*>(stateKey);
@@ -4443,7 +4516,17 @@ void vkRenderer::DrawBatchTriangles(const void* vertices, size_t vertexCount,
     BuildPushConstants(pc, state, false);
     VkDescriptorSet descSet = LookupTextureDescriptor(state);
 
-    vulkanQueue_.DrawTriangles(cmd, verts, vertexCount, state,
+    // Respect phase depth state: if the phase disabled depth (e.g. Sky phase
+    // for floor rendering), strip the flags from the state key so the pipeline
+    // has depth write/test OFF. Without this, floor geometry writes depth even
+    // though the Sky phase says depthWrite=false, causing wall z-fighting.
+    rRenderStateKey adjustedState = state;
+    if (!depthTestEnabled_)
+        adjustedState.flags &= ~rRenderStateKey::DepthTest;
+    if (!depthWriteEnabled_)
+        adjustedState.flags &= ~rRenderStateKey::DepthWrite;
+
+    vulkanQueue_.DrawTriangles(cmd, verts, vertexCount, adjustedState,
                                pipelineManager_, descSet,
                                &pc, sizeof(pc), cullFaceEnabled_, frontFaceCW_, 0xF);
 }
@@ -4452,7 +4535,7 @@ void vkRenderer::DrawBatchLitTriangles(const void* vertices, size_t vertexCount,
                                         const void* stateKey)
 {
     if (!frameStarted_) BeginFrame();
-    if (!frameStarted_) return;
+    if (!frameStarted_) [[unlikely]] return;
 
     const rRenderStateKey& state = *static_cast<const rRenderStateKey*>(stateKey);
     VkCommandBuffer cmd = commandBuffers_[currentFrame_];
@@ -4513,7 +4596,7 @@ void vkRenderer::DrawModelMesh(uint64_t meshId,
                                unsigned int textureId)
 {
     if (!frameStarted_) BeginFrame();
-    if (!frameStarted_) return;
+    if (!frameStarted_) [[unlikely]] return;
     if (vertices.empty()) return;
 
     // ----- Cache: convert rModelVertex → rVertexLit32 once per unique mesh -----
@@ -4528,10 +4611,14 @@ void vkRenderer::DrawModelMesh(uint64_t meshId,
             maxTC = std::max(maxTC, std::abs(v.texcoord[1]));
         };
         if (!indices.empty())
+        {
             for (unsigned int idx : indices)
                 if (idx < vertices.size()) scanTC(vertices[idx]);
+        }
         else
+        {
             for (const auto& v : vertices) scanTC(v);
+        }
 
         entry.texScale = maxTC;
         float invScale = 1.0f / maxTC;
@@ -4594,8 +4681,6 @@ void vkRenderer::DrawModelMesh(uint64_t meshId,
     memcpy(pc.mvp, glm::value_ptr(mvp), 64);
 
     // Normal matrix: per-draw modelview for transforming normals to view space.
-    // This MUST be in push constants (not UBO) because each model part (body, wheels)
-    // has a different modelview, and the UBO is shared across all draws in a frame.
     glm::mat4 normalMat = modelviewStack_.GetMat4();
     memcpy(pc.normalMatrix, glm::value_ptr(normalMat), 64);
 
@@ -4638,10 +4723,11 @@ void vkRenderer::DrawModelMesh(uint64_t meshId,
     rRenderStateKey state = textureId ? rRenderStateKey::Textured(textureId, rBlendMode::Opaque)
                                       : rRenderStateKey::Colored(rBlendMode::Opaque);
 
+    // Model meshes (ASE, .mod) have inconsistent face winding — never cull.
     vulkanQueue_.DrawLitTriangles(cmd, entry.litVerts.data(), entry.litVerts.size(),
                                    state, pipelineManager_, descSet,
                                    &pc, sizeof(pc),
-                                   cullFaceEnabled_, frontFaceCW_, 0xF);
+                                   false, frontFaceCW_, 0xF);
 
     // Collect model mesh vertices for shadow pass (model-space → world-space)
     if (rRenderQueue::Instance().IsShadowCollectionEnabled() && !entry.litVerts.empty())
@@ -4750,7 +4836,7 @@ void vkRenderer::DrawInstancedModelMesh(uint64_t meshId,
         instances, instanceCount,
         state, pipelineManager_, descSet,
         &pc, sizeof(pc),
-        cullFaceEnabled_, frontFaceCW_);
+        false, frontFaceCW_);
 
     // Collect instanced geometry for shadow pass: for each instance, transform
     // the shared mesh vertices by the instance's model matrix (already world-space)
@@ -4776,7 +4862,7 @@ void vkRenderer::DrawBatchLines(const void* vertices, size_t vertexCount,
                                 const void* stateKey)
 {
     if (!frameStarted_) BeginFrame();
-    if (!frameStarted_) return;
+    if (!frameStarted_) [[unlikely]] return;
 
     const rVertex20* verts = static_cast<const rVertex20*>(vertices);
     const rRenderStateKey& state = *static_cast<const rRenderStateKey*>(stateKey);
@@ -4787,7 +4873,14 @@ void vkRenderer::DrawBatchLines(const void* vertices, size_t vertexCount,
     BuildPushConstants(pc, state, false);
     VkDescriptorSet descSet = LookupTextureDescriptor(state);
 
-    vulkanQueue_.DrawLines(cmd, verts, vertexCount, state,
+    // Respect phase depth state (same as DrawBatchTriangles)
+    rRenderStateKey adjustedState = state;
+    if (!depthTestEnabled_)
+        adjustedState.flags &= ~rRenderStateKey::DepthTest;
+    if (!depthWriteEnabled_)
+        adjustedState.flags &= ~rRenderStateKey::DepthWrite;
+
+    vulkanQueue_.DrawLines(cmd, verts, vertexCount, adjustedState,
                            pipelineManager_, descSet,
                            &pc, sizeof(pc), cullFaceEnabled_, frontFaceCW_, 0xF);
 }
@@ -4892,8 +4985,7 @@ void vkRenderer::DoReloadShaders()
         auto spvPlain = rVulkanShader::CompileGLSLFromFile(
             fragPathStr, rVulkanShader::Stage::Fragment, includePaths, {}, &err);
         if (!spvPlain.empty())
-            newFrag = rVulkanShader::LoadFromMemory(
-                device, spvPlain.data(), spvPlain.size() * sizeof(uint32_t));
+            newFrag = rVulkanShader::LoadFromMemory(device, spvPlain);
         if (newFrag == VK_NULL_HANDLE)
             std::cerr << "[Vulkan] ReloadShaders: fragment compile failed (plain):\n" << err << "\n";
 
@@ -4902,8 +4994,7 @@ void vkRenderer::DoReloadShaders()
             fragPathStr, rVulkanShader::Stage::Fragment, includePaths,
             {{"USE_EMISSIVE_OUT", "1"}}, &errEm);
         if (!spvEmissive.empty())
-            newFragEmissive = rVulkanShader::LoadFromMemory(
-                device, spvEmissive.data(), spvEmissive.size() * sizeof(uint32_t));
+            newFragEmissive = rVulkanShader::LoadFromMemory(device, spvEmissive);
         if (newFragEmissive == VK_NULL_HANDLE)
             std::cerr << "[Vulkan] ReloadShaders: fragment compile failed (emissive):\n" << errEm << "\n";
     }
@@ -4930,6 +5021,18 @@ void vkRenderer::DoReloadShaders()
 
     // New shaders loaded successfully.  Now swap them in.
     vkDeviceWaitIdle(device);
+
+    // Flush all cached and deferred descriptor sets.  The device is idle so
+    // all in-flight command buffers are done; cached sets referencing old
+    // image views (and the views of any FBOs/textures we're about to rebuild)
+    // must be freed now.  Without this, RecreateSwapchain (triggered later
+    // by PP reload) calls FlushAllDeferred and frees sets that were already
+    // recorded into the current frame's command buffer → VUID errors.
+    descriptorManager_.FlushAllDeferred();
+    // Rebuild dummy descriptor set — it lives outside the cache and is now freed.
+    dummyDescriptorSet_ = descriptorManager_.GetOrCreateTextureSet(
+        dummyTexture_.view, dummyTexture_.sampler);
+
     vulkanQueue_.CompactIfNeeded(device);
 
     // Invalidate model mesh cache — models may have changed (moviepack switch)
@@ -4986,6 +5089,13 @@ void sr_vkSetCameraWorldPos(float x, float y, float z)
     s_cameraWorldPos[0] = x;
     s_cameraWorldPos[1] = y;
     s_cameraWorldPos[2] = z;
+}
+
+void sr_vkGetCameraWorldPos(float& x, float& y, float& z)
+{
+    x = s_cameraWorldPos[0];
+    y = s_cameraWorldPos[1];
+    z = s_cameraWorldPos[2];
 }
 
 // Called from sr_SetRenderContext whenever the render context changes.
@@ -5085,6 +5195,25 @@ void sr_vkPostProcessOnMoviepackDeactivated()
 {
     if (s_vkRenderer)
         s_vkRenderer->GetPostProcess().OnMoviepackDeactivated();
+}
+
+//! Activate post-processing with the given effect (called by moviepack system and Lua aa_pp_enable).
+//! Thread: render thread only.
+void sr_vkPostProcessActivate(const char* effectName)
+{
+    s_pendingPPEnabled = true;
+    s_pendingPPEffect  = effectName ? effectName : "";
+    s_pendingPPDirty   = true;
+}
+
+//! Deactivate post-processing (called by moviepack system and Lua aa_pp_disable).
+//! On macOS, PP infrastructure stays enabled (passthrough) for depth preservation.
+//! Thread: render thread only.
+void sr_vkPostProcessDeactivate()
+{
+    s_pendingPPEnabled = false;
+    s_pendingPPEffect.clear();
+    s_pendingPPDirty   = true;
 }
 
 #endif // DEDICATED

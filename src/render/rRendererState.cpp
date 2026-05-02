@@ -56,4 +56,10 @@ void sr_SetCameraWorldPos(float x, float y, float z)
     sr_vkSetCameraWorldPos(x, y, z);
 }
 
+extern void sr_vkGetCameraWorldPos(float& x, float& y, float& z);
+void sr_GetCameraWorldPos(float& x, float& y, float& z)
+{
+    sr_vkGetCameraWorldPos(x, y, z);
+}
+
 #endif // DEDICATED

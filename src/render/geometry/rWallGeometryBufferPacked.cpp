@@ -198,9 +198,11 @@ void rWallGeometryBufferPacked::RenderQuads()
     if (quadVertices_.empty()) return;
     EnsureQuadCache();
 
+    // Stable wall quads are opaque — depth test cleanly resolves overlapping
+    // walls from different players at grinding distance (no bleed-through).
     unsigned int texId = RenderGetBoundTexture2D();
-    rRenderStateKey state = texId ? rRenderStateKey::Textured(texId, rBlendMode::Alpha)
-                                  : rRenderStateKey::Colored(rBlendMode::Alpha);
+    rRenderStateKey state = texId ? rRenderStateKey::Textured(texId, rBlendMode::Opaque)
+                                  : rRenderStateKey::Colored(rBlendMode::Opaque);
     state.SetTexMatrix(vkQuadTexMatrix_);
     state.SetRenderContext(static_cast<int>(sr_GetRenderContext()));
     rRenderQueue::Instance().Submit(rRenderPhase::OpaqueDynamic, state,
@@ -215,12 +217,14 @@ void rWallGeometryBufferPacked::RenderQuadsHead(uint32_t headSegCount)
     size_t vertCount = std::min(static_cast<size_t>(headSegCount) * 6, vkCachedQuadVerts_.size());
     if (vertCount == 0) return;
 
+    // Streaming head (begin gradient) needs alpha for the fade-in effect.
+    // Submit to Transparent phase for correct back-to-front sorting.
     unsigned int texId = RenderGetBoundTexture2D();
     rRenderStateKey state = texId ? rRenderStateKey::Textured(texId, rBlendMode::Alpha)
                                   : rRenderStateKey::Colored(rBlendMode::Alpha);
     state.SetTexMatrix(vkQuadTexMatrix_);
     state.SetRenderContext(static_cast<int>(sr_GetRenderContext()));
-    rRenderQueue::Instance().Submit(rRenderPhase::OpaqueDynamic, state,
+    rRenderQueue::Instance().Submit(rRenderPhase::Transparent, state,
                                     vkCachedQuadVerts_.data(), vertCount);
 }
 

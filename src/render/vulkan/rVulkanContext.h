@@ -53,39 +53,33 @@ public:
     //! Shut down and release all Vulkan resources
     void Shutdown();
 
-    bool IsValid() const { return device_ != VK_NULL_HANDLE; }
+    [[nodiscard]] bool IsValid() const { return device_ != VK_NULL_HANDLE; }
 
     // Accessors
-    VkInstance       GetInstance()       const { return instance_; }
-    VkPhysicalDevice GetPhysicalDevice() const { return physicalDevice_; }
-    VkDevice         GetDevice()         const { return device_; }
-    VkSurfaceKHR     GetSurface()        const { return surface_; }
-    VkQueue          GetGraphicsQueue()  const { return graphicsQueue_; }
-    VkQueue          GetPresentQueue()   const { return presentQueue_; }
-    uint32_t         GetGraphicsFamily() const { return graphicsFamily_; }
-    uint32_t         GetPresentFamily()  const { return presentFamily_; }
+    [[nodiscard]] VkInstance       GetInstance()       const { return instance_; }
+    [[nodiscard]] VkPhysicalDevice GetPhysicalDevice() const { return physicalDevice_; }
+    [[nodiscard]] VkDevice         GetDevice()         const { return device_; }
+    [[nodiscard]] VkSurfaceKHR     GetSurface()        const { return surface_; }
+    [[nodiscard]] VkQueue          GetGraphicsQueue()  const { return graphicsQueue_; }
+    [[nodiscard]] VkQueue          GetPresentQueue()   const { return presentQueue_; }
+    [[nodiscard]] uint32_t         GetGraphicsFamily() const { return graphicsFamily_; }
+    [[nodiscard]] uint32_t         GetPresentFamily()  const { return presentFamily_; }
 
     //! Get physical device properties (name, limits, etc.)
-    const VkPhysicalDeviceProperties& GetDeviceProperties() const { return deviceProperties_; }
+    [[nodiscard]] const VkPhysicalDeviceProperties& GetDeviceProperties() const { return deviceProperties_; }
 
     //! Get physical device memory properties
-    const VkPhysicalDeviceMemoryProperties& GetMemoryProperties() const { return memoryProperties_; }
-
-    //! Find a memory type index matching requirements
-    //! @param typeFilter Bitmask of acceptable memory types
-    //! @param properties Required memory property flags
-    //! @return Memory type index, or UINT32_MAX on failure
-    uint32_t FindMemoryType(uint32_t typeFilter, VkMemoryPropertyFlags properties) const;
+    [[nodiscard]] const VkPhysicalDeviceMemoryProperties& GetMemoryProperties() const { return memoryProperties_; }
 
     //! Get renderer string (device name)
-    const char* GetDeviceName() const { return deviceProperties_.deviceName; }
+    [[nodiscard]] const char* GetDeviceName() const { return deviceProperties_.deviceName; }
 
     //! Whether VkPhysicalDeviceFeatures::depthBiasClamp was enabled at device creation.
     //! When true, vkCmdSetDepthBias may use a non-zero clamp to limit slope-based bias.
-    bool HasDepthBiasClamp() const { return depthBiasClampSupported_; }
+    [[nodiscard]] bool HasDepthBiasClamp() const { return depthBiasClampSupported_; }
 
     //! VulkanMemoryAllocator handle — use for all image and buffer allocations.
-    VmaAllocator GetAllocator() const { return allocator_; }
+    [[nodiscard]] VmaAllocator GetAllocator() const { return allocator_; }
 
     // Non-copyable
     rVulkanContext(const rVulkanContext&) = delete;

@@ -95,23 +95,6 @@ bool rRenderState::SetBlendFunc(int sfactor, int dfactor)
     return true;
 }
 
-int rRenderState::GetDepthFunc() const
-{
-    return depthFunc_;
-}
-
-bool rRenderState::SetDepthFunc(int func)
-{
-    if (depthFunc_ == func)
-    {
-        cacheHits_++;
-        return false;
-    }
-    depthFunc_ = func;
-    cacheMisses_++;
-    return true;
-}
-
 int rRenderState::GetDepthMask() const
 {
     return depthMask_;
@@ -217,7 +200,6 @@ void rRenderState::Invalidate()
     enabledCaps_.clear();
     blendSrc_ = -1;
     blendDst_ = -1;
-    depthFunc_ = -1;
     depthMask_ = -1;
     cullFace_ = -1;
     frontFace_ = -1;

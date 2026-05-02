@@ -52,14 +52,14 @@ public:
     void Destroy(VkDevice device);
 
     // Accessors
-    VkSwapchainKHR   GetSwapchain()   const { return swapchain_; }
-    VkFormat         GetFormat()      const { return format_; }
-    VkExtent2D       GetExtent()      const { return extent_; }
-    uint32_t         GetImageCount()  const { return static_cast<uint32_t>(imageViews_.size()); }
-    VkImageView      GetImageView(uint32_t i) const { return imageViews_[i]; }
+    [[nodiscard]] VkSwapchainKHR   GetSwapchain()   const { return swapchain_; }
+    [[nodiscard]] VkFormat         GetFormat()      const { return format_; }
+    [[nodiscard]] VkExtent2D       GetExtent()      const { return extent_; }
+    [[nodiscard]] uint32_t         GetImageCount()  const { return static_cast<uint32_t>(imageViews_.size()); }
+    [[nodiscard]] VkImageView      GetImageView(uint32_t i) const { return imageViews_[i]; }
 
-    const std::vector<VkImageView>& GetImageViews() const { return imageViews_; }
-    const std::vector<VkImage>&     GetImages()     const { return images_; }
+    [[nodiscard]] const std::vector<VkImageView>& GetImageViews() const { return imageViews_; }
+    [[nodiscard]] const std::vector<VkImage>&     GetImages()     const { return images_; }
 
     // Non-copyable
     rVulkanSwapchain(const rVulkanSwapchain&) = delete;

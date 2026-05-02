@@ -158,7 +158,11 @@ void tLuaState::DispatchEvent(const char* name, const char* args)
     lua_getglobal(L, fn.c_str());
     if (!lua_isfunction(L, -1)) { lua_pop(L, 1); return; }
     lua_pushstring(L, args);
-    lua_pcall(L, 1, 0, 0);
+    if (lua_pcall(L, 1, 0, 0) != LUA_OK)
+    {
+        std::cerr << "[Lua] " << fn << "(): " << lua_tostring(L, -1) << '\n';
+        lua_pop(L, 1);
+    }
 }
 
 #endif // DEDICATED

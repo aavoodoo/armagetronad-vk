@@ -60,8 +60,8 @@ struct rTextBounds
     float minX, minY;   //!< Lower-left corner
     float maxX, maxY;   //!< Upper-right corner
 
-    float Width() const { return maxX - minX; }
-    float Height() const { return maxY - minY; }
+    [[nodiscard]] float Width() const { return maxX - minX; }
+    [[nodiscard]] float Height() const { return maxY - minY; }
 
     rTextBounds() : minX(0), minY(0), maxX(0), maxY(0) {}
 };
@@ -83,16 +83,16 @@ public:
     virtual bool Load(const char* path, int size) = 0;
 
     //! Check if font is loaded and valid
-    virtual bool IsValid() const = 0;
+    [[nodiscard]] virtual bool IsValid() const = 0;
 
     //! Get the line height (baseline to baseline)
-    virtual float GetLineHeight() const = 0;
+    [[nodiscard]] virtual float GetLineHeight() const = 0;
 
     //! Get the ascender (baseline to top of tallest glyph)
-    virtual float GetAscender() const = 0;
+    [[nodiscard]] virtual float GetAscender() const = 0;
 
     //! Get the descender (baseline to bottom of lowest glyph, typically negative)
-    virtual float GetDescender() const = 0;
+    [[nodiscard]] virtual float GetDescender() const = 0;
 
     //! Get metrics for a single glyph
     //! @param codepoint Unicode codepoint

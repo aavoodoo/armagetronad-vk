@@ -34,6 +34,7 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 #include <vector>
 #include <string>
 #include <cstdint>
+#include <span>
 
 //! Loads SPIR-V shader modules (and compiles GLSL to SPIR-V via libshaderc)
 class rVulkanShader
@@ -48,7 +49,7 @@ public:
     [[nodiscard]] static VkShaderModule LoadFromFile(VkDevice device, const char* path);
 
     //! Load SPIR-V from memory
-    [[nodiscard]] static VkShaderModule LoadFromMemory(VkDevice device, const uint32_t* code, size_t sizeBytes);
+    [[nodiscard]] static VkShaderModule LoadFromMemory(VkDevice device, std::span<const uint32_t> code);
 
     //! Destroy a shader module
     static void Destroy(VkDevice device, VkShaderModule module);

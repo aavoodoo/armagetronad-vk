@@ -141,6 +141,21 @@ public:
         return true;
     }
 
+    //! Resize without losing packing state (for atlas growth).
+    //! Old content stays in the top-left; new empty space appears on the
+    //! right (and below via increased height_).
+    void Resize(int newWidth, int newHeight)
+    {
+        if (newWidth > width_)
+        {
+            // Represent the new empty strip on the right
+            skyline_.push_back({width_, 0, newWidth - width_});
+            MergeSkyline();
+        }
+        width_ = newWidth;
+        height_ = newHeight;
+    }
+
     //! Get atlas width
     int GetWidth() const { return width_; }
 

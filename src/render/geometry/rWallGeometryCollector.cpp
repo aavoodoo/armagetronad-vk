@@ -74,7 +74,6 @@ void rWallGeometryCollector::BeginFrame()
         pendingStaticLines_.clear();
     }
     staticNeedsRebuild_ = true;
-    firstNormalAdded_ = false;
 
     collecting_ = true;
 }
@@ -91,16 +90,6 @@ bool rWallGeometryCollector::AddNormalQuad(const rPackedWallVertex& v0, const rP
                                             const rPackedWallVertex& v2, const rPackedWallVertex& v3)
 {
     if (!collecting_) return false;
-
-    // The first normal segment each frame bridges the gap between the streaming
-    // begin/gradient zone and the static buffer. Route it to streaming so the
-    // wall is visually continuous regardless of the 1-frame compute lag.
-    if (!firstNormalAdded_ && streamingBuffer_)
-    {
-        streamingBuffer_->AddQuad(v0, v1, v2, v3);
-        firstNormalAdded_ = true;
-        return false;  // not in static/compute — caller should skip sr_AddWallComputeSegment
-    }
 
     if (!staticBuffer_) return false;
 
@@ -263,16 +252,37 @@ void rWallGeometryCollector::Render(bool renderLines, bool renderQuads)
         {
             if (sr_IsWallComputeActive() && computeCountPrev_ > 0)
             {
-                // GPU compute covers this collector's previous-frame slice.
-                // The 1-frame lag means the newest segments (at index 0 in the
-                // static buffer, rendered newest-first) are not yet in the batch.
-                unsigned int texId = RenderGetBoundTexture2D();
-                sr_DrawComputedWallsRange(texId, computeStartPrev_, computeCountPrev_);
+                // GPU compute covers this collector's previous-frame slice, but we
+                // never delegate the newest SAFE_MARGIN segments to compute.
+                // Those newest segments share their start boundary with the streaming
+                // (begin/gradient) zone.  Because compute always uses last-frame data,
+                // delegating them would introduce a 1-frame gap in network mode
+                // (server position corrections shift the boundary by multiple segments).
+                // Rendering them CPU-side keeps the boundary seamless at zero cost.
+                //
+                // NOTE: RenderList iterates segments newest→oldest, so they land in the
+                // SSBO with index 0 = newest and index N-1 = oldest. kComputeSafeMargin
+                // newest segments are skipped by compute (handled by CPU); compute starts
+                // at offset kComputeSafeMargin to cover the remaining (older) segments.
+                constexpr uint32_t kComputeSafeMargin = 4;
+                uint32_t safeComputeCount = (computeCountPrev_ > kComputeSafeMargin)
+                    ? computeCountPrev_ - kComputeSafeMargin : 0;
 
                 uint32_t totalSegs = static_cast<uint32_t>(staticBuffer_->GetQuadCount());
-                if (totalSegs > computeCountPrev_)
+
+                if (safeComputeCount > 0)
                 {
-                    staticBuffer_->RenderQuadsHead(totalSegs - computeCountPrev_);
+                    unsigned int texId = RenderGetBoundTexture2D();
+                    // Start at +kComputeSafeMargin to skip newest segments (CPU handles those).
+                    sr_DrawComputedWallsRange(texId, computeStartPrev_ + kComputeSafeMargin, safeComputeCount);
+                    // CPU renders the newest segments (safe margin + any beyond the compute slice).
+                    // safeComputeCount is from last frame; if expiration shrank totalSegs, clamp to all.
+                    uint32_t cpuSegs = (totalSegs > safeComputeCount) ? totalSegs - safeComputeCount : totalSegs;
+                    staticBuffer_->RenderQuadsHead(cpuSegs);
+                }
+                else
+                {
+                    staticBuffer_->RenderQuads();
                 }
             }
             else

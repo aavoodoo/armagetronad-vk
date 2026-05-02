@@ -278,7 +278,7 @@ bool rVulkanPostProcess::BuildPipeline(rVulkanContext& ctx, VkRenderPass swapcha
 
     // --- Descriptor set layout 0: N combined image samplers ---
     // PP_MAX_SAMPLERS_PER_PASS bindings so any pass can declare up to that
-    // many samplers in its .pipeline file. Passes that declare fewer still
+    // many samplers in its .lua script. Passes that declare fewer still
     // populate the unused bindings with a placeholder view.
     VkDescriptorSetLayoutBinding samplerBindings[PP_MAX_SAMPLERS_PER_PASS]{};
     for (int i = 0; i < PP_MAX_SAMPLERS_PER_PASS; ++i)
@@ -657,18 +657,39 @@ bool rVulkanPostProcess::BuildOffscreen(rVulkanContext& ctx, uint32_t width, uin
     subpass.pColorAttachments = colorRefs;
     subpass.pDepthStencilAttachment = &depthRef;
 
-    // Dependency: the fragment shader in the subsequent post-process pass
-    // must wait for BOTH color attachments and depth writes in this pass to
-    // complete before sampling them.
-    VkSubpassDependency dependency{};
-    dependency.srcSubpass = 0;
-    dependency.dstSubpass = VK_SUBPASS_EXTERNAL;
-    dependency.srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT |
-                              VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
-    dependency.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT |
-                               VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
-    dependency.dstStageMask = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
-    dependency.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+    // Incoming dependency: this frame's clear/write must wait for the
+    // PREVIOUS frame's PP-composite shader read of the same color/depth/
+    // emissive images to complete. The offscreen images are single-buffered
+    // and shared across MAX_FRAMES_IN_FLIGHT frames; the BeginFrame fence
+    // wait synchronises with frame N-2, so frame N-1's shader read may
+    // still be in flight when frame N starts. Without this dependency,
+    // frame N's depth clear can race frame N-1's PP composite, producing
+    // intermittent z-fighting and occasional all-black frames specifically
+    // when a moviepack with PP is active.
+    VkSubpassDependency incomingDep{};
+    incomingDep.srcSubpass = VK_SUBPASS_EXTERNAL;
+    incomingDep.dstSubpass = 0;
+    incomingDep.srcStageMask = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+    incomingDep.srcAccessMask = VK_ACCESS_SHADER_READ_BIT;
+    incomingDep.dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT |
+                               VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT;
+    incomingDep.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT |
+                                VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+
+    // Outgoing dependency: the fragment shader in the subsequent
+    // post-process pass must wait for BOTH color attachments and depth
+    // writes in this pass to complete before sampling them.
+    VkSubpassDependency outgoingDep{};
+    outgoingDep.srcSubpass = 0;
+    outgoingDep.dstSubpass = VK_SUBPASS_EXTERNAL;
+    outgoingDep.srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT |
+                               VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
+    outgoingDep.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT |
+                                VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+    outgoingDep.dstStageMask = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+    outgoingDep.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+
+    VkSubpassDependency dependencies[2] = { incomingDep, outgoingDep };
 
     VkRenderPassCreateInfo rpInfo{};
     rpInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
@@ -676,8 +697,8 @@ bool rVulkanPostProcess::BuildOffscreen(rVulkanContext& ctx, uint32_t width, uin
     rpInfo.pAttachments = attachments;
     rpInfo.subpassCount = 1;
     rpInfo.pSubpasses = &subpass;
-    rpInfo.dependencyCount = 1;
-    rpInfo.pDependencies = &dependency;
+    rpInfo.dependencyCount = 2;
+    rpInfo.pDependencies = dependencies;
     if (vkCreateRenderPass(device, &rpInfo, nullptr, &offscreenRenderPass_) != VK_SUCCESS)
     {
         std::cerr << "[PostProcess] Failed to create offscreen render pass\n";
@@ -824,7 +845,10 @@ void rVulkanPostProcess::Execute(VkCommandBuffer cmd,
         // entries are ignored by Vulkan.
         VkClearValue clearValues[2]{};
         clearValues[0].color = {{0.0f, 0.0f, 0.0f, 1.0f}};
-        clearValues[1].depthStencil = {1.0f, 0};
+        // The PP swapchain pass draws a fullscreen quad with depth disabled,
+        // so this value is unused — match the main scene reverse-Z convention
+        // (clear to far = 0.0) for consistency.
+        clearValues[1].depthStencil = {0.0f, 0};
         rpInfo.clearValueCount = pass.targetsSwapchain ? 2 : 1;
         rpInfo.pClearValues = clearValues;
 
@@ -871,8 +895,8 @@ void rVulkanPostProcess::Execute(VkCommandBuffer cmd,
 }
 
 // ============================================================================
-// Effect loading — framegraph-lite: parse .pipeline, build passes, resolve
-// sampler bindings against the scene attachments and intermediate pool.
+// Effect loading — parse Lua script, build passes, resolve sampler bindings
+// against the scene attachments and intermediate pool.
 // ============================================================================
 
 // Try moviepack path first, then system path, for PP effect files.
@@ -891,73 +915,47 @@ rVulkanPostProcess::Effect* rVulkanPostProcess::EnsureEffectLoaded(const std::st
 
     Effect ef;
 
-    // --- 1. Load effect descriptor from .lua (preferred) or .pipeline (fallback) ---
-    bool loadedFromLua = false;
-
-    // Try .lua first: inject EffectBuilder as Lua global "effect",
-    // run the script, extract the built descriptor and params.
+    // --- 1. Load effect descriptor from .lua ---
+    // Inject EffectBuilder as Lua global "effect", run the script, extract
+    // the built descriptor and params. If the script is missing or fails,
+    // the effect cannot be loaded — callers fall back to passthrough.
     std::string luaSub = "shaders/postprocess/" + name + "/" + name + ".lua";
     tString luaPath = sg_PPGetReadPath(luaSub);
-    if (luaPath.Len() > 1 && tLuaState::Instance().IsAlive())
+    if (luaPath.Len() <= 1 || !tLuaState::Instance().IsAlive())
     {
-        EffectBuilder eb;
-        rInjectEffectBuilder(tLuaState::Instance().View(), eb);
-
-        if (tLuaState::Instance().DoFile(static_cast<const char*>(luaPath)))
-        {
-            lua_State* L = tLuaState::Instance().View().raw();
-
-            lua_getglobal(L, "effect");
-            auto* built = static_cast<EffectBuilder*>(
-                luaL_testudata(L, -1, luapp::userdata_traits<EffectBuilder>::name));
-            if (built)
-            {
-                ef.desc   = built->BuildDesc();
-                ef.params = built->BuildParams();
-                loadedFromLua = true;
-            }
-            else
-                std::cerr << "[PostProcess] Lua script '" << name
-                          << "' overwrote the 'effect' global — effect ignored\n";
-            lua_pop(L, 1);
-
-            if (loadedFromLua)
-            {
-                // Register for hot-reload: watch this .lua file for changes.
-                scriptWatcher_.Watch(std::string(static_cast<const char*>(luaPath)), name);
-            }
-        }
-        // DoFile already logged any error. Either way, clean up injected global.
-        rCleanEffectGlobal(tLuaState::Instance().View());
+        std::cerr << "[PostProcess] Effect script not found: " << luaSub << "\n";
+        return nullptr;
     }
 
-    if (!loadedFromLua)
+    EffectBuilder eb;
+    rInjectEffectBuilder(tLuaState::Instance().View(), eb);
+
+    bool scriptOk = tLuaState::Instance().DoFile(static_cast<const char*>(luaPath));
+    // DoFile already logged any error. Always clean up the injected global.
     {
-        // Fall back to .pipeline file (or synthesize a default 1-pass descriptor)
-        std::string pipelineSub = "shaders/postprocess/" + name + "/" + name + ".pipeline";
-        tString pipelinePath = sg_PPGetReadPath(pipelineSub);
-        if (pipelinePath.Len() > 1)
+        lua_State* L = tLuaState::Instance().View().raw();
+        lua_getglobal(L, "effect");
+        auto* built = scriptOk ? static_cast<EffectBuilder*>(
+            luaL_testudata(L, -1, luapp::userdata_traits<EffectBuilder>::name)) : nullptr;
+        if (built)
         {
-            std::string err;
-            if (!ParsePipelineFile(std::string(static_cast<const char*>(pipelinePath)), ef.desc, err))
-            {
-                std::cerr << "[PostProcess] " << err << "\n";
-                return nullptr;
-            }
+            ef.desc   = built->BuildDesc();
+            ef.params = built->BuildParams();
         }
-        else
+        else if (scriptOk)
         {
-            // Default: single pass reading SCENE_COLOR+SCENE_DEPTH, writing to
-            // SWAPCHAIN, using a fragment shader named <effect>.frag.spv. This
-            // keeps single-pass effects trivial — no .pipeline file needed.
-            rPostProcessPassDecl defaultPass;
-            defaultPass.shader = name;
-            defaultPass.target = "SWAPCHAIN";
-            defaultPass.samplers.push_back({0, "SCENE_COLOR"});
-            defaultPass.samplers.push_back({1, "SCENE_DEPTH"});
-            ef.desc.passes.push_back(std::move(defaultPass));
+            std::cerr << "[PostProcess] Lua script '" << name
+                      << "' overwrote the 'effect' global — effect ignored\n";
         }
+        lua_pop(L, 1);
     }
+    rCleanEffectGlobal(tLuaState::Instance().View());
+
+    if (!scriptOk || ef.desc.passes.empty())
+        return nullptr;
+
+    // Register for hot-reload: watch this .lua file for changes.
+    scriptWatcher_.Watch(std::string(static_cast<const char*>(luaPath)), name);
 
     // --- 2. Allocate the effect's intermediate render targets ---
     if (!ef.desc.resources.empty())
@@ -1006,18 +1004,6 @@ rVulkanPostProcess::Effect* rVulkanPostProcess::EnsureEffectLoaded(const std::st
             return nullptr;
         }
         ef.passes.push_back(std::move(pass));
-    }
-
-    // --- 5. Parse the .meta file for tunable parameters (optional) ---
-    // Skipped when loaded from .lua (params already extracted from EffectMetaBuilder).
-    if (!loadedFromLua)
-    {
-        std::string metaSub = "shaders/postprocess/" + name + "/" + name + ".meta";
-        tString metaPath = sg_PPGetReadPath(metaSub);
-        if (metaPath.Len() > 1)
-        {
-            ParseMetaFile(std::string(static_cast<const char*>(metaPath)), ef.params);
-        }
     }
 
     // Debug: uncomment to trace effect loading
@@ -1230,7 +1216,7 @@ void rVulkanPostProcess::WritePassDescriptors(rPostProcessPass& pass,
         writes[i].pImageInfo = &imgInfos[i];
     }
 
-    // Override slots that the .pipeline file declared with actual sources.
+    // Override slots that the .lua script declared with actual sources.
     for (const auto& smp : decl.samplers)
     {
         if (smp.binding < 0 || smp.binding >= PP_MAX_SAMPLERS_PER_PASS) continue;
@@ -1834,193 +1820,6 @@ rPostProcessResourcePool::Get(const std::string& name) const
 {
     auto it = resources_.find(name);
     return it == resources_.end() ? nullptr : &it->second;
-}
-
-// ============================================================================
-// .pipeline file parser — declarative multi-pass effect description.
-// ============================================================================
-//
-// Format (line-oriented, # and // comments, whitespace insensitive):
-//
-//   RESOURCE <name> <format> <scale>
-//     format is one of: rgba8, rgba16f, r8
-//     scale is a float multiplier of the swapchain extent (0.5 = half res)
-//
-//   PASS <shader_basename> <target>
-//     target is an intermediate resource name or SWAPCHAIN
-//     followed by one or more SAMPLER lines (indented or not)
-//
-//   SAMPLER <binding> <source>
-//     source is an intermediate resource name or one of the built-ins:
-//     SCENE_COLOR, SCENE_EMISSIVE, SCENE_DEPTH
-//
-// See shaders/postprocess/bloom/bloom.pipeline for a multi-pass example.
-
-bool rVulkanPostProcess::ParsePipelineFile(const std::string& path,
-                                           rPostProcessPipelineDesc& outDesc,
-                                           std::string& outError)
-{
-    std::ifstream f(path);
-    if (!f.good())
-    {
-        outError = "cannot open pipeline file: " + path;
-        return false;
-    }
-
-    outDesc.resources.clear();
-    outDesc.passes.clear();
-
-    std::string line;
-    int lineNo = 0;
-    rPostProcessPassDecl* currentPass = nullptr;
-    while (std::getline(f, line))
-    {
-        ++lineNo;
-        // Strip comments
-        auto hash = line.find('#');
-        if (hash != std::string::npos) line.erase(hash);
-        auto slash = line.find("//");
-        if (slash != std::string::npos) line.erase(slash);
-
-        std::istringstream iss(line);
-        std::string tag;
-        if (!(iss >> tag)) continue;
-
-        if (tag == "RESOURCE")
-        {
-            rPostProcessResourceDecl decl;
-            std::string format;
-            if (!(iss >> decl.name >> format >> decl.scale))
-            {
-                outError = path + ":" + std::to_string(lineNo) +
-                           ": RESOURCE needs <name> <format> <scale>";
-                return false;
-            }
-            if      (format == "rgba8")   decl.format = rPostProcessFormat::RGBA8;
-            else if (format == "rgba16f") decl.format = rPostProcessFormat::RGBA16F;
-            else if (format == "r8")      decl.format = rPostProcessFormat::R8;
-            else
-            {
-                outError = path + ":" + std::to_string(lineNo) +
-                           ": unknown RESOURCE format '" + format + "'";
-                return false;
-            }
-            outDesc.resources.push_back(std::move(decl));
-            currentPass = nullptr;
-        }
-        else if (tag == "PASS")
-        {
-            if (outDesc.passes.size() >= PP_MAX_PASSES_PER_EFFECT)
-            {
-                outError = path + ":" + std::to_string(lineNo) +
-                           ": too many PASS entries (max " +
-                           std::to_string(PP_MAX_PASSES_PER_EFFECT) + ")";
-                return false;
-            }
-            rPostProcessPassDecl decl;
-            if (!(iss >> decl.shader >> decl.target))
-            {
-                outError = path + ":" + std::to_string(lineNo) +
-                           ": PASS needs <shader> <target>";
-                return false;
-            }
-            outDesc.passes.push_back(std::move(decl));
-            currentPass = &outDesc.passes.back();
-        }
-        else if (tag == "SAMPLER")
-        {
-            if (!currentPass)
-            {
-                outError = path + ":" + std::to_string(lineNo) +
-                           ": SAMPLER outside of a PASS";
-                return false;
-            }
-            if (static_cast<int>(currentPass->samplers.size()) >= PP_MAX_SAMPLERS_PER_PASS)
-            {
-                outError = path + ":" + std::to_string(lineNo) +
-                           ": too many SAMPLERs in one pass (max " +
-                           std::to_string(PP_MAX_SAMPLERS_PER_PASS) + ")";
-                return false;
-            }
-            rPostProcessSamplerDecl s;
-            if (!(iss >> s.binding >> s.source))
-            {
-                outError = path + ":" + std::to_string(lineNo) +
-                           ": SAMPLER needs <binding> <source>";
-                return false;
-            }
-            currentPass->samplers.push_back(std::move(s));
-        }
-        // Silently ignore unknown tags so we can add new ones later without
-        // breaking old .pipeline files.
-    }
-
-    if (outDesc.passes.empty())
-    {
-        outError = path + ": no PASS entries";
-        return false;
-    }
-    return true;
-}
-
-// .meta file format (line-oriented, comments with # or //, whitespace ignored):
-//
-//   NAME Bloom (Tron Glow)
-//   DESCRIPTION Bright-pass extraction with blur
-//   PARAM_FLOAT <name> <slot> <default> <min> <max> <description...>
-//   PARAM_INT   <name> <slot> <default> <min> <max> <description...>
-//   PARAM_VEC4  <name> <slot> <r> <g> <b> <a> <description...>
-//
-// Slots index into fparams[] (float/vec4) or iparams[] (int). Vec4 occupies
-// 4 consecutive float slots starting at `slot`.
-void rVulkanPostProcess::ParseMetaFile(const std::string& path,
-                                       std::vector<rPostProcessParam>& outParams)
-{
-    std::ifstream f(path);
-    if (!f.good()) return;
-
-    std::string line;
-    while (std::getline(f, line))
-    {
-        // Strip comments
-        auto hash = line.find('#');
-        if (hash != std::string::npos) line.erase(hash);
-        auto slash = line.find("//");
-        if (slash != std::string::npos) line.erase(slash);
-
-        std::istringstream iss(line);
-        std::string tag;
-        if (!(iss >> tag)) continue;
-
-        if (tag == "PARAM_FLOAT" || tag == "PARAM_INT")
-        {
-            rPostProcessParam p;
-            p.type = (tag == "PARAM_INT") ? rPostProcessParam::Int : rPostProcessParam::Float;
-            if (!(iss >> p.name >> p.slot >> p.defaults[0] >> p.minVal >> p.maxVal))
-                continue;
-            std::getline(iss, p.description);
-            // Trim leading whitespace from description
-            size_t start = p.description.find_first_not_of(" \t");
-            if (start != std::string::npos) p.description = p.description.substr(start);
-            outParams.push_back(std::move(p));
-        }
-        else if (tag == "PARAM_VEC4")
-        {
-            rPostProcessParam p;
-            p.type = rPostProcessParam::Vec4;
-            if (!(iss >> p.name >> p.slot
-                      >> p.defaults[0] >> p.defaults[1]
-                      >> p.defaults[2] >> p.defaults[3]))
-                continue;
-            p.minVal = 0.0f;
-            p.maxVal = 1.0f;
-            std::getline(iss, p.description);
-            size_t start = p.description.find_first_not_of(" \t");
-            if (start != std::string::npos) p.description = p.description.substr(start);
-            outParams.push_back(std::move(p));
-        }
-        // NAME / DESCRIPTION lines are informational only — ignored here.
-    }
 }
 
 #endif // DEDICATED

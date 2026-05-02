@@ -133,18 +133,7 @@ nobase_shader_DATA=\
 	shaders/postprocess/fullscreen.vert \
 	shaders/postprocess/postprocess_params.glsl \
 	shaders/postprocess/passthrough/passthrough.frag \
-	shaders/postprocess/passthrough/passthrough.pipeline \
-	shaders/postprocess/bloom/bloom.pipeline \
-	shaders/postprocess/bloom/bloom.meta \
-	shaders/postprocess/bloom/bloom_blur.glsl \
-	shaders/postprocess/bloom/bloom_blur_h.frag \
-	shaders/postprocess/bloom/bloom_blur_v.frag \
-	shaders/postprocess/bloom/bloom_composite.frag \
-	shaders/postprocess/bloom/bloom_downsample.frag \
-	shaders/postprocess/bloom/bloom_extract.frag \
-	shaders/postprocess/depthviz/depthviz.frag \
-	shaders/postprocess/depthviz/depthviz.pipeline \
-	shaders/postprocess/depthviz/depthviz.meta
+	shaders/postprocess/passthrough/passthrough.lua
 
 moviepack_DATA=\
 	moviepacks/gltron.aamvp.zip \

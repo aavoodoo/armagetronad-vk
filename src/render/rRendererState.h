@@ -64,4 +64,9 @@ void sr_SetArenaBounds(float lowX, float lowY, float highX, float highY);
 //! Set camera world position for parallax shader effects
 void sr_SetCameraWorldPos(float x, float y, float z);
 
+//! Get the last camera world position passed to sr_SetCameraWorldPos.
+//! Used by the render queue to back-to-front-sort transparent buckets
+//! relative to the camera. Returns (0,0,5) before the first set call.
+void sr_GetCameraWorldPos(float& x, float& y, float& z);
+
 #endif // RRENDERERSTATE_H

@@ -54,7 +54,7 @@ public:
         VkImageLayout layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
 
     //! Get the descriptor set layout (for pipeline creation — set 0, texture only)
-    VkDescriptorSetLayout GetLayout() const { return layout_; }
+    [[nodiscard]] VkDescriptorSetLayout GetLayout() const { return layout_; }
 
     //! Invalidate cached descriptor set for a specific imageView. The
     //! actual vkFreeDescriptorSets is DEFERRED — the freed sets are
@@ -83,14 +83,14 @@ public:
     void Destroy();
 
     //! Number of live descriptor pools (for monitoring; should stabilize after warmup)
-    uint32_t GetPoolCount() const { return static_cast<uint32_t>(pools_.size()); }
+    [[nodiscard]] uint32_t GetPoolCount() const { return static_cast<uint32_t>(pools_.size()); }
 
     //! Current slot index used by InvalidateCache. Matches the slot that
     //! was last passed to DrainDeferred. Use this (not the renderer's
     //! currentFrame_) when queuing deferred-delete textures alongside
     //! InvalidateCache — they must land in the same slot so the descriptor
     //! free happens before the image-view destroy.
-    uint32_t GetCurrentSlot() const { return currentSlot_; }
+    [[nodiscard]] uint32_t GetCurrentSlot() const { return currentSlot_; }
 
     //! Free ALL descriptor sets immediately — both the live cache and every
     //! deferred-free slot. Call only after vkDeviceWaitIdle; safe because

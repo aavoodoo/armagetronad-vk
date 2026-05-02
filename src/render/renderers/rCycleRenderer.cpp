@@ -40,8 +40,6 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 // Configuration
 //=============================================================================
 
-bool sr_useBatchedCycles = true;
-static tSettingItem<bool> conf_useBatchedCycles("USE_BATCHED_CYCLES", sr_useBatchedCycles);
 
 //=============================================================================
 // Statistics
@@ -150,7 +148,7 @@ void rEndCycleRendering()
 {
     sg_cycleRenderingActive = false;
 
-    if (!sr_useBatchedCycles || sg_cycleInstances.empty())
+    if (sg_cycleInstances.empty())
         return;
 
     // Group instances by (geometryKey, textureId) so each group can be drawn
@@ -192,7 +190,7 @@ void rEndCycleRendering()
 
 void rSubmitCycleInstance(const rCycleInstance& instance)
 {
-    if (!sr_useBatchedCycles || !sg_cycleRenderingActive)
+    if (!sg_cycleRenderingActive)
     {
         return;
     }
@@ -228,8 +226,6 @@ void rCycleRendererBeginFrame()
 #else // DEDICATED
 
 // Stub implementations for dedicated server
-
-bool sr_useBatchedCycles = false;
 
 void rSetupCycleLighting() {}
 void rSetupCycleMaterial() {}
