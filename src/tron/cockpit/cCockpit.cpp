@@ -438,8 +438,10 @@ cCockpit* cCockpit::_instance = 0;
 void cCockpit::ProcessCockpit(void) {
     ClearWidgets();
 
+    SDL_Log("[Cockpit] ProcessCockpit: loading '%s'", static_cast<const char*>(cockpit_file));
     if (!LoadWithParsing(cockpit_file))
     {
+        SDL_Log("[Cockpit] ProcessCockpit: FAILED to load '%s'", static_cast<const char*>(cockpit_file));
         // If loading fails and it's not the default cockpit, fall back to default
         // and try to extract the pack on next menu access.
         static const char* defaultCockpit = "Anonymous/standard-0.0.1.aacockpit.xml";
@@ -454,6 +456,7 @@ void cCockpit::ProcessCockpit(void) {
         else
             return;
     }
+    SDL_Log("[Cockpit] ProcessCockpit: loaded OK");
     node cur = GetFileContents();
     if(!cur) {
         tERR_WARN("No Cockpit node found!");
@@ -648,7 +651,8 @@ void cCockpit::Render() {
             if(m_Player->cam) {
 
                 if (m_FocusCycle && ( !m_Player->netPlayer || !m_Player->netPlayer->IsChatting()) && se_GameTime()>-2){
-                    //h->Speed()>maxmeterspeed?maxmeterspeed+=10:1;
+                    static int rl = 0;
+                    if (rl++ < 3) SDL_Log("[Cockpit] Rendering %d widgets, type=VIEWPORT_ALL", (int)m_Widgets.size());
 
                     for(widget_list_t::const_iterator i=m_Widgets.begin(); i!=m_Widgets.end(); ++i)
                     {
@@ -928,11 +932,31 @@ ePlayerNetID *cCockpit::GetCurrentOrFocusedPlayer() {
 static std::map<int64_t, cWidget::TouchButton*> s_activeFingers;
 
 bool cCockpit::ProcessTouch(float x, float y, uint32_t type, int64_t fingerId) {
-    // Convert from [0,1] touch space to [-1,1] HUD space
+    // Convert from [0,1] touch space to [-1,1] HUD space.
+    // The cockpit viewport uses EqualAspectBottom: a square viewport
+    // (screenW × screenW pixels) anchored at the bottom of the screen.
+    // X: touch [0,1] → pixel [0,screenW] → NDC [-1,1] (direct)
+    // Y: touch [0,1] → pixel [(1-y)*screenH from bottom] → NDC [2*(1-y)*H/W - 1]
     float hx = x * 2.0f - 1.0f;
-    float hy = 1.0f - y * 2.0f;
+    float hy;
+    if (sr_screenWidth > 0 && sr_screenHeight > 0) {
+        hy = 2.0f * (1.0f - y) * static_cast<float>(sr_screenHeight) / static_cast<float>(sr_screenWidth) - 1.0f;
+    } else {
+        hy = 1.0f - y * 2.0f;
+    }
 
     if (type == SDL_EVENT_FINGER_DOWN) {
+        static int tlog = 0;
+        if (tlog++ < 10) {
+            int nBtns = 0;
+            FOREACH_COCKPIT(cockpit) { nBtns += (int)(*cockpit)->m_TouchButtons.size(); }
+            SDL_Log("[Touch] FINGER_DOWN raw=(%.3f,%.3f) hud=(%.3f,%.3f) btns=%d", x, y, hx, hy, nBtns);
+            FOREACH_COCKPIT(cockpit) {
+                for (cWidget::TouchButton* btn : (*cockpit)->m_TouchButtons) {
+                    SDL_Log("[Touch]   active=%d hit=%d", btn->IsActiveInCurrentMode(), btn->HitTest(hx, hy));
+                }
+            }
+        }
         FOREACH_COCKPIT(cockpit) {
             for (cWidget::TouchButton* btn : (*cockpit)->m_TouchButtons) {
                 if (btn->IsActiveInCurrentMode() && btn->activeFinger_ == -1 && btn->HitTest(hx, hy)) {

@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.22)
 project(armagetronad VERSION 0.4.0 LANGUAGES C CXX)
 
-set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 # ============================================================================
@@ -11,9 +11,13 @@ get_filename_component(REPO_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../../../../.." AB
 set(SRC "${REPO_ROOT}/src")
 set(ANDROID_CMAKE_DIR "${REPO_ROOT}/android/cmake")
 
-# SDL3 source directory — passed from build.gradle via -DSDL3_SOURCE_DIR=...
+# SDL3 source directory — pass via -DSDL3_SOURCE_DIR=... from build.gradle
+# or set sdl3.dir in local.properties
 if(NOT DEFINED SDL3_SOURCE_DIR)
-    set(SDL3_SOURCE_DIR "/Users/emmanuelrollet/dev/src/SDL3")
+    message(FATAL_ERROR
+        "SDL3_SOURCE_DIR is not set. Pass it with:\n"
+        "  sdl3.dir=/path/to/SDL3 in android/local.properties\n"
+        "  or -DSDL3_SOURCE_DIR=/path/to/SDL3 in build.gradle cmake arguments")
 endif()
 
 # ============================================================================
@@ -122,6 +126,18 @@ FetchContent_Declare(
     GIT_SHALLOW    TRUE
 )
 FetchContent_MakeAvailable(libxml2)
+
+# ============================================================================
+# LuaJIT (interpreter-only on Android — JIT disabled for compatibility)
+# Pre-built static libs per ABI live in android/app/src/main/jni/luajit/
+# Build them with: bash tools/build_luajit.sh android
+# ============================================================================
+set(LUAJIT_ANDROID_DIR "${CMAKE_CURRENT_SOURCE_DIR}/luajit")
+add_library(lua_static STATIC IMPORTED)
+set_target_properties(lua_static PROPERTIES
+    IMPORTED_LOCATION "${LUAJIT_ANDROID_DIR}/${ANDROID_ABI}/libluajit.a"
+    INTERFACE_INCLUDE_DIRECTORIES "${LUAJIT_ANDROID_DIR}/include"
+)
 
 # ============================================================================
 # Game source files
@@ -235,6 +251,8 @@ file(GLOB TRON_SRCS
     "${SRC}/tron/gFloor.cpp"
     "${SRC}/tron/gFriends.cpp"
     "${SRC}/tron/gGame.cpp"
+    "${SRC}/tron/gLuaBindings.cpp"
+    "${SRC}/tron/gCockpitPack.cpp"
     "${SRC}/tron/gJoystick.cpp"
     "${SRC}/tron/gLanguageMenu.cpp"
     "${SRC}/tron/gLogo.cpp"
@@ -325,6 +343,9 @@ target_include_directories(armagetronad PRIVATE
     "${SRC}/thirdparty/miniz"
     "${SRC}/thirdparty/scrap"
     "${SRC}/thirdparty/binreloc"
+    "${SRC}/thirdparty/vma"
+    "${SRC}/thirdparty/luapp"
+    "${LUAJIT_ANDROID_DIR}/include"        # lua.h, lauxlib.h, lualib.h (LuaJIT)
     "${ANDROID_CMAKE_DIR}"                 # tUniversalVariables.h (Android-specific)
 )
 
@@ -343,6 +364,10 @@ target_compile_definitions(armagetronad PRIVATE
     # Needed to trigger inclusion of tUniversalVariables.h in tDirectories.cpp
     # Also used as a string: static const char * s_topSourceDir = TOP_SOURCE_DIR;
     "TOP_SOURCE_DIR=\".\""
+    # VMA: Android NDK API 26 libvulkan.so only exports Vulkan 1.0 symbols.
+    # Vulkan 1.1+ functions must be resolved dynamically via vkGetDeviceProcAddr.
+    VMA_STATIC_VULKAN_FUNCTIONS=0
+    VMA_DYNAMIC_VULKAN_FUNCTIONS=1
 )
 
 # ============================================================================
@@ -353,6 +378,7 @@ target_link_libraries(armagetronad
     LibXml2
     protobuf::libprotobuf
     glm::glm
+    lua_static
     android
     log
     vulkan

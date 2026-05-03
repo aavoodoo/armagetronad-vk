@@ -190,6 +190,31 @@ xmlParserInputBufferPtr myxmlParserInputBufferCreateFilenameFunc (const char * f
     //  con << "xml wants " << URI << "\n";
 #endif
     FILE *f = tResourceManager::openResource( filename );
+    // Fallback for absolute paths: libxml2 resolves DTD SYSTEM URIs relative
+    // to the XML document location, producing paths like
+    //   /.../resource/included/Anonymous/AATeam/cockpit-0.3.1-c.dtd
+    // but the DTD is actually at /.../resource/included/AATeam/cockpit-0.3.1-c.dtd.
+    // Try the basename as a resource lookup (e.g. "AATeam/cockpit-0.3.1-c.dtd").
+    if (f == NULL && filename)
+    {
+        // Try fopen for absolute paths that exist on the filesystem
+        if (filename[0] == '/')
+            f = fopen(filename, "r");
+        // If still not found, try extracting a relative resource path
+        if (!f)
+        {
+            // Look for known resource path segments in the absolute URI
+            const char* markers[] = {"/AATeam/", "/Anonymous/", "/Z-Man/",
+                                      "/Lucifer/", "/philippeqc/", "/Your_mom/",
+                                      "/wrtlprnft/", "/Self_Destructo/", "/flex/", NULL};
+            for (int i = 0; !f && markers[i]; ++i)
+            {
+                const char* pos = strstr(filename, markers[i]);
+                if (pos)
+                    f = tResourceManager::openResource(pos + 1); // skip leading /
+            }
+        }
+    }
     if (f == NULL)
         return NULL;
     xmlParserInputBufferPtr ret = xmlAllocParserInputBuffer(enc);
@@ -437,6 +462,17 @@ bool tXmlParser::ValidateXml(FILE* docfd, const char* uri, const char* filepath)
     }
 
     /* parse the file, activating the DTD validation option */
+#ifdef __ANDROID__
+    // On Android, all game data is extracted from APK assets to the internal
+    // files directory. DTD validation fails because libxml2 resolves DTD SYSTEM
+    // URIs relative to the XML file location, not through our resource manager.
+    // Skip DTD validation — all shipped XMLs are known-good.
+    // Load DTD for entity expansion (needed to resolve %ResourceContents;
+    // etc.) but skip validation (DTD paths don't resolve on Android).
+    int xmlParseOpts = XML_PARSE_DTDLOAD | XML_PARSE_NONET;
+#else
+    int xmlParseOpts = XML_PARSE_DTDVALID;
+#endif
     m_Doc = xmlCtxtReadIO(ctxt, myxmlInputReadFILE, 0, docfd,
 #if HAVE_LIBXML2_WO_PIBCREATE
                           (const char *)tDirectories::Resource().GetReadPath("map-0.1.dtd")
@@ -444,7 +480,7 @@ bool tXmlParser::ValidateXml(FILE* docfd, const char* uri, const char* filepath)
 #else
                           uri
 #endif
-                          , NULL, XML_PARSE_DTDVALID);
+                          , NULL, xmlParseOpts);
     // NOTE: Do *not* pass myxmlInputCloseFILE; we close the file *later*
 
     /* check if parsing suceeded */

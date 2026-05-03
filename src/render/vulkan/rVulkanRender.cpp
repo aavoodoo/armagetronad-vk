@@ -4911,14 +4911,10 @@ void vkRenderer::ReallySetFlag(flag f, bool c)
 void vkRenderer::ReloadShaders()
 {
     VK_LOG_INFO("[Vulkan] ReloadShaders called" << std::endl);
-    if (!IsInitialized())
-    {
-        VK_LOG_INFO("[Vulkan] ReloadShaders: not initialized, ignoring" << std::endl);
-        return;
-    }
     // Always defer to the next BeginFrame boundary. This coalesces multiple
     // rapid reload requests (e.g. moviepack deactivate + activate = 2 calls)
     // into a single pipeline rebuild at a clean frame boundary.
+    // Safe to set even before init — DoReloadShaders() checks IsInitialized().
     pendingShaderReload_ = true;
     VK_LOG_INFO("[Vulkan] ReloadShaders: deferred to next BeginFrame" << std::endl);
 }
@@ -5004,10 +5000,23 @@ void vkRenderer::DoReloadShaders()
               << " newVert=" << newVert << " newFrag=" << newFrag
               << " newFragEmissive=" << newFragEmissive << std::endl);
 #else
-    // No shaderc (Android): load pre-compiled SPIR-V from APK assets.
-    newVert         = rVulkanShader::LoadFromFile(device, "shaders/uber.vert.spv");
-    newFrag         = rVulkanShader::LoadFromFile(device, "shaders/uber.frag.spv");
-    newFragEmissive = rVulkanShader::LoadFromFile(device, "shaders/uber.frag.emissive.spv");
+    // No shaderc (iOS/Android): load pre-compiled SPIR-V.
+    // Try moviepack directory first (extracted ZIP has compiled .spv files),
+    // then fall back to system shaders bundled with the app.
+    {
+        auto loadSPV = [&](const char* moviepackPath, const char* systemPath) -> VkShaderModule {
+            tString mvpPath = tDirectories::Data().GetReadPath(moviepackPath);
+            if (mvpPath.Len() > 1)
+                return rVulkanShader::LoadFromFile(device, static_cast<const char*>(mvpPath));
+            tString sysPath = tDirectories::Data().GetReadPath(systemPath);
+            if (sysPath.Len() > 1)
+                return rVulkanShader::LoadFromFile(device, static_cast<const char*>(sysPath));
+            return rVulkanShader::LoadFromFile(device, systemPath);
+        };
+        newVert         = loadSPV("moviepack/shaders/uber.vert.spv",          "shaders/uber.vert.spv");
+        newFrag         = loadSPV("moviepack/shaders/uber.frag.spv",          "shaders/uber.frag.spv");
+        newFragEmissive = loadSPV("moviepack/shaders/uber.frag.emissive.spv", "shaders/uber.frag.emissive.spv");
+    }
 #endif
 
     if (!newVert || !newFrag || !newFragEmissive)

@@ -124,6 +124,15 @@ bool rVulkanContext::Init(SDL_Window* window, bool enableValidation)
     vmaCI.device           = device_;
     vmaCI.instance         = instance_;
     vmaCI.flags            = VMA_ALLOCATOR_CREATE_EXTERNALLY_SYNCHRONIZED_BIT;
+#if VMA_DYNAMIC_VULKAN_FUNCTIONS
+    // On Android, NDK API 26 libvulkan.so only exports Vulkan 1.0 symbols.
+    // Provide function pointers so VMA can dynamically resolve 1.1+ functions
+    // (vkGetBufferMemoryRequirements2, vkBindBufferMemory2, etc.) at runtime.
+    VmaVulkanFunctions vulkanFunctions{};
+    vulkanFunctions.vkGetInstanceProcAddr = vkGetInstanceProcAddr;
+    vulkanFunctions.vkGetDeviceProcAddr   = vkGetDeviceProcAddr;
+    vmaCI.pVulkanFunctions = &vulkanFunctions;
+#endif
     if (vmaCreateAllocator(&vmaCI, &allocator_) != VK_SUCCESS)
     {
         std::cerr << "[Vulkan] VMA: failed to create allocator\n";

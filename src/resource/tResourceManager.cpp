@@ -28,6 +28,9 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 
 #include "aa_config.h"
 
+#ifdef __ANDROID__
+#include <SDL3/SDL.h>
+#endif
 #include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -377,6 +380,9 @@ tString tResourceManager::locateResource(const char *file, const char *uri, bool
     {
         // Do we have this file locally ?
         filepath = tDirectories::Resource().GetReadPath(file);
+#ifdef __ANDROID__
+        SDL_Log("[Resource] locateResource('%s') -> '%s'", file, static_cast<const char*>(filepath));
+#endif
 
         if (filepath != "")
         {

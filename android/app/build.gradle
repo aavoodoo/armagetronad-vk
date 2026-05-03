@@ -2,6 +2,16 @@ plugins {
     id 'com.android.application'
 }
 
+// Read local.properties for dependency paths (sdl3.dir, protobuf.dir)
+def localProps = new Properties()
+def localPropsFile = rootProject.file("local.properties")
+if (localPropsFile.exists()) {
+    localProps.load(new FileInputStream(localPropsFile))
+}
+
+def sdl3Dir = localProps.getProperty('sdl3.dir', System.getenv('SDL3_SOURCE_DIR') ?: '')
+def protobufDir = localProps.getProperty('protobuf.dir', System.getenv('PROTOBUF_SOURCE_DIR') ?: '')
+
 android {
     namespace = "org.armagetronad.game"
     compileSdkVersion 35
@@ -16,9 +26,13 @@ android {
 
         externalNativeBuild {
             cmake {
-                arguments "-DANDROID_PLATFORM=android-26",
-                          "-DANDROID_STL=c++_static",
-                          "-DSDL3_SOURCE_DIR=/Users/emmanuelrollet/dev/src/SDL3"
+                def cmakeArgs = [
+                    "-DANDROID_PLATFORM=android-26",
+                    "-DANDROID_STL=c++_static"
+                ]
+                if (sdl3Dir) cmakeArgs.add("-DSDL3_SOURCE_DIR=${sdl3Dir}")
+                if (protobufDir) cmakeArgs.add("-DPROTOBUF_SOURCE_DIR=${protobufDir}")
+                arguments(*cmakeArgs)
                 abiFilters 'arm64-v8a', 'x86_64'
             }
         }

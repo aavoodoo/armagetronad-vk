@@ -33,6 +33,7 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 #include "rVertex.h"
 #include "rFont.h"
 #include "uInput.h"
+#include "cockpit/cCockpit.h"
 
 namespace cWidget {
 
@@ -93,6 +94,19 @@ bool TouchButton::HitTest(float hx, float hy) const
 void TouchButton::Activate(bool on)
 {
     pressed_ = on;
+
+    // COCKPIT_KEY_* are global actions handled by cCockpit::HandleEvent,
+    // not player actions. Dispatch them directly.
+    if (actionName_.substr(0, 12) == "COCKPIT_KEY_" && actionName_.size() == 13)
+    {
+        int keyNum = actionName_[12] - '0';
+        if (keyNum >= 1 && keyNum <= 5 && on)
+        {
+            FOREACH_COCKPIT(j) { (*j)->HandleEvent(keyNum, true); }
+        }
+        return;
+    }
+
     ResolveAction();
     if (!action_) return;
     uPlayerPrototype* pc = uPlayerPrototype::PlayerConfig(player_ - 1);

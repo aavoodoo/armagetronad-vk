@@ -1727,6 +1727,43 @@ void eCamera::Render(){
             if (zFar > 20000.0f) zFar = 20000.0f;
         }
 
+        // Debug: print depth buffer mapping
+        {
+            static int dbgCount = 0;
+            if (dbgCount++ % 300 == 0)  // every ~5 seconds at 60fps
+            {
+                // Compute depth buffer values for key distances
+                // glFrustum maps eye-space z=-d to z_ndc = -(f+n)/(f-n) - 2fn/((f-n)*d)
+                // Then vertex shader: z_buf = (z_ndc + 1) / 2
+                REAL f = zFar, n = zNear;
+                auto zBuf = [f, n](REAL d) -> REAL {
+                    REAL z_ndc = -(f+n)/(f-n) - 2.0*f*n/((f-n)*(-d));  // eye-space z = -d
+                    return (z_ndc + 1.0) / 2.0;
+                };
+
+                // Distance to farthest corner
+                eRectangle const & arena2 = eWallRim::GetBounds();
+                eCoord lo2 = arena2.GetLow(), hi2 = arena2.GetHigh();
+                REAL maxCornerDist = 0;
+                REAL corners2[4][2] = {{lo2.x,lo2.y},{hi2.x,lo2.y},{lo2.x,hi2.y},{hi2.x,hi2.y}};
+                for (auto& c2 : corners2) {
+                    REAL dx = c2[0]-pos.x, dy = c2[1]-pos.y;
+                    REAL d2 = sqrt(dx*dx + dy*dy + z*z);
+                    if (d2 > maxCornerDist) maxCornerDist = d2;
+                }
+
+                std::cerr << "[DEPTH] zNear=" << zNear << " zFar=" << zFar
+                          << " ratio=" << zFar/zNear
+                          << "\n  zBuf(zNear)=" << zBuf(zNear)
+                          << " zBuf(zFar)=" << zBuf(zFar)
+                          << " zBuf(1.0)=" << zBuf(1.0)
+                          << " zBuf(10.0)=" << zBuf(10.0)
+                          << " zBuf(100.0)=" << zBuf(100.0)
+                          << "\n  camPos=(" << pos.x << "," << pos.y << "," << z << ")"
+                          << " maxCornerDist=" << maxCornerDist
+                          << "\n";
+            }
+        }
         vp->Perspective(fov,zNear,zFar,0.);
 
         ModelMatrix();

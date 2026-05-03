@@ -1186,6 +1186,55 @@ void tDirectories::SetUserData( const tString& dir )
 }
 
 #ifdef __ANDROID__
+
+// Extract APK asset files matching a pattern to a filesystem directory.
+// Android APK assets are not accessible via opendir/readdir, so we must
+// extract them to make them visible to directory-scanning code (moviepacks,
+// cockpits). Uses a manifest file to track what's been extracted.
+static void st_ExtractAPKAssetDir(const char* assetDir, const tString& destBase,
+                                   const char* const* knownFiles, int numFiles)
+{
+    tString destDir;
+    destDir << destBase << "/" << assetDir;
+    mkdir(static_cast<const char*>(destDir), 0755);
+
+    for (int i = 0; i < numFiles; ++i)
+    {
+        tString destFile;
+        destFile << destDir << "/" << knownFiles[i];
+
+        // Skip if already extracted
+        struct stat st;
+        if (stat(static_cast<const char*>(destFile), &st) == 0)
+            continue;
+
+        // Try to read from APK assets
+        tString assetPath;
+        assetPath << assetDir << "/" << knownFiles[i];
+        SDL_IOStream* io = SDL_IOFromFile(static_cast<const char*>(assetPath), "rb");
+        if (!io) continue;
+
+        Sint64 size = SDL_GetIOSize(io);
+        if (size > 0)
+        {
+            std::vector<char> buf((size_t)size);
+            SDL_ReadIO(io, buf.data(), (size_t)size);
+            SDL_CloseIO(io);
+
+            FILE* out = fopen(static_cast<const char*>(destFile), "wb");
+            if (out)
+            {
+                fwrite(buf.data(), 1, (size_t)size, out);
+                fclose(out);
+            }
+        }
+        else
+        {
+            SDL_CloseIO(io);
+        }
+    }
+}
+
 // Initialize Android-specific directory paths.
 // Call this once near startup, after SDL is initialized.
 // Sets the user-writable directory to SDL_GetPrefPath().
@@ -1203,6 +1252,82 @@ void tDirectories::InitAndroid()
         SetUserData(pref);
         SetUserConfig(pref + "/config");
         SDL_free(prefPath);
+
+        // Extract ALL APK assets to the internal files directory on first launch.
+        // Android APK assets are not accessible via opendir/fopen/libxml2, so we
+        // must copy them to real filesystem paths. This makes Android behave like
+        // iOS/desktop where all game data is on the real filesystem.
+        // _manifest.txt (generated at build time by sync_assets.sh) lists every file.
+        tString dataDir = pref + "/data";
+        SDL_Log("[Android] Extracting APK assets to %s", static_cast<const char*>(dataDir));
+        {
+            SDL_IOStream* mf = SDL_IOFromFile("_manifest.txt", "r");
+            SDL_Log("[Android] _manifest.txt: %s", mf ? "found" : "NOT FOUND");
+            if (mf)
+            {
+                Sint64 sz = SDL_GetIOSize(mf);
+                if (sz > 0)
+                {
+                    std::vector<char> buf((size_t)sz + 1, 0);
+                    SDL_ReadIO(mf, buf.data(), (size_t)sz);
+                    SDL_CloseIO(mf);
+
+                    char* p = buf.data();
+                    while (*p)
+                    {
+                        char* nl = strchr(p, '\n');
+                        if (nl) *nl = 0;
+                        if (*p && *p != '#' && *p != '.')
+                        {
+                            tString destFile;
+                            destFile << dataDir << "/" << p;
+
+                            // Skip if already extracted
+                            struct stat st;
+                            if (stat(static_cast<const char*>(destFile), &st) != 0)
+                            {
+                                SDL_IOStream* io = SDL_IOFromFile(p, "rb");
+                                if (io)
+                                {
+                                    Sint64 fsz = SDL_GetIOSize(io);
+                                    if (fsz > 0)
+                                    {
+                                        // Create parent directories
+                                        {
+                                            std::string path = static_cast<const char*>(destFile);
+                                            for (size_t pos = 1; pos < path.size(); ++pos)
+                                            {
+                                                if (path[pos] == '/')
+                                                    mkdir(path.substr(0, pos).c_str(), 0755);
+                                            }
+                                        }
+
+                                        std::vector<char> fbuf((size_t)fsz);
+                                        SDL_ReadIO(io, fbuf.data(), (size_t)fsz);
+                                        FILE* out = fopen(static_cast<const char*>(destFile), "wb");
+                                        if (out)
+                                        {
+                                            fwrite(fbuf.data(), 1, (size_t)fsz, out);
+                                            fclose(out);
+                                        }
+                                    }
+                                    SDL_CloseIO(io);
+                                }
+                            }
+                        }
+                        if (nl) p = nl + 1; else break;
+                    }
+                }
+                else
+                    SDL_CloseIO(mf);
+            }
+        }
+
+        // Point data directory at the extracted copy — opendir, fopen, libxml2
+        // all work natively on real filesystem paths.
+        SetData(dataDir);
+        SetAutoResource(pref + "/resource/automatic");
+        SetIncludedResource(dataDir + "/resource/included");
     }
 
     // External storage: user-visible directory under Android/data/<pkg>/files/
@@ -1221,7 +1346,7 @@ void tDirectories::InitAndroid()
             st_AndroidExternalDir = ext;
 
             // Create standard subdirs so users know where to put things
-            const char* subdirs[] = {"moviepacks", "textures", "sound", "music", "config", nullptr};
+            const char* subdirs[] = {"moviepacks", "cockpits", "textures", "sound", "music", "config", nullptr};
             for (int i = 0; subdirs[i]; ++i)
             {
                 tString dir;

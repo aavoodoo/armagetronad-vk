@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.22)
 project(armagetronad VERSION 0.4.0 LANGUAGES C CXX)
 
-set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 # ============================================================================
@@ -30,7 +30,7 @@ endif()
 # iOS deployment target
 # ============================================================================
 if(NOT CMAKE_OSX_DEPLOYMENT_TARGET)
-    set(CMAKE_OSX_DEPLOYMENT_TARGET "14.0" CACHE STRING "Minimum iOS deployment target")
+    set(CMAKE_OSX_DEPLOYMENT_TARGET "17.0" CACHE STRING "Minimum iOS deployment target")
 endif()
 
 # ============================================================================
@@ -62,6 +62,20 @@ FetchContent_Declare(
     GIT_SHALLOW    TRUE
 )
 FetchContent_MakeAvailable(glm)
+
+# ============================================================================
+# LuaJIT (interpreter-only on iOS — JIT disabled by TARGET_SYS=iOS build)
+# Pre-built static libs:
+#   Device:    build_ios/_deps/luajit-ios/libluajit.a
+#   Simulator: build_ios/_deps/luajit-ios-sim/libluajit.a
+# Build with: bash tools/build_luajit.sh ios
+# LuaJIT is linked via SDK-conditional LDFLAGS (same pattern as MoltenVK)
+# so Xcode picks the correct library for device vs simulator builds.
+# ============================================================================
+set(LUAJIT_IOS_DIR "${CMAKE_CURRENT_BINARY_DIR}/_deps/luajit-ios")
+set(LUAJIT_SIM_DIR "${CMAKE_CURRENT_BINARY_DIR}/_deps/luajit-ios-sim")
+set(LUAJIT_DEVICE_LIB "${LUAJIT_IOS_DIR}/libluajit.a")
+set(LUAJIT_SIM_LIB "${LUAJIT_SIM_DIR}/libluajit.a")
 
 # ============================================================================
 # Protobuf (built from source — must match system protoc version for iOS)
@@ -267,6 +281,7 @@ file(GLOB TRON_SRCS
     "${SRC}/tron/gFloor.cpp"
     "${SRC}/tron/gFriends.cpp"
     "${SRC}/tron/gGame.cpp"
+    "${SRC}/tron/gLuaBindings.cpp"
     "${SRC}/tron/gJoystick.cpp"
     "${SRC}/tron/gLanguageMenu.cpp"
     "${SRC}/tron/gLogo.cpp"
@@ -311,7 +326,7 @@ set(VPARSER_SRC "${SRC}/tools/values/vParser.cpp")
 # ============================================================================
 # App bundle resources — shaders and game data
 # ============================================================================
-file(GLOB_RECURSE SHADER_RESOURCES "${SHADER_DIR}/*.spv")
+file(GLOB_RECURSE SHADER_RESOURCES "${SHADER_DIR}/*.spv" "${SHADER_DIR}/*.lua")
 
 # Generate languages.txt from languages.txt.in (substitute @progtitle@)
 set(progtitle "Armagetron Advanced")
@@ -488,6 +503,7 @@ set_target_properties(armagetronad PROPERTIES
     MACOSX_BUNDLE_SHORT_VERSION_STRING "${VERSION}"
     MACOSX_BUNDLE_BUNDLE_VERSION "1"
     XCODE_ATTRIBUTE_PRODUCT_NAME "armagetronad"
+    XCODE_ATTRIBUTE_PRODUCT_BUNDLE_IDENTIFIER "org.armagetronad.armagetronad"
     XCODE_ATTRIBUTE_TARGETED_DEVICE_FAMILY "1,2"  # iPhone + iPad
     XCODE_ATTRIBUTE_IPHONEOS_DEPLOYMENT_TARGET "${CMAKE_OSX_DEPLOYMENT_TARGET}"
     XCODE_ATTRIBUTE_ENABLE_BITCODE "NO"
@@ -527,6 +543,9 @@ target_include_directories(armagetronad PRIVATE
     "${SRC}/thirdparty/miniz"
     "${SRC}/thirdparty/scrap"
     "${SRC}/thirdparty/binreloc"
+    "${SRC}/thirdparty/vma"
+    "${SRC}/thirdparty/luapp"
+    "${CMAKE_CURRENT_BINARY_DIR}/_deps/luajit-ios"  # lua.h, lauxlib.h, lualib.h (LuaJIT)
     "${IOS_CMAKE_DIR}"                      # tUniversalVariables.h
 )
 
@@ -603,13 +622,16 @@ if(MOLTENVK_XCFRAMEWORK)
     set(_molvk_simulator "${MOLTENVK_XCFRAMEWORK}/ios-arm64_x86_64-simulator/libMoltenVK.a")
     set_target_properties(armagetronad PROPERTIES
         "XCODE_ATTRIBUTE_OTHER_LDFLAGS[sdk=iphoneos*]"
-            "$(inherited) ${_ios_frameworks_str} ${_molvk_device}"
+            "$(inherited) ${_ios_frameworks_str} ${_molvk_device} ${LUAJIT_DEVICE_LIB}"
         "XCODE_ATTRIBUTE_OTHER_LDFLAGS[sdk=iphonesimulator*]"
-            "$(inherited) ${_ios_frameworks_str} ${_molvk_simulator}"
+            "$(inherited) ${_ios_frameworks_str} ${_molvk_simulator} ${LUAJIT_SIM_LIB}"
     )
 else()
     set_target_properties(armagetronad PROPERTIES
-        XCODE_ATTRIBUTE_OTHER_LDFLAGS "$(inherited) ${_ios_frameworks_str}"
+        "XCODE_ATTRIBUTE_OTHER_LDFLAGS[sdk=iphoneos*]"
+            "$(inherited) ${_ios_frameworks_str} ${LUAJIT_DEVICE_LIB}"
+        "XCODE_ATTRIBUTE_OTHER_LDFLAGS[sdk=iphonesimulator*]"
+            "$(inherited) ${_ios_frameworks_str} ${LUAJIT_SIM_LIB}"
     )
 endif()
 

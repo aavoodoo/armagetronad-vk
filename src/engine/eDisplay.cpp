@@ -196,7 +196,24 @@ static void finite_xy_plane( const eCoord &pos,const eCoord &dir,REAL h, eRectan
     REAL cx = pos.x - dir.x;
     REAL cy = pos.y - dir.y;
 
-    // Compute worldScale from all vertex coordinates
+    // Snap center to grid boundaries so the floor quad vertices land on
+    // stable world positions. Without this, the center shifts continuously
+    // during camera rotation, causing int16 UV quantization jitter.
+    REAL snapSize = gridSize * 4;
+    REAL snappedCx = std::floor(cx / snapSize) * snapSize;
+    REAL snappedCy = std::floor(cy / snapSize) * snapSize;
+
+    // Recompute rectangle bounds relative to snapped center
+    // (expand to ensure the original rect is fully covered)
+    lx = std::min(lx, snappedCx - snapSize);
+    ly = std::min(ly, snappedCy - snapSize);
+    hx = std::max(hx, snappedCx + snapSize);
+    hy = std::max(hy, snappedCy + snapSize);
+    cx = snappedCx;
+    cy = snappedCy;
+
+    // Compute worldScale from all vertex coordinates.
+    // Round UP to the next power of 2 for stable quantization.
     REAL worldScale = std::abs(cx);
     worldScale = std::max(worldScale, std::abs(cy));
     worldScale = std::max(worldScale, std::abs(lx));
@@ -204,6 +221,7 @@ static void finite_xy_plane( const eCoord &pos,const eCoord &dir,REAL h, eRectan
     worldScale = std::max(worldScale, std::abs(hx));
     worldScale = std::max(worldScale, std::abs(hy));
     if (worldScale < 1.0f) worldScale = 1.0f;
+    worldScale = std::pow(2.0, std::ceil(std::log2(worldScale)));
 
     // Build texture matrix: scale normalized coords back to world-space tiling
     float tsU = texScaleU != 0 ? texScaleU : static_cast<float>(1.0 / gridSize);
@@ -598,12 +616,12 @@ void eGrid::display_simple( eCamera* cam, int viewer,bool floor,
         sr_SetRenderContext(rRenderContext::Game3D);
         rBeginCycleRendering();
         eGameObject::RenderAll(this, cam);
-        rEndCycleRendering();
 
-        // Flush all opaque dynamic geometry accumulated by cycle/wall rendering.
-        // Render context is embedded in each state key at Submit time, so batched
-        // draws carry the correct context for shader hook dispatch.
+        // Flush opaque dynamic geometry (legacy shadows, etc.) BEFORE instanced
+        // cycle draws so that cycles render on top via depth test.
         rRenderQueue::Instance().ExecutePhase(rRenderPhase::OpaqueDynamic);
+
+        rEndCycleRendering();
 
         // Execute transparent phase (zones) — set Zones context so the
         // uber shader emissive hook for zones fires. zShape.cpp only

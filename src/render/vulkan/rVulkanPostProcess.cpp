@@ -1080,13 +1080,20 @@ bool rVulkanPostProcess::BuildPass(const std::string& effectName,
         }
     }
 #else
-    // No shaderc (Android): load pre-compiled SPIR-V from APK assets.
+    // No shaderc (iOS/Android): load pre-compiled SPIR-V.
+    // Search moviepack directory first, then system shaders.
     {
-        std::string spvPath = "shaders/postprocess/" + effectName + "/" + decl.shader + ".frag.spv";
-        outPass.fragShader = rVulkanShader::LoadFromFile(device_, spvPath.c_str());
+        std::string spvSub = "shaders/postprocess/" + effectName + "/" + decl.shader + ".frag.spv";
+        tString spvPath = sg_PPGetReadPath(spvSub);
+        if (spvPath.Len() <= 1)
+        {
+            SDL_Log("[PostProcess] Pre-compiled SPV not found: %s", spvSub.c_str());
+            return false;
+        }
+        outPass.fragShader = rVulkanShader::LoadFromFile(device_, static_cast<const char*>(spvPath));
         if (outPass.fragShader == VK_NULL_HANDLE)
         {
-            SDL_Log("[PostProcess] Failed to load pre-compiled SPV: %s", spvPath.c_str());
+            SDL_Log("[PostProcess] Failed to load pre-compiled SPV: %s", static_cast<const char*>(spvPath));
             return false;
         }
     }

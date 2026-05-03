@@ -625,11 +625,14 @@ void gMoviepackManager::NotifyRendererReady()
 
     const gMoviepack* activePack = moviepacks_(activeIndex_);
 
+    // Reload uber shaders from the moviepack's pre-compiled SPVs.
+    // On startup, ScanMoviepacks() extracted the ZIP but sr_glOut was 0,
+    // so ActivateMoviepack()'s shader reload was skipped. Do it now.
+    extern void sr_vkRendererReloadShaders();
+    sr_vkRendererReloadShaders();
+
     // Tell the PP system which moviepack is active so it uses the correct
     // shader directory when loading effect scripts (bloom.lua etc.).
-    // This is the same call that ActivateMoviepack() makes inside its
-    // if (sr_glOut) block, which was skipped at startup because sr_glOut
-    // was 0 when ScanMoviepacks() ran.
     extern void sr_vkPostProcessOnMoviepackActivated(const char*);
     sr_vkPostProcessOnMoviepackActivated(
         activePack ? static_cast<const char*>(activePack->name) : nullptr);
