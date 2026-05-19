@@ -528,6 +528,10 @@ void cleanup(eGrid *grid){
 #endif
         nNetObject::ClearAll();
 
+#ifndef DEDICATED
+        gMoviepackManager::Destroy();
+#endif
+
         if (sr_glOut){
             rITexture::UnloadAll();
         }
@@ -1052,6 +1056,10 @@ int main(int argc,char **argv){
                 // Save config before tearing down the display so we don't stall
                 // with a black screen while writing files.
                 st_SaveConfig();
+
+                // Free moviepack singleton state while the renderer is still alive
+                // so cached preview/title texture destructors can call RenderDeleteTexture.
+                gMoviepackManager::Destroy();
 
                 // Destroy the Vulkan renderer BEFORE destroying the SDL window.
                 // On iOS/MoltenVK the surface is backed by a CAMetalLayer owned by

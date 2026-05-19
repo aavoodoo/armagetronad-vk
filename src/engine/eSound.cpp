@@ -308,6 +308,9 @@ void eLegacyWavData::Load()
             SetData(dstData, static_cast<Uint32>(dstLen));
             SDL_free(dstData);
         }
+
+        SDL_free(byteData);
+        byteData = nullptr;
     }
     catch(...){
         if(byteData)

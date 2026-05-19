@@ -58,6 +58,11 @@ public:
     //! Get the singleton instance
     static gMoviepackManager& Get();
 
+    //! Tear down the singleton. Must be called while the renderer is still
+    //! alive so that cached preview/title texture destructors can issue
+    //! their RenderDeleteTexture calls safely.
+    static void Destroy();
+
     //! Scan for available moviepacks in data directories
     void ScanMoviepacks();
 

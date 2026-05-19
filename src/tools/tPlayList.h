@@ -71,7 +71,7 @@ private:
     std::deque<tSong> m_Playlist;
     std::deque<tSong>::iterator m_CurrentSong;
 
-    int usePlaylist;
+    int usePlaylist = PLAYLIST_INTERNAL;
 };
 
 

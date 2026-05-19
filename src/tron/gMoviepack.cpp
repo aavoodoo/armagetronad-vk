@@ -117,6 +117,12 @@ gMoviepackManager& gMoviepackManager::Get()
     return *sg_instance;
 }
 
+void gMoviepackManager::Destroy()
+{
+    delete sg_instance;
+    sg_instance = nullptr;
+}
+
 gMoviepackManager::gMoviepackManager()
     : activeIndex_(0), zipExtracted_(false)
 {

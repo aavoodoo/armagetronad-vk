@@ -42,7 +42,7 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 //! Gradient class, able to store a gradient and perform basic render functions with it
 class rGradient: public std::map<float, rColor> {
     int m_dir; //!< the direction the gardient is laid in
-    float m_at; //!< current value, used when m_dir == value
+    float m_at = 0.0f; //!< current value, used when m_dir == value
     tCoord m_origin; //!< bottom-left point of the gradient
     tCoord m_dimensions; //!< width and height of it
     tCoord m_texScale; //!< scale factor of the texture
