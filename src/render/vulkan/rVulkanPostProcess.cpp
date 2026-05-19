@@ -1685,6 +1685,17 @@ void rVulkanPostProcess::OnMoviepackActivated(const std::string& moviepackName)
     if (offscreenBuilt_ && !activeEffect_.empty())
     {
         Effect* ef = EnsureEffectLoaded(activeEffect_);
+        if (!ef && activeEffect_ != "passthrough")
+        {
+            // Fall back to passthrough so the composite pass still runs and
+            // the swapchain image transitions to PRESENT_SRC_KHR. Without
+            // this, the user sees the screen flicker between stale frames.
+            std::cerr << "[PostProcess] Failed to re-load active effect '"
+                      << activeEffect_ << "' after moviepack activation, "
+                      "falling back to passthrough\n";
+            ef = EnsureEffectLoaded("passthrough");
+            if (ef) activeEffect_ = "passthrough";
+        }
         if (ef)
         {
             activeEffectPtr_ = ef;
@@ -1693,7 +1704,7 @@ void rVulkanPostProcess::OnMoviepackActivated(const std::string& moviepackName)
         else
         {
             std::cerr << "[PostProcess] Failed to re-load active effect '"
-                      << activeEffect_ << "' after moviepack activation\n";
+                      << activeEffect_ << "' (and passthrough) after moviepack activation\n";
         }
     }
 
@@ -1724,6 +1735,14 @@ void rVulkanPostProcess::OnMoviepackDeactivated()
     if (offscreenBuilt_ && !activeEffect_.empty())
     {
         Effect* ef = EnsureEffectLoaded(activeEffect_);
+        if (!ef && activeEffect_ != "passthrough")
+        {
+            std::cerr << "[PostProcess] Failed to re-load active effect '"
+                      << activeEffect_ << "' after moviepack deactivation, "
+                      "falling back to passthrough\n";
+            ef = EnsureEffectLoaded("passthrough");
+            if (ef) activeEffect_ = "passthrough";
+        }
         if (ef)
         {
             activeEffectPtr_ = ef;

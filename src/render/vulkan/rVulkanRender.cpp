@@ -1007,15 +1007,6 @@ void vkRenderer::BeginFrame()
     // kill the app and display a black-screen transition animation.
     if (appInBackground_) return;
 
-    // Honour deferred shader reload. Multiple requests (moviepack deactivate +
-    // activate) are coalesced into one rebuild here at the frame boundary.
-    if (pendingShaderReload_)
-    {
-        pendingShaderReload_ = false;
-        DoReloadShaders();
-        if (!IsInitialized()) return;
-    }
-
     // Detect external window resize (e.g. from menu SDL_SetWindowSize).
     // Skip until after the first successful present: window pixel size may not
     // have settled right after swapchain creation (especially on iOS/MoltenVK),
@@ -1090,6 +1081,12 @@ void vkRenderer::BeginFrame()
     // s_pendingPPDirty is set by sr_vkPostProcessActivate / sr_vkPostProcessDeactivate.
     // On macOS this runs after the force-enable block, so the offscreen is already
     // built and SetActiveEffect loads the effect immediately (no deferral).
+    //
+    // This MUST run before the shader reload below: SetEnabled(true) calls
+    // BuildOffscreen which registers the PP scene render pass with
+    // pipelineManager_. DoReloadShaders's PP-RP prewarm depends on that
+    // registration being current, and on the new render pass existing if PP
+    // was just toggled on by a moviepack switch.
     if (s_pendingPPDirty)
     {
         s_pendingPPDirty = false;
@@ -1102,6 +1099,18 @@ void vkRenderer::BeginFrame()
 #else
         postProcess_.SetEnabled(s_pendingPPEnabled);
 #endif
+    }
+
+    // Honour deferred shader reload. Multiple requests (moviepack deactivate +
+    // activate) are coalesced into one rebuild here at the frame boundary.
+    // Runs AFTER swapchain/PP setup so DoReloadShaders sees the final
+    // framebuffer render pass and (if active) PP scene render pass, and its
+    // prewarm covers both.
+    if (pendingShaderReload_)
+    {
+        pendingShaderReload_ = false;
+        DoReloadShaders();
+        if (!IsInitialized()) return;
     }
 
     VkDevice device = context_.GetDevice();
@@ -4927,9 +4936,10 @@ void vkRenderer::DoReloadShaders()
     // Load new shader modules first — do NOT touch the live shaders until
     // we have valid replacements.
     VkDevice device = context_.GetDevice();
-    VkShaderModule newVert         = VK_NULL_HANDLE;
-    VkShaderModule newFrag         = VK_NULL_HANDLE;
-    VkShaderModule newFragEmissive = VK_NULL_HANDLE;
+    VkShaderModule newVert          = VK_NULL_HANDLE;
+    VkShaderModule newVertInstanced = VK_NULL_HANDLE;
+    VkShaderModule newFrag          = VK_NULL_HANDLE;
+    VkShaderModule newFragEmissive  = VK_NULL_HANDLE;
 
 #ifdef HAVE_SHADERC_SHADERC_HPP
     // Runtime GLSL compilation with moviepack override support.
@@ -4970,6 +4980,19 @@ void vkRenderer::DoReloadShaders()
             std::cerr << "[Vulkan] ReloadShaders: vertex compile failed:\n" << err << "\n";
     }
 
+    tString vertInstancedSrcPath = tDirectories::Data().GetReadPath("moviepack/shaders/uber_instanced.vert");
+    if (vertInstancedSrcPath.Len() <= 1)
+        vertInstancedSrcPath = tDirectories::Data().GetReadPath("shaders/uber_instanced.vert");
+    if (vertInstancedSrcPath.Len() > 1)
+    {
+        std::string err;
+        newVertInstanced = rVulkanShader::CompileFromFile(
+            device, static_cast<const char*>(vertInstancedSrcPath),
+            rVulkanShader::Stage::Vertex, includePaths, &err);
+        if (newVertInstanced == VK_NULL_HANDLE)
+            std::cerr << "[Vulkan] ReloadShaders: instanced vertex compile failed:\n" << err << "\n";
+    }
+
     tString fragSrcPath = tDirectories::Data().GetReadPath("moviepack/shaders/uber.frag");
     if (fragSrcPath.Len() <= 1)
         fragSrcPath = tDirectories::Data().GetReadPath("shaders/uber.frag");
@@ -4997,7 +5020,8 @@ void vkRenderer::DoReloadShaders()
 
     VK_LOG_INFO("[Vulkan] ReloadShaders: vert=" << static_cast<const char*>(vertSrcPath)
               << " frag=" << static_cast<const char*>(fragSrcPath)
-              << " newVert=" << newVert << " newFrag=" << newFrag
+              << " newVert=" << newVert << " newVertInstanced=" << newVertInstanced
+              << " newFrag=" << newFrag
               << " newFragEmissive=" << newFragEmissive << std::endl);
 #else
     // No shaderc (iOS/Android): load pre-compiled SPIR-V.
@@ -5013,18 +5037,20 @@ void vkRenderer::DoReloadShaders()
                 return rVulkanShader::LoadFromFile(device, static_cast<const char*>(sysPath));
             return rVulkanShader::LoadFromFile(device, systemPath);
         };
-        newVert         = loadSPV("moviepack/shaders/uber.vert.spv",          "shaders/uber.vert.spv");
-        newFrag         = loadSPV("moviepack/shaders/uber.frag.spv",          "shaders/uber.frag.spv");
-        newFragEmissive = loadSPV("moviepack/shaders/uber.frag.emissive.spv", "shaders/uber.frag.emissive.spv");
+        newVert          = loadSPV("moviepack/shaders/uber.vert.spv",           "shaders/uber.vert.spv");
+        newVertInstanced = loadSPV("moviepack/shaders/uber_instanced.vert.spv", "shaders/uber_instanced.vert.spv");
+        newFrag          = loadSPV("moviepack/shaders/uber.frag.spv",           "shaders/uber.frag.spv");
+        newFragEmissive  = loadSPV("moviepack/shaders/uber.frag.emissive.spv",  "shaders/uber.frag.emissive.spv");
     }
 #endif
 
-    if (!newVert || !newFrag || !newFragEmissive)
+    if (!newVert || !newVertInstanced || !newFrag || !newFragEmissive)
     {
         std::cerr << "[Vulkan] ReloadShaders: shader compile failed — keeping current shaders\n";
-        if (newVert)         vkDestroyShaderModule(device, newVert, nullptr);
-        if (newFrag)         vkDestroyShaderModule(device, newFrag, nullptr);
-        if (newFragEmissive) vkDestroyShaderModule(device, newFragEmissive, nullptr);
+        if (newVert)          vkDestroyShaderModule(device, newVert, nullptr);
+        if (newVertInstanced) vkDestroyShaderModule(device, newVertInstanced, nullptr);
+        if (newFrag)          vkDestroyShaderModule(device, newFrag, nullptr);
+        if (newFragEmissive)  vkDestroyShaderModule(device, newFragEmissive, nullptr);
         return; // leave current shaders and pipeline intact
     }
 
@@ -5051,12 +5077,14 @@ void vkRenderer::DoReloadShaders()
     ++modelMeshCacheVersion_;
 
     pipelineManager_.Destroy();
-    if (vertShader_         != VK_NULL_HANDLE) vkDestroyShaderModule(device, vertShader_, nullptr);
-    if (fragShader_         != VK_NULL_HANDLE) vkDestroyShaderModule(device, fragShader_, nullptr);
-    if (fragShaderEmissive_ != VK_NULL_HANDLE) vkDestroyShaderModule(device, fragShaderEmissive_, nullptr);
-    vertShader_         = newVert;
-    fragShader_         = newFrag;
-    fragShaderEmissive_ = newFragEmissive;
+    if (vertShader_          != VK_NULL_HANDLE) vkDestroyShaderModule(device, vertShader_, nullptr);
+    if (vertShaderInstanced_ != VK_NULL_HANDLE) vkDestroyShaderModule(device, vertShaderInstanced_, nullptr);
+    if (fragShader_          != VK_NULL_HANDLE) vkDestroyShaderModule(device, fragShader_, nullptr);
+    if (fragShaderEmissive_  != VK_NULL_HANDLE) vkDestroyShaderModule(device, fragShaderEmissive_, nullptr);
+    vertShader_          = newVert;
+    vertShaderInstanced_ = newVertInstanced;
+    fragShader_          = newFrag;
+    fragShaderEmissive_  = newFragEmissive;
 
     VkDescriptorSetLayout reloadSetLayouts[2] = { descriptorManager_.GetLayout(), lightingUBOLayout_ };
     VkPipelineLayout layout;
@@ -5068,6 +5096,30 @@ void vkRenderer::DoReloadShaders()
     {
         std::cerr << "[Vulkan] ReloadShaders: pipelineManager_.Init failed" << std::endl;
     }
+    pipelineManager_.SetInstancedVertShader(vertShaderInstanced_);
+
+    // Pre-warm the pipeline cache against the new shaders so the first post-reload
+    // frame doesn't stall while NVIDIA/AMD drivers JIT-compile every state combo on
+    // first use. Mirrors the initial Init's prewarm at line ~506.
+    pipelineManager_.PrewarmCommonPipelines();
+
+    // If post-process is active, also prewarm against the PP scene render pass.
+    // In-game frames render into the offscreen target whose render pass differs
+    // from the swapchain's, so without this the first PP-active draw after a
+    // moviepack switch JIT-compiles a second full set of pipelines on demand.
+    // BeginFrame's reorder (PP rebuild before reload) guarantees ppRP is current
+    // and registered with the pipeline manager via BuildOffscreen→RegisterRenderPass.
+    if (postProcess_.IsEnabled())
+    {
+        VkRenderPass ppRP = postProcess_.GetSceneRenderPass();
+        if (ppRP != VK_NULL_HANDLE)
+        {
+            pipelineManager_.SetRenderPass(ppRP);
+            pipelineManager_.PrewarmCommonPipelines();
+            pipelineManager_.SetRenderPass(framebuffer_.GetRenderPass());
+        }
+    }
+
     VK_LOG_INFO("[Vulkan] ReloadShaders: complete" << std::endl);
 }
 
