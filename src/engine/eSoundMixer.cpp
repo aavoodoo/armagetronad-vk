@@ -457,7 +457,15 @@ void eSoundMixer::Init() {
 }
 
 eSoundMixer::~eSoundMixer() {
-    // do nothing destructor
+#ifdef HAVE_MINIAUDIO
+    // Stop the audio device before member destructors free m_SoundEffects
+    // PCM data.  The CoreAudio callback thread holds raw pointers
+    // (s_externalChannels[i].samples) into those vectors; ma_device_uninit()
+    // blocks until any in-progress callback completes and guarantees no
+    // further callbacks will fire, preventing the use-after-free race.
+    eAudioDevice* dev = GetGlobalAudioDevice();
+    if (dev) dev->Shutdown();
+#endif
 }
 
 void eSoundMixer::LoadPlaylist() {
