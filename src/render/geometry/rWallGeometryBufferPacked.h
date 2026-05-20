@@ -54,6 +54,8 @@ public:
     bool Upload() override;
     bool IsReady() const override;
     void RenderQuads() override;
+    void RenderQuadsBegin() override;
+    void RenderQuadsTransparent() override;
     void RenderQuadsHead(uint32_t headSegCount) override;
     void RenderLines() override;
     void Release() override;

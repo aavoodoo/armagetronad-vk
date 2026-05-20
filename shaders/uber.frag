@@ -302,7 +302,28 @@ void main()
         {
             // Normal unlit rendering: vertex color * texture
             fragColor = vColor * texColor;
-            emissiveBase = fragColor;  // save before shadow for emissive hooks
+            emissiveBase = fragColor;  // save before brightening + shadow for emissive hooks
+
+            // Cycle-wall trail glow: the begin-gradient (streaming) portion of
+            // the wall used to bake a per-vertex brightening
+            //   cr = r + cfunc(rat), cfunc(rat) = rat*rat
+            // into the CPU vertex color, with rat going 0→1 from junction to
+            // cycle tip. Computing it CPU-side ran the channel through uint8
+            // packing — `r + cfunc(rat) > 1` clipped to 1 and the shader's
+            // emissive-side de-brightening then over-subtracted for bright
+            // team colors. We now reproduce the same `+ cfunc * texColor`
+            // contribution here in fp32, recovered from the alpha channel:
+            //   cfunc(rat) = rat*rat = 1 - (1 - rat*rat) = 1 - afunc(rat)
+            //              = 1 - vColor.a   (afunc encodes vColor.a)
+            // Static walls and the GPU-compute path send alpha = 1, so the
+            // brightening evaluates to zero — this is a no-op for them.
+            // Applied before the shadow multiply to match the historical
+            // behaviour where shadow attenuated the whole composite.
+            if (uRenderContext == 7)
+            {
+                float brightening = max(0.0, 1.0 - vColor.a);
+                fragColor.rgb += brightening * texColor.rgb;
+            }
 
             // Shadow mapping on unlit surfaces (floor, cycle walls)
             if (lighting.shadowEnabled != 0)
@@ -338,16 +359,52 @@ void main()
         // Alpha of the emissive output doubles as a "how much does this
         // pixel glow" scalar.
         vec3 em = vec3(0.0);
+        // Per-attachment source alpha for the emissive output. The pipeline
+        // shares one blend mode across both attachments (rVulkanPipeline.cpp:415);
+        // when that blend mode is Alpha, each attachment's blend reads its own
+        // location's alpha as src_alpha — color uses fragColor.a, emissive uses
+        // emissiveOut.a. We exploit that: writing emissiveOut.a = 1 makes the
+        // emissive attachment behave as a full replace (`em*1 + dst*0`),
+        // unaffected by the per-vertex fade alpha that the color attachment
+        // uses. Cycle walls in the begin-gradient (alpha-blend) path set this
+        // to 1 so bloom/cel-shading see the same intensity as on the static
+        // portion. Other contexts keep the legacy `clamp(emMax)` encoding.
+        // 0.0 means "no glow at this pixel" — leave at default for the unused
+        // contexts; non-zero contexts overwrite below.
+        float emAlpha = 0.0;
         switch (uRenderContext)
         {
-            case 6:  em = hookRimWallEmissive  (fragColor, vTexCoord, vModelPos); break;
-            case 7:  em = hookCycleWallEmissive(emissiveBase, vTexCoord, vModelPos); break;
-            case 8:  em = hookCycleEmissive    (emissiveBase, vTexCoord, vModelPos, vNormal); break;
-            case 9:  em = hookZoneEmissive     (fragColor, vTexCoord, vModelPos); break;
-            default: break;
+            case 6:
+                em = hookRimWallEmissive(fragColor, vTexCoord, vModelPos);
+                emAlpha = clamp(max(max(em.r, em.g), em.b), 0.0, 1.0);
+                break;
+            case 7: {
+                // Cycle walls — vColor.rgb carries the flat team color (CPU
+                // no longer brightens it); the visible color path above adds
+                // the trail glow into fragColor only. emissiveBase = vColor *
+                // texColor is the un-brightened wall surface — exactly what
+                // bloom and cel-shading want to mark, uniformly across the
+                // streaming + static portions.
+                em = hookCycleWallEmissive(emissiveBase, vTexCoord, vModelPos);
+                // Force full opaque replace on the emissive attachment so the
+                // begin-gradient's alpha-blend doesn't fade the bloom/mask
+                // toward the cycle tip. Mask-based effects (celshading.frag
+                // gates on `emissive.a > 0.01`) get a clean binary cover.
+                emAlpha = 1.0;
+                break;
+            }
+            case 8:
+                em = hookCycleEmissive(emissiveBase, vTexCoord, vModelPos, vNormal);
+                emAlpha = clamp(max(max(em.r, em.g), em.b), 0.0, 1.0);
+                break;
+            case 9:
+                em = hookZoneEmissive(fragColor, vTexCoord, vModelPos);
+                emAlpha = clamp(max(max(em.r, em.g), em.b), 0.0, 1.0);
+                break;
+            default:
+                break;
         }
-        float emMax = max(max(em.r, em.g), em.b);
-        WRITE_EMISSIVE(vec4(em, clamp(emMax, 0.0, 1.0)));
+        WRITE_EMISSIVE(vec4(em, emAlpha));
 
         // Alpha-test flag in uTexMatrix[2][2] — only discard when explicitly requested
         if (pc.uTexMatrix[2][2] > 0.5 && fragColor.a < 0.01) discard;

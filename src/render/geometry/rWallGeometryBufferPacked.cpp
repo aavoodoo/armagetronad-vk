@@ -209,6 +209,57 @@ void rWallGeometryBufferPacked::RenderQuads()
                                     vkCachedQuadVerts_.data(), vkCachedQuadVerts_.size());
 }
 
+void rWallGeometryBufferPacked::RenderQuadsBegin()
+{
+    if (quadVertices_.empty()) return;
+    EnsureQuadCache();
+
+    // Begin-gradient segments carry a per-vertex alpha fade (1 at the junction
+    // with the static wall, 0 at the cycle tip). The wall surface itself is a
+    // real solid object — only the visible color is faded for style.
+    //
+    // Submit through OpaqueDynamic so depth-write stays ON: the wall records
+    // its own surface in the depth buffer, matching the static portion. This
+    // is critical for depth-based post-process (cel-shading's Sobel ink): with
+    // depth-write OFF the depth at streaming pixels would be whatever was
+    // rendered behind (the floor), producing a sharp depth step at the
+    // static/streaming seam → a fat black outline.
+    //
+    // Blend mode stays Alpha so the visible color fade still composites. In
+    // Vulkan the blend mode is pipeline-baked from state.blendMode and is
+    // independent of the phase config's `blend` bool (which only drives the
+    // legacy GL state setter). Phase config controls depthTest/depthWrite —
+    // here we want both ON, which OpaqueDynamic provides.
+    //
+    // The emissive attachment shares the same blend mode by default; the
+    // shader compensates for the resulting src_alpha multiplication so bloom
+    // and cel-shading see the opaque-equivalent emissive intensity.
+    unsigned int texId = RenderGetBoundTexture2D();
+    rRenderStateKey state = texId ? rRenderStateKey::Textured(texId, rBlendMode::Alpha)
+                                  : rRenderStateKey::Colored(rBlendMode::Alpha);
+    state.SetTexMatrix(vkQuadTexMatrix_);
+    state.SetRenderContext(static_cast<int>(sr_GetRenderContext()));
+    rRenderQueue::Instance().Submit(rRenderPhase::OpaqueDynamic, state,
+                                    vkCachedQuadVerts_.data(), vkCachedQuadVerts_.size());
+}
+
+void rWallGeometryBufferPacked::RenderQuadsTransparent()
+{
+    if (quadVertices_.empty()) return;
+    EnsureQuadCache();
+
+    // Death-fade segments are short-lived alpha-fading effects. Keep them in
+    // the Transparent phase (depth-write OFF) so a nearly-invisible fragment
+    // doesn't depth-cull cycles or zones that drive behind a dying wall.
+    unsigned int texId = RenderGetBoundTexture2D();
+    rRenderStateKey state = texId ? rRenderStateKey::Textured(texId, rBlendMode::Alpha)
+                                  : rRenderStateKey::Colored(rBlendMode::Alpha);
+    state.SetTexMatrix(vkQuadTexMatrix_);
+    state.SetRenderContext(static_cast<int>(sr_GetRenderContext()));
+    rRenderQueue::Instance().Submit(rRenderPhase::Transparent, state,
+                                    vkCachedQuadVerts_.data(), vkCachedQuadVerts_.size());
+}
+
 void rWallGeometryBufferPacked::RenderQuadsHead(uint32_t headSegCount)
 {
     if (quadVertices_.empty() || headSegCount == 0) return;

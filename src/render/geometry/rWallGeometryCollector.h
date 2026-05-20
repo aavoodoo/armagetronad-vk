@@ -110,7 +110,10 @@ public:
     //! Get static buffer for direct access
     rWallGeometryBuffer* GetStaticBuffer() { return staticBuffer_.get(); }
 
-    //! Get streaming buffer for direct access
+    //! Get begin-gradient buffer for direct access (per-frame, depth-write ON)
+    rWallGeometryBuffer* GetBeginBuffer() { return beginBuffer_.get(); }
+
+    //! Get streaming buffer for direct access (per-frame death effects, depth-write OFF)
     rWallGeometryBuffer* GetStreamingBuffer() { return streamingBuffer_.get(); }
 
     //! Get number of static quads
@@ -127,7 +130,8 @@ public:
 
 private:
     std::unique_ptr<rWallGeometryBuffer> staticBuffer_;     //!< Static wall portions
-    std::unique_ptr<rWallGeometryBuffer> streamingBuffer_;  //!< Begin segments + death effects
+    std::unique_ptr<rWallGeometryBuffer> beginBuffer_;      //!< Begin-gradient segments (depth-write ON)
+    std::unique_ptr<rWallGeometryBuffer> streamingBuffer_;  //!< Death-fade effects (depth-write OFF)
 
     // Pending static vertices (for incremental append)
     std::vector<rPackedWallVertex> pendingStaticQuads_;

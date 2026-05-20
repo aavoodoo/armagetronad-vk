@@ -83,6 +83,21 @@ public:
     //! Render all quads (triangles)
     virtual void RenderQuads() = 0;
 
+    //! Render all quads as begin-gradient (alpha-blended, depth-write ON,
+    //! through the OpaqueDynamic phase). Used by the streaming begin buffer
+    //! whose per-vertex alpha encodes the fade-in near the cycle. Depth-write
+    //! must stay on so the wall surface is recorded in the depth buffer —
+    //! depth-driven post-process effects (cel-shading's Sobel) would otherwise
+    //! see the floor depth at streaming-wall pixels and draw an ink stripe at
+    //! the static/streaming junction.
+    virtual void RenderQuadsBegin() = 0;
+
+    //! Render all quads as transparent (alpha-blended, depth-write OFF,
+    //! through the Transparent phase). Used by the death streaming buffer so
+    //! short-lived death effects don't occlude other geometry through their
+    //! near-invisible fragments.
+    virtual void RenderQuadsTransparent() = 0;
+
     //! Render only the first headSegCount quads (for GPU compute head-fill)
     virtual void RenderQuadsHead(uint32_t headSegCount) = 0;
 

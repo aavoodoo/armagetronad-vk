@@ -1410,21 +1410,35 @@ void gNetPlayerWall::RenderBegin(const eCoord &p1,const eCoord &pp2,REAL ta,REAL
                 REAL y = (p1.y + frag*(p2.y-p1.y))*(1-xfunc(rat)) + ppos.y*xfunc(rat);
                 REAL H = h*hfrac*hfunc(rat);
 
-                REAL cr = r + cfunc(rat);
-                REAL cg = g + cfunc(rat);
-                REAL cb = b + cfunc(rat);
+                // Per-vertex alpha encodes the fade-in near the cycle:
+                //   afunc(rat) = 1 - rat*rat   (1 at junction → 0 at cycle tip)
+                // The trail-glow brightening that used to be baked into rgb here
+                //   cr = r + cfunc(rat); cfunc(rat) = rat*rat
+                // is now applied in the fragment shader instead. Reason: when
+                // (r + cfunc) exceeded 1.0 the uint8 vertex-color storage
+                // clipped the channel, and the shader's emissive de-brightening
+                // would then over-subtract for the clipped portion — producing
+                // a darker patch on saturated team colors at the static side of
+                // the seam. Sending the flat team color and recovering the
+                // brightening from `1 - vColor.a` in the shader keeps the
+                // computation in fp32 and avoids the clipping.
                 REAL ca = a * afunc(rat);
                 REAL tc = ta + (te-ta)*frag;
 
-                // Bottom vertex - add small z-offset to prevent z-fighting with static buffer
-                // at the boundary where both buffers meet
-                static const REAL zOffset = 0.0001f;
-                quadVerts.emplace_back(x, y, zOffset, tc, hfrac, cr, cg, cb, ca);
+                // Bottom vertex at the floor, matching the static buffer's bottom
+                // vertices exactly. At the static/streaming boundary xfunc(0)=0 so
+                // these coincide with the static side; identical depth resolves draw
+                // order without visible z-fighting. Any non-zero offset here (the
+                // old hack used 0.0001) caused depth artifacts: z-fighting with
+                // other cycles' walls when grinding, and a phantom depth ridge at
+                // the wall base in depth-driven post-process effects (e.g. cel
+                // shading).
+                quadVerts.emplace_back(x, y, 0.0f, tc, hfrac, r, g, b, ca);
 
                 // Top vertex
                 REAL vx = x + H*cycle_->skew*sfunc(rat)*cycle_->dir.y;
                 REAL vy = y - H*cycle_->skew*sfunc(rat)*cycle_->dir.x;
-                quadVerts.emplace_back(vx, vy, H, tc, 0, cr, cg, cb, ca);
+                quadVerts.emplace_back(vx, vy, H, tc, 0, r, g, b, ca);
             }
             collector->AddBeginQuadStrip(quadVerts);
         }

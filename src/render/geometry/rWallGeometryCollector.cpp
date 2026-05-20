@@ -37,8 +37,12 @@ rWallGeometryCollector::rWallGeometryCollector()
     : staticNeedsRebuild_(true)
     , collecting_(false)
 {
-    // Create buffers with appropriate usage hints
+    // Create buffers with appropriate usage hints. Begin-gradient and death
+    // effects both stream every frame but render through different phases
+    // (OpaqueDynamic vs Transparent) — keep them in separate buffers so each
+    // can be submitted with its own pipeline state.
     staticBuffer_.reset(CreateWallGeometryBuffer(rBufferUsage::Static));
+    beginBuffer_.reset(CreateWallGeometryBuffer(rBufferUsage::Stream));
     streamingBuffer_.reset(CreateWallGeometryBuffer(rBufferUsage::Stream));
 }
 
@@ -55,7 +59,11 @@ void rWallGeometryCollector::BeginFrame()
     computeStartCurrent_ = sr_GetWallComputeCurrentCount();
     computeCountCurrent_ = 0;
 
-    // Clear streaming buffer every frame (it changes constantly)
+    // Clear per-frame buffers (begin gradient + death effects)
+    if (beginBuffer_)
+    {
+        beginBuffer_->Clear();
+    }
     if (streamingBuffer_)
     {
         streamingBuffer_->Clear();
@@ -129,22 +137,22 @@ void rWallGeometryCollector::AddNormalLine(const rPackedLineVertex& v0, const rP
 
 void rWallGeometryCollector::AddBeginQuadStrip(const std::vector<rPackedWallVertex>& vertices)
 {
-    if (!collecting_ || !streamingBuffer_ || vertices.size() < 4)
+    if (!collecting_ || !beginBuffer_ || vertices.size() < 4)
     {
         return;
     }
 
-    streamingBuffer_->AddQuadStrip(vertices.data(), vertices.size());
+    beginBuffer_->AddQuadStrip(vertices.data(), vertices.size());
 }
 
 void rWallGeometryCollector::AddBeginLineStrip(const std::vector<rPackedLineVertex>& vertices)
 {
-    if (!collecting_ || !streamingBuffer_ || vertices.size() < 2)
+    if (!collecting_ || !beginBuffer_ || vertices.size() < 2)
     {
         return;
     }
 
-    streamingBuffer_->AddLineStrip(vertices.data(), vertices.size());
+    beginBuffer_->AddLineStrip(vertices.data(), vertices.size());
 }
 
 void rWallGeometryCollector::AddDeathQuad(const rPackedWallVertex& v0, const rPackedWallVertex& v1,
@@ -230,7 +238,11 @@ bool rWallGeometryCollector::EndFrame()
         }
     }
 
-    // Streaming buffer always gets full upload each frame
+    // Per-frame buffers always get full upload
+    if (beginBuffer_ && !beginBuffer_->IsEmpty())
+    {
+        success = beginBuffer_->Upload() && success;
+    }
     if (streamingBuffer_ && !streamingBuffer_->IsEmpty())
     {
         success = streamingBuffer_->Upload() && success;
@@ -292,7 +304,26 @@ void rWallGeometryCollector::Render(bool renderLines, bool renderQuads)
         }
     }
 
-    // Then render streaming geometry (begin segments, death effects)
+    // Begin-gradient segments: route through OpaqueDynamic + Alpha so the
+    // wall surface writes depth (matches the static portion). Cel-shading's
+    // depth-Sobel and bloom both depend on continuous depth across the
+    // static/streaming junction; with depth-write OFF the streaming region
+    // would carry floor depth and produce a sharp boundary artifact.
+    if (beginBuffer_ && beginBuffer_->IsReady())
+    {
+        if (renderLines)
+        {
+            beginBuffer_->RenderLines();
+        }
+        if (renderQuads)
+        {
+            beginBuffer_->RenderQuadsBegin();
+        }
+    }
+
+    // Death-fade effects: keep on the Transparent phase (depth-write OFF) so
+    // nearly-invisible fragments at the tail of a dying wall don't depth-cull
+    // cycles or zones driving past.
     if (streamingBuffer_ && streamingBuffer_->IsReady())
     {
         if (renderLines)
@@ -301,7 +332,7 @@ void rWallGeometryCollector::Render(bool renderLines, bool renderQuads)
         }
         if (renderQuads)
         {
-            streamingBuffer_->RenderQuads();
+            streamingBuffer_->RenderQuadsTransparent();
         }
     }
 }
@@ -313,33 +344,27 @@ size_t rWallGeometryCollector::GetStaticQuadCount() const
 
 size_t rWallGeometryCollector::GetStreamingQuadCount() const
 {
-    return streamingBuffer_ ? streamingBuffer_->GetQuadCount() : 0;
+    // Combined begin + death streaming quads (both per-frame buffers).
+    size_t count = 0;
+    if (beginBuffer_)     count += beginBuffer_->GetQuadCount();
+    if (streamingBuffer_) count += streamingBuffer_->GetQuadCount();
+    return count;
 }
 
 size_t rWallGeometryCollector::GetGPUMemoryUsage() const
 {
     size_t usage = 0;
-    if (staticBuffer_)
-    {
-        usage += staticBuffer_->GetGPUMemoryUsage();
-    }
-    if (streamingBuffer_)
-    {
-        usage += streamingBuffer_->GetGPUMemoryUsage();
-    }
+    if (staticBuffer_)    usage += staticBuffer_->GetGPUMemoryUsage();
+    if (beginBuffer_)     usage += beginBuffer_->GetGPUMemoryUsage();
+    if (streamingBuffer_) usage += streamingBuffer_->GetGPUMemoryUsage();
     return usage;
 }
 
 void rWallGeometryCollector::Release()
 {
-    if (staticBuffer_)
-    {
-        staticBuffer_->Release();
-    }
-    if (streamingBuffer_)
-    {
-        streamingBuffer_->Release();
-    }
+    if (staticBuffer_)    staticBuffer_->Release();
+    if (beginBuffer_)     beginBuffer_->Release();
+    if (streamingBuffer_) streamingBuffer_->Release();
     pendingStaticQuads_.clear();
     pendingStaticLines_.clear();
     staticNeedsRebuild_ = true;
