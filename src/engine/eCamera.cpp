@@ -1728,6 +1728,7 @@ void eCamera::Render(){
         }
 
         // Debug: print depth buffer mapping
+#ifdef DEBUG
         {
             static int dbgCount = 0;
             if (dbgCount++ % 300 == 0)  // every ~5 seconds at 60fps
@@ -1764,6 +1765,7 @@ void eCamera::Render(){
                           << "\n";
             }
         }
+#endif // DEBUG
         vp->Perspective(fov,zNear,zFar,0.);
 
         ModelMatrix();

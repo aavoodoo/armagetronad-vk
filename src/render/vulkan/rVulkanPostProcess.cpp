@@ -1645,7 +1645,8 @@ void rVulkanPostProcess::SaveMvpConfigFile(const std::string& moviepackName) con
     }
 }
 
-void rVulkanPostProcess::OnMoviepackActivated(const std::string& moviepackName)
+void rVulkanPostProcess::OnMoviepackActivated(const std::string& moviepackName,
+                                                const std::string& newEffectName)
 {
     // Save current values under the OLD moviepack name first. On first
     // activation mvpMoviepackName_ is empty, so this writes to
@@ -1671,28 +1672,33 @@ void rVulkanPostProcess::OnMoviepackActivated(const std::string& moviepackName)
 
     mvpMoviepackName_ = moviepackName;
 
-    // Reload the active effect NOW, while we're still in the moviepack
-    // activate code path (which has already called vkDeviceWaitIdle).
-    // Otherwise the first frame after activation would find
-    // activeEffectPtr_ == nullptr, Execute would early-return, the
-    // swapchain image would never transition to PRESENT_SRC_KHR, and the
-    // user would see the screen flicker between stale/undefined contents.
+    // Adopt the NEW pack's intended effect (from POST_PROCESS_EFFECT in the
+    // pack's settings.cfg). Empty means "no PP effect requested" — fall back
+    // to passthrough so activeEffectPtr_ still points at a valid pipeline.
     //
-    // Only reload if the offscreen target is actually built — if PP is
-    // disabled we don't need an effect, and if it's enabled but the
-    // offscreen isn't built yet we'd hit the same null-view descriptor
-    // issue that SetActiveEffect's deferred path exists to avoid.
-    if (offscreenBuilt_ && !activeEffect_.empty())
+    // Why this matters: gMoviepackManager::activate calls vkDeviceWaitIdle
+    // before us and we're still on the same thread, but a frame that was
+    // mid-record when the activation menu fired may continue into Execute
+    // before BeginFrame's pending-state path re-runs SetActiveEffect on the
+    // next frame. Execute early-returns when activeEffectPtr_ is null,
+    // skipping the swapchain layout transition and freezing the present
+    // queue. Synchronously loading the right effect here keeps that path
+    // safe; doing so with the OLD activeEffect_ (the previous code) was
+    // guaranteed to miss in the new pack's shader directory.
+    activeEffect_    = newEffectName.empty() ? "passthrough" : newEffectName;
+    activeEffectPtr_ = nullptr;
+
+    if (offscreenBuilt_)
     {
         Effect* ef = EnsureEffectLoaded(activeEffect_);
         if (!ef && activeEffect_ != "passthrough")
         {
-            // Fall back to passthrough so the composite pass still runs and
-            // the swapchain image transitions to PRESENT_SRC_KHR. Without
-            // this, the user sees the screen flicker between stale frames.
-            std::cerr << "[PostProcess] Failed to re-load active effect '"
-                      << activeEffect_ << "' after moviepack activation, "
-                      "falling back to passthrough\n";
+            // The pack declared an effect that didn't load (missing script,
+            // shader compile failure). Surface the failure once and fall
+            // back to passthrough so the composite pass still runs.
+            std::cerr << "[PostProcess] Moviepack '" << moviepackName
+                      << "' requested effect '" << activeEffect_
+                      << "' but it failed to load — falling back to passthrough\n";
             ef = EnsureEffectLoaded("passthrough");
             if (ef) activeEffect_ = "passthrough";
         }
@@ -1701,17 +1707,13 @@ void rVulkanPostProcess::OnMoviepackActivated(const std::string& moviepackName)
             activeEffectPtr_ = ef;
             SeedEffectDefaults(*ef);
         }
-        else
-        {
-            std::cerr << "[PostProcess] Failed to re-load active effect '"
-                      << activeEffect_ << "' (and passthrough) after moviepack activation\n";
-        }
     }
 
     // Load overrides from the per-moviepack cfg file. EnsureEffectLoaded
-    // above populated mvpRegistry_ for the active effect via
-    // RegisterEffectMvp, so the Load here has entries to match against.
+    // above populated mvpRegistry_ for the new effect via RegisterEffectMvp,
+    // so the Load here has entries to match against.
     LoadMvpConfigFile(mvpMoviepackName_);
+    if (activeEffectPtr_) ApplyMvpToCurrentParams();
 }
 
 void rVulkanPostProcess::OnMoviepackDeactivated()
@@ -1728,28 +1730,29 @@ void rVulkanPostProcess::OnMoviepackDeactivated()
 
     mvpMoviepackName_.clear();
 
-    // Reload the active effect from the base-game shader directory so the
-    // renderer has a valid pipeline to bind next frame. Same rationale as
-    // OnMoviepackActivated: without this, activeEffectPtr_ stays null and
-    // Execute early-returns, leaving the swapchain image untouched.
-    if (offscreenBuilt_ && !activeEffect_.empty())
+    // Deactivation always falls back to passthrough — no moviepack means no
+    // moviepack-specific effect. Loading it here keeps activeEffectPtr_ valid
+    // for any in-flight frame that hits Execute before BeginFrame's
+    // pending-state path runs (same rationale as OnMoviepackActivated).
+    activeEffect_    = "passthrough";
+    activeEffectPtr_ = nullptr;
+
+    if (offscreenBuilt_)
     {
         Effect* ef = EnsureEffectLoaded(activeEffect_);
-        if (!ef && activeEffect_ != "passthrough")
-        {
-            std::cerr << "[PostProcess] Failed to re-load active effect '"
-                      << activeEffect_ << "' after moviepack deactivation, "
-                      "falling back to passthrough\n";
-            ef = EnsureEffectLoaded("passthrough");
-            if (ef) activeEffect_ = "passthrough";
-        }
         if (ef)
         {
             activeEffectPtr_ = ef;
             SeedEffectDefaults(*ef);
         }
     }
+
+    // No per-moviepack overrides to load when no moviepack is active.
+    // (mvpMoviepackName_ is empty → falls back to base postprocess.cfg if a
+    // future SetActiveEffect loads it; not needed for passthrough which has
+    // no parameters.)
     LoadMvpConfigFile(mvpMoviepackName_);
+    if (activeEffectPtr_) ApplyMvpToCurrentParams();
 }
 
 // ============================================================================

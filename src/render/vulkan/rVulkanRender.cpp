@@ -5241,11 +5241,13 @@ void sr_vkWaitIdle()
 //! the newly-active moviepack (effects get re-loaded from the moviepack's
 //! shader directory on next use) and loads MVP parameter overrides from
 //! the per-moviepack cfg file.
-void sr_vkPostProcessOnMoviepackActivated(const char* moviepackName)
+void sr_vkPostProcessOnMoviepackActivated(const char* moviepackName,
+                                            const char* newEffectName)
 {
     if (s_vkRenderer)
         s_vkRenderer->GetPostProcess().OnMoviepackActivated(
-            moviepackName ? std::string(moviepackName) : std::string());
+            moviepackName  ? std::string(moviepackName)  : std::string(),
+            newEffectName  ? std::string(newEffectName)  : std::string());
 }
 
 //! Called from gMoviepackManager::DeactivateMoviepack before resources are

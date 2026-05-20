@@ -99,8 +99,31 @@ static tConfItem<tString> sg_moviepackNameConf("MOVIEPACK_NAME", sg_moviepackNam
 // Post-process effect requested by the active moviepack's settings.cfg.
 // Populated by the POST_PROCESS_EFFECT key in the pack's cfg during activation.
 // Not a user-configurable item — read here and forwarded to the renderer.
+//
+// The change callback wires this directly into the renderer's pending-state
+// machinery: any update to POST_PROCESS_EFFECT (from the moviepack's
+// settings.cfg, from user.cfg, or from the in-game console) automatically
+// queues the corresponding Activate/Deactivate. This eliminates the need to
+// keep the renderer's activeEffect_ in sync via a separate explicit call,
+// and — critically — guarantees that gMoviepackManager::ActivateMoviepack's
+// resetLines (which clears POST_PROCESS_EFFECT before applying the new
+// pack's cfg) resets the renderer's pending state too, so no stale effect
+// name survives the pack switch.
 static tString sg_moviepackPPEffect;
-static tConfItemLine sg_moviepackPPEffectCI("POST_PROCESS_EFFECT", sg_moviepackPPEffect);
+static void sg_moviepackPPEffectChanged()
+{
+#ifndef DEDICATED
+    extern void sr_vkPostProcessActivate(const char* effectName);
+    extern void sr_vkPostProcessDeactivate();
+    if (sg_moviepackPPEffect.Len() > 0)
+        sr_vkPostProcessActivate(static_cast<const char*>(sg_moviepackPPEffect));
+    else
+        sr_vkPostProcessDeactivate();
+#endif
+}
+static tConfItemLine sg_moviepackPPEffectCI("POST_PROCESS_EFFECT",
+                                              sg_moviepackPPEffect,
+                                              &sg_moviepackPPEffectChanged);
 
 // Forward declaration for cleanup
 static void RemoveDirectoryRecursive(const tString& path);
@@ -599,20 +622,23 @@ bool gMoviepackManager::ActivateMoviepack()
         // Notify the post-process system so it can reload effects from
         // the new moviepack directory and register MVP_* tSettingItems
         // for any shader parameters declared by .meta files in the pack.
-        extern void sr_vkPostProcessOnMoviepackActivated(const char* name);
+        // Pass the new effect name (from POST_PROCESS_EFFECT in the pack's
+        // settings.cfg, loaded above) so the PP subsystem can load the
+        // correct effect synchronously instead of speculatively retrying
+        // the previous pack's effect — which would never exist in the new
+        // pack and produced misleading "Effect script not found" logs.
+        extern void sr_vkPostProcessOnMoviepackActivated(const char* name,
+                                                          const char* newEffectName);
         const gMoviepack* activePack = moviepacks_(activeIndex_);
         sr_vkPostProcessOnMoviepackActivated(
-            activePack ? static_cast<const char*>(activePack->name) : nullptr);
+            activePack ? static_cast<const char*>(activePack->name) : nullptr,
+            sg_moviepackPPEffect.Len() > 0
+                ? static_cast<const char*>(sg_moviepackPPEffect)
+                : nullptr);
 
-        // Activate post-processing with the effect requested by the moviepack's cfg.
-        // sg_moviepackPPEffect was populated by POST_PROCESS_EFFECT in the settings.cfg
-        // loaded above. If the key wasn't present, the string is empty and PP stays off.
-        extern void sr_vkPostProcessActivate(const char* effectName);
-        extern void sr_vkPostProcessDeactivate();
-        if (sg_moviepackPPEffect.Len() > 0)
-            sr_vkPostProcessActivate(static_cast<const char*>(sg_moviepackPPEffect));
-        else
-            sr_vkPostProcessDeactivate();
+        // No explicit sr_vkPostProcessActivate / Deactivate here — the cfg
+        // load above already fired sg_moviepackPPEffectChanged via
+        // tConfItemLine, which queues the corresponding pending state.
     }
 #endif
 
@@ -638,19 +664,18 @@ void gMoviepackManager::NotifyRendererReady()
     sr_vkRendererReloadShaders();
 
     // Tell the PP system which moviepack is active so it uses the correct
-    // shader directory when loading effect scripts (bloom.lua etc.).
-    extern void sr_vkPostProcessOnMoviepackActivated(const char*);
+    // shader directory when loading effect scripts (bloom.lua etc.). The
+    // moviepack's settings.cfg was loaded during ScanMoviepacks/ActivateMoviepack
+    // (before the renderer was ready); sg_moviepackPPEffectChanged already
+    // queued the corresponding pending state at that point. We just hand the
+    // current effect name to OnMoviepackActivated so it loads it synchronously.
+    extern void sr_vkPostProcessOnMoviepackActivated(const char* name,
+                                                      const char* newEffectName);
     sr_vkPostProcessOnMoviepackActivated(
-        activePack ? static_cast<const char*>(activePack->name) : nullptr);
-
-    // Queue the PP effect from the moviepack's settings.cfg for activation
-    // on the next BeginFrame.
-    extern void sr_vkPostProcessActivate(const char*);
-    extern void sr_vkPostProcessDeactivate();
-    if (sg_moviepackPPEffect.Len() > 0)
-        sr_vkPostProcessActivate(static_cast<const char*>(sg_moviepackPPEffect));
-    else
-        sr_vkPostProcessDeactivate();
+        activePack ? static_cast<const char*>(activePack->name) : nullptr,
+        sg_moviepackPPEffect.Len() > 0
+            ? static_cast<const char*>(sg_moviepackPPEffect)
+            : nullptr);
 #endif
 }
 
