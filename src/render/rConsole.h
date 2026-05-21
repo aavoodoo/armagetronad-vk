@@ -72,6 +72,12 @@ public:
 
     void Render();
 
+    //! Render only the center-screen flash message (used by per-viewport renders
+    //! during split-screen). Render() invokes this internally when num_viewports
+    //! <= 1; in multi-viewport mode the per-viewport caller does so per FBO so
+    //! the message appears (and rotates with) every player's view.
+    void RenderCenterMessage();
+
     //  rConsole & operator<<(const tString &s);
     tConsole & DoPrint( const tString& s ) override;
 

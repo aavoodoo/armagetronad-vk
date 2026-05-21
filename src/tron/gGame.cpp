@@ -1461,6 +1461,15 @@ void RenderAllViewports(eGrid *grid){
 					ePlayerNetID::ResetDisplayedScores();
 					ePlayerNetID::DisplayScores();
 
+					// Center-screen flash message ("Round 3", "GO!" etc.) —
+					// always per-viewport. Works identically whether there is
+					// one viewport or several: one iteration → one draw at the
+					// natural orientation; N iterations → N draws inside each
+					// rotated viewport FBO. No need to special-case the
+					// single-viewport mode here OR in rConsole::Render.
+					sr_con.RenderCenterMessage();
+					rRenderQueue::Instance().ExecutePhase(rRenderPhase::HUD);
+
 					// In multi-viewport mode, render per-player cockpit INTO the
 					// viewport FBO so the UV rotation in the composite pass applies
 					// uniformly to both 3D and cockpit. (BUG 17 fix)

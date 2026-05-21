@@ -796,9 +796,18 @@ static void display_cockpit_lucifer() {
         }
     }
 
-    static_cockpit.Render();
-    // Flush global cockpit (clock, FPS) with VIEWPORT_TOP's viewport.
-    rRenderQueue::Instance().ExecutePhase(rRenderPhase::HUD);
+    // Global VIEWPORT_TOP cockpit (clock, FPS, anything `viewport="top"`).
+    // In split-screen mode it must be HIDDEN globally — the per-viewport copy
+    // in sr_RenderViewportCockpit already draws it inside each viewport FBO
+    // and rotates it with the player's view. Drawing it here AS WELL produces
+    // a duplicate at the swapchain's natural orientation that doesn't follow
+    // any player's viewport rotation (the original bug on rotated tablets).
+    // Single-viewport mode keeps the global pass — no per-viewport FBO exists
+    // to host the widget otherwise.
+    if (viewportConfiguration->num_viewports <= 1) {
+        static_cockpit.Render();
+        rRenderQueue::Instance().ExecutePhase(rRenderPhase::HUD);
+    }
 
 #if 0	// Testing ground :)
     vValue::Expr::Core::Base *test = vValue::Parser::parse(tString("10"));
@@ -842,12 +851,6 @@ void sr_RenderViewportCockpit(int viewport, int playerID)
 
     player_cockpit->SetPlayer(player);
     player_cockpit->Render();
-    rRenderQueue::Instance().ExecutePhase(rRenderPhase::HUD);
-
-    // Also render global cockpit (clock, FPS) into each viewport FBO
-    // so it rotates with the viewport in tablet split-screen.
-    static cCockpit viewport_top_cockpit(cCockpit::VIEWPORT_TOP);
-    viewport_top_cockpit.Render();
     rRenderQueue::Instance().ExecutePhase(rRenderPhase::HUD);
 }
 

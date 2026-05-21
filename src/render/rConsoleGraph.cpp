@@ -38,6 +38,18 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 #include "rSysdep.h"
 #include "rScreen.h"
 #include "tConfiguration.h"
+#include "rViewport.h"
+
+// Cached helper for "is split-screen active?". Split-screen rendering is
+// driven by the active rViewportConfiguration's num_viewports; in
+// multi-viewport mode the global console pass becomes per-viewport (chat
+// hidden, center message routed through RenderCenterMessage at the caller
+// site).
+static bool sr_MultipleViewports()
+{
+    rViewportConfiguration* vp = rViewportConfiguration::CurrentViewportConfiguration();
+    return vp && vp->num_viewports > 1;
+}
 
 static tColoredString sr_centerString;
 static REAL center_r,center_g,center_b,center_fadetime;
@@ -157,37 +169,12 @@ void rConsole::Render(){
     if (sr_screen){
         Time=tSysTimeFloat();
 
-        if (Time-center_fadetime<2){
-            REAL alpha=center_fadetime-Time+1;
-            if (alpha>1) alpha=1;
-            if (alpha<0) alpha=0;
-            rTextField::SetDefaultColor(tColor(center_r,center_g,center_b));
-            rTextField::SetBlendColor(tColor(1,1,1,alpha));
-
-            REAL width=rCWIDTH_CON*4;
-            REAL height=rCHEIGHT_CON*4;
-            REAL len=sr_centerString.LongestLine();
-            REAL lines=(REAL)(sr_centerString.Count('\n')+1);
-
-            REAL space = 1.6;
-            REAL needed = width * len;
-            if (needed > space) {
-                width *= space/needed;
-                height *= space/needed;
-            }
-            space = 0.9 + centerMessageY;
-            needed = height*lines;
-            if (needed > space) {
-                width *= space/needed;
-                height *= space/needed;
-            }
-
-            DisplayText(0,centerMessageY,height,sr_centerString,sr_fontCenterMessage);
-            rTextField::SetDefaultColor(tColor(1,1,1));
-            sr_ResetRenderState(true);
-        }
-
-        if (sr_textOut || rForceTextCallback::ForceText()){
+        // Chat / console log scroll. Hidden in split-screen — per the user's
+        // brief on 2026-05-21, the rolling text overlay doesn't have a clean
+        // home in any single viewport and shouldn't appear globally either.
+        // Single-viewport mode renders it normally below.
+        if (!sr_MultipleViewports() &&
+            (sr_textOut || rForceTextCallback::ForceText())){
             if (lastCustomTimeout<Time-5 &&
                     lastTimeout+timeout<Time && currentTop<currentIn){
                 currentTop++;
@@ -257,6 +244,43 @@ void rConsole::Render(){
     }
 }
 
+
+void rConsole::RenderCenterMessage()
+{
+    if (!sr_screen) return;
+
+    Time = tSysTimeFloat();
+    if (Time - center_fadetime >= 2)
+        return;
+
+    REAL alpha = center_fadetime - Time + 1;
+    if (alpha > 1) alpha = 1;
+    if (alpha < 0) alpha = 0;
+    rTextField::SetDefaultColor(tColor(center_r, center_g, center_b));
+    rTextField::SetBlendColor(tColor(1, 1, 1, alpha));
+
+    REAL width  = rCWIDTH_CON * 4;
+    REAL height = rCHEIGHT_CON * 4;
+    REAL len    = sr_centerString.LongestLine();
+    REAL lines  = (REAL)(sr_centerString.Count('\n') + 1);
+
+    REAL space  = 1.6;
+    REAL needed = width * len;
+    if (needed > space) {
+        width  *= space / needed;
+        height *= space / needed;
+    }
+    space  = 0.9 + centerMessageY;
+    needed = height * lines;
+    if (needed > space) {
+        width  *= space / needed;
+        height *= space / needed;
+    }
+
+    DisplayText(0, centerMessageY, height, sr_centerString, sr_fontCenterMessage);
+    rTextField::SetDefaultColor(tColor(1, 1, 1));
+    sr_ResetRenderState(true);
+}
 
 void CenterDisplay(const tString &s,REAL timeout,REAL r,REAL g,REAL b){
     rCenterDisplayCallback::CenterDisplay();
