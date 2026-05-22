@@ -123,6 +123,38 @@ protected:
     float   touchLastY_             = 0;
     bool    touchMoved_             = false;
     bool    touchStartedOnSelected_ = false; // finger down was on already-selected item
+
+    // Kinetic-scroll state (active when m_useKineticScroll_ is true).
+    // In kinetic mode, m_scrollOffset_ is the SOLE source of truth for the
+    // view position: yOffset = menuTop + m_scrollOffset_ each frame, the
+    // auto-keep-selected pass is skipped, and keyboard-driven `selected`
+    // changes are tracked here so the view follows. velocity is in menu-Y
+    // units per second; updated via EMA in FINGER_MOTION.
+    REAL    m_scrollOffset_       = 0;
+    REAL    m_scrollVy_           = 0;
+    double  m_lastTickSec_        = 0;
+    bool    m_userScrolling_      = false;  // finger down or inertia still alive
+    int     m_lastSeenSelected_   = -1;     // for keyboard-nav follow logic
+
+    // Per-frame animation: advances m_scrollOffset_ by m_scrollVy_ × dt,
+    // applies exponential friction, and (when out of bounds) springs back.
+    void TickKineticScroll();
+    // Add a drag delta (in menu-Y units) to the scroll offset; reduces
+    // displacement past edges to give the rubber-band feel during drag.
+    void ScrollByDrag(REAL menuDy);
+    // Reset to a neutral state (called on menu enter).
+    void ResetKineticScroll();
+    // Compute scroll bounds based on item count + visible menu area.
+    // Returns max scroll = total content height beyond the visible area
+    // (0 = list fits entirely; positive = scroll range).
+    REAL KineticScrollMax() const;
+protected:
+    // Subclasses opt in to kinetic scroll by flipping this in their
+    // constructor. Long-list menus (server browser, replay browser…)
+    // benefit from it. Short menus (settings) keep the index-based
+    // touch behavior.
+    bool    m_useKineticScroll_ = false;
+private:
 public:
     static bool          wrap;
     

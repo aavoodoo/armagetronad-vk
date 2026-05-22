@@ -570,6 +570,10 @@ void gServerMenu::Update()
 gServerMenu::gServerMenu(const char *title)
         : uMenu(title, false)
 {
+    // Long server list — flick-to-scroll with momentum + rubber-band edge
+    // bounce. See uMenu kKinetic* constants for the tuning knobs.
+    m_useKineticScroll_ = true;
+
     nServerInfo *run = nServerInfo::GetFirstServer();
     
     while (run)

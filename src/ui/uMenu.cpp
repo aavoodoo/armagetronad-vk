@@ -129,6 +129,35 @@ static REAL sr_MenuTextHeight()
     return text_height_base * sr_TouchUIScale();
 }
 
+// =============================================================================
+// Kinetic-scroll tunables (uMenu opt-in via m_useKineticScroll_).
+// All exponents are "per-second" — they're raised to dt every frame to keep
+// the motion frame-rate independent.
+// =============================================================================
+namespace {
+    // Friction: m_scrollVy_ *= pow(kKineticFriction, dt). 0.05^(1/60) ≈ 0.954
+    // → ~5% velocity loss per 60-fps frame, ~95% over 1 s. Comfy snappy decay.
+    constexpr REAL kKineticFriction        = 0.05f;
+    // Spring strength for rubber-band release. dt-attenuated:
+    //   m_scrollOffset_ += (bound - m_scrollOffset_) × (1 - pow(kKineticSpring, dt))
+    // 0.001^(1/60) ≈ 0.890 → ~11% closure per 60-fps frame, settles in ~5 frames.
+    constexpr REAL kKineticSpring          = 0.001f;
+    // Rubber-band reduction during drag: extra motion past the edge is scaled
+    // by this factor (0.5 = "feels like pulling against half-strength").
+    constexpr REAL kKineticRubberBand      = 0.5f;
+    // Tap-vs-drag threshold in SDL Y units (≈ 2% of the screen height).
+    constexpr float kKineticTapThreshold   = 0.02f;
+    // EMA blend for velocity tracking: each new sample contributes (1 - α) to
+    // the running velocity, so older samples decay. Higher = more reactive.
+    constexpr REAL kKineticVelocityBlend   = 0.30f;
+    // Below this absolute velocity (in menu-Y/s), we consider the inertia
+    // animation done and stop ticking. Picked empirically.
+    constexpr REAL kKineticVelocityEps     = 0.005f;
+    // When the rubber-band spring has closed to within this menu-Y distance of
+    // the bound, snap to the bound and finish.
+    constexpr REAL kKineticBoundSnap       = 0.001f;
+}
+
 #ifndef DEDICATED
 static REAL titlefac=1.2;
 #endif
@@ -149,6 +178,134 @@ int uMenu::TouchYToItem(float touchY) const {
     return idx;
 }
 
+// =============================================================================
+// Kinetic scroll helpers — see kKinetic* constants above for tuning.
+// =============================================================================
+
+REAL uMenu::KineticScrollMax() const
+{
+    // List content height = items × line height. Visible area = menuTop - menuBot.
+    // Allow scrolling until just the last item is at the top (or, if the list
+    // is shorter than the view, zero scroll).
+    const REAL th       = sr_MenuTextHeight();
+    const REAL content  = items.Len() * th;
+    const REAL visible  = menuTop - menuBot;
+    const REAL overflow = content - visible;
+    return overflow > 0 ? overflow : 0.0f;
+}
+
+void uMenu::ResetKineticScroll()
+{
+    // Initialize scroll so the currently-selected item lands roughly at
+    // the center of the visible area. menuentries hasn't been set when we
+    // enter the menu (it's updated in the main loop), so use items.Len()
+    // as the count. clamp() against the scroll bounds so a list that
+    // doesn't need scrolling stays at offset 0.
+    const REAL th        = sr_MenuTextHeight();
+    const int  n         = items.Len();
+    const REAL yCenter   = (menuTop + menuBot) * 0.5f;
+    const REAL desired   = (yCenter + th * (n - selected)) - menuTop;
+    const REAL maxOffset = (n * th - (menuTop - menuBot));
+    REAL clamped = desired;
+    if (clamped < 0)                         clamped = 0;
+    if (maxOffset > 0 && clamped > maxOffset) clamped = maxOffset;
+    else if (maxOffset <= 0)                 clamped = 0;
+
+    m_scrollOffset_     = clamped;
+    m_scrollVy_         = 0;
+    m_lastTickSec_      = tSysTimeFloat();
+    m_userScrolling_    = false;
+    m_lastSeenSelected_ = selected;
+}
+
+void uMenu::ScrollByDrag(REAL menuDy)
+{
+    // Drag direction: pulling DOWN on the screen (touch Y increases) shows
+    // higher-indexed (later) items. The caller has already converted SDL Δy
+    // to menu Δy (= -2 × ΔtouchY), so positive menuDy here means "scroll up
+    // toward earlier items in the visible window". The cockpit-NDC X has
+    // its own conventions; only Y is affected here.
+    const REAL maxOffset = KineticScrollMax();
+    const REAL minOffset = 0.0f;
+    REAL newOffset = m_scrollOffset_ + menuDy;
+    // Rubber band: past the bound, the offset only moves by half the delta.
+    if (newOffset < minOffset) {
+        const REAL overshoot = minOffset - newOffset;     // positive
+        newOffset = minOffset - overshoot * kKineticRubberBand;
+    } else if (newOffset > maxOffset) {
+        const REAL overshoot = newOffset - maxOffset;
+        newOffset = maxOffset + overshoot * kKineticRubberBand;
+    }
+    m_scrollOffset_ = newOffset;
+}
+
+void uMenu::TickKineticScroll()
+{
+    if (!m_useKineticScroll_) return;
+    const double now = tSysTimeFloat();
+    REAL dt = static_cast<REAL>(now - m_lastTickSec_);
+    m_lastTickSec_   = now;
+    if (dt <= 0 || dt > 0.25f) {
+        // Clamp dt so a paused-game / first-frame doesn't make a giant jump.
+        if (dt > 0.25f) dt = 0.25f;
+        else            return;
+    }
+
+    // Velocity-driven motion.
+    m_scrollOffset_ += m_scrollVy_ * dt;
+    m_scrollVy_     *= powf(kKineticFriction, dt);
+
+    // Spring-back when out of bounds.
+    const REAL minOffset = 0.0f;
+    const REAL maxOffset = KineticScrollMax();
+    REAL target = m_scrollOffset_;
+    if      (m_scrollOffset_ < minOffset) target = minOffset;
+    else if (m_scrollOffset_ > maxOffset) target = maxOffset;
+    if (target != m_scrollOffset_) {
+        const REAL pull = (target - m_scrollOffset_) * (1.0f - powf(kKineticSpring, dt));
+        m_scrollOffset_ += pull;
+        // Snap to bound when close enough; also kill residual velocity so we
+        // don't oscillate.
+        if (fabsf(target - m_scrollOffset_) < kKineticBoundSnap) {
+            m_scrollOffset_ = target;
+            // Only zero velocity if it's heading further out; preserves a
+            // user-initiated flick that's overshooting.
+            if ((m_scrollVy_ > 0 && target == maxOffset) ||
+                (m_scrollVy_ < 0 && target == minOffset))
+                m_scrollVy_ = 0;
+        }
+    }
+
+    // End the interaction once inertia has died down AND we're inside bounds.
+    if (fabsf(m_scrollVy_) < kKineticVelocityEps &&
+        m_scrollOffset_ >= minOffset && m_scrollOffset_ <= maxOffset)
+    {
+        m_userScrolling_ = false;
+        m_scrollVy_      = 0;
+    }
+
+    // Keyboard-nav follow: if `selected` changed since last tick AND the
+    // user isn't actively scrolling, scroll just enough to bring selected
+    // into the visible window (with a small border). One-shot adjust —
+    // not an animation; arrow-key nav should feel snappy.
+    if (!m_userScrolling_ && selected != m_lastSeenSelected_) {
+        m_lastSeenSelected_ = selected;
+        const REAL th     = sr_MenuTextHeight();
+        const REAL border = 0.1f;
+        // YPos(selected) computed for the upcoming render's yOffset
+        // (= menuTop + m_scrollOffset_). If out of [menuBot+border,
+        // menuTop-border], pull m_scrollOffset_ to put it inside.
+        const REAL ysel = (menuTop + m_scrollOffset_) - th * (items.Len() - selected);
+        REAL adjust = 0;
+        if      (ysel < menuBot + border) adjust = (menuBot + border) - ysel;
+        else if (ysel > menuTop - border) adjust = (menuTop - border) - ysel;
+        if (adjust != 0) {
+            m_scrollOffset_ += adjust;
+            if (m_scrollOffset_ < minOffset) m_scrollOffset_ = minOffset;
+            if (m_scrollOffset_ > maxOffset) m_scrollOffset_ = maxOffset;
+        }
+    }
+}
 
 #ifndef DEDICATED
 static inline void arrow(REAL x,REAL y,REAL dy,REAL size){
@@ -230,6 +387,11 @@ void uMenu::OnEnter(){
     REAL lastt=0;
     REAL ts=0;
     bool snapScroll = false;
+
+    // Kinetic-scroll opt-in menus start with no scroll offset / velocity.
+    // Resets `m_scrollVy_` and stamps `m_lastTickSec_` so the first tick's
+    // dt is sane.
+    if (m_useKineticScroll_) ResetKineticScroll();
 
 #ifndef DEDICATED
     lastkey=tSysTimeFloat();
@@ -362,30 +524,41 @@ void uMenu::OnEnter(){
 
         menuentries=items.Len();
 
-        REAL ysel=YPos(selected);
+        // Per-frame kinetic-scroll tick: advances velocity decay + spring
+        // back. In kinetic mode, m_scrollOffset_ is the SOLE source of
+        // truth for the view position — auto-keep-selected is fully
+        // bypassed (the tick handles keyboard-nav follow on its own).
+        TickKineticScroll();
 
-        {
-            REAL scrollUp = menuBot+border-ysel;
-            if(scrollUp > 0)
-                scrollBy(scrollUp);
+        if (m_useKineticScroll_) {
+            // Kinetic owns yOffset. Set directly (not +=) so the offset
+            // doesn't accumulate frame after frame.
+            yOffset = menuTop + m_scrollOffset_;
+        } else {
+            REAL ysel=YPos(selected);
+            {
+                REAL scrollUp = menuBot+border-ysel;
+                if(scrollUp > 0)
+                    scrollBy(scrollUp);
+            }
+            {
+                REAL scrollDown = menuTop-border-ysel;
+                if(scrollDown < 0)
+                    scrollBy(scrollDown);
+            }
+
+            if (ysel<menuBot)
+                yOffset+=(menuBot-ysel);
+
+            if (ysel>menuTop-smallborder)
+                yOffset+=(menuTop-smallborder-ysel);
+
+            if (YPos(0)>menuBot+smallborder)
+                yOffset+=menuBot+smallborder-YPos(0);
+
+            if (YPos(menuentries-1)<menuTop-smallborder)
+                yOffset+=menuTop-smallborder-YPos(menuentries-1);
         }
-        {
-            REAL scrollDown = menuTop-border-ysel;
-            if(scrollDown < 0)
-                scrollBy(scrollDown);
-        }
-
-        if (ysel<menuBot)
-            yOffset+=(menuBot-ysel);
-
-        if (ysel>menuTop-smallborder)
-            yOffset+=(menuTop-smallborder-ysel);
-
-        if (YPos(0)>menuBot+smallborder)
-            yOffset+=menuBot+smallborder-YPos(0);
-
-        if (YPos(menuentries-1)<menuTop-smallborder)
-            yOffset+=menuTop-smallborder-YPos(menuentries-1);
 
 #ifndef DEDICATED
         // Render menu with full frame lifecycle
@@ -574,8 +747,16 @@ void uMenu::HandleEvent( SDL_Event event )
                 touchStartX_   = touchLastX_ = event.tfinger.x;
                 touchStartY_   = touchLastY_ = ty;
                 touchMoved_    = false;
-                // Always update selection on touch down
-                SetSelected(idx);
+                if (m_useKineticScroll_) {
+                    // Kinetic mode: freeze any active inertia, but DON'T
+                    // pre-select on touch down — we want a tap-vs-drag
+                    // resolution at release.
+                    m_scrollVy_      = 0;
+                    m_userScrolling_ = true;
+                    m_lastTickSec_   = tSysTimeFloat();
+                } else {
+                    SetSelected(idx);
+                }
             }
             break;
 
@@ -583,7 +764,24 @@ void uMenu::HandleEvent( SDL_Event event )
             if (su_GetEnableTouch() > 0 && event.tfinger.fingerID == touchFingerId_) {
                 float dy = event.tfinger.y - touchLastY_;
 
-                if (!touchStartedOnSelected_) {
+                if (m_useKineticScroll_) {
+                    // Kinetic mode: drag offsets the list, velocity tracked
+                    // via EMA. Tap-vs-drag uses CUMULATIVE motion against the
+                    // start position, so micro-jitter under the threshold
+                    // still resolves to a tap.
+                    const REAL menuDy   = -2.0f * dy;        // SDL Y down → menu Y down
+                    const double now    = tSysTimeFloat();
+                    REAL dt             = static_cast<REAL>(now - m_lastTickSec_);
+                    if (dt <= 0) dt     = 1.0f / 120.0f;     // guard against same-frame events
+                    ScrollByDrag(menuDy);
+                    const REAL instantVy = menuDy / dt;
+                    m_scrollVy_ = (1.0f - kKineticVelocityBlend) * m_scrollVy_
+                                + kKineticVelocityBlend         * instantVy;
+                    m_lastTickSec_ = now;
+                    if (fabsf(event.tfinger.y - touchStartY_) > kKineticTapThreshold)
+                        touchMoved_ = true;
+                }
+                else if (!touchStartedOnSelected_) {
                     // Navigation mode: vertical slide scrolls through items.
                     // TouchYToItem clamps to [0, items.Len()-1] so sliding past the
                     // top/bottom naturally pins to the first/last item.
@@ -602,7 +800,7 @@ void uMenu::HandleEvent( SDL_Event event )
                     }
                 }
                 touchLastX_ = event.tfinger.x;
-                if (touchStartedOnSelected_) {
+                if (touchStartedOnSelected_ && !m_useKineticScroll_) {
                     // touchLastY_ already updated above when a step fired
                 } else {
                     touchLastY_ = event.tfinger.y;
@@ -612,8 +810,33 @@ void uMenu::HandleEvent( SDL_Event event )
 
         case SDL_EVENT_FINGER_UP:
             if (su_GetEnableTouch() > 0 && event.tfinger.fingerID == touchFingerId_) {
-                // Tap with no slide: Enter() if on the same item
-                if (!touchMoved_ && selected >= 0 && selected < items.Len()) {
+                if (m_useKineticScroll_) {
+                    if (!touchMoved_) {
+                        // Tap: select the item under the release point and
+                        // Enter it. We use the touch position at RELEASE so
+                        // a slow drift under threshold still picks correctly.
+                        int upIdx = TouchYToItem(event.tfinger.y);
+                        if (upIdx >= 0 && upIdx < items.Len()) {
+                            SetSelected(upIdx);
+                            // The tap came from a visible item, so the tick's
+                            // keyboard-follow logic should not try to re-snap
+                            // the scroll. Update lastSeenSelected to match.
+                            m_lastSeenSelected_ = upIdx;
+                            su_inMenu = false;
+                            try { items[upIdx]->Enter(); }
+                            catch (tException const& e) { tConsole::Message(e.GetName(), e.GetDescription(), 20); }
+                            su_inMenu = true;
+                            s_globalRepeat = false;
+                        }
+                        m_scrollVy_      = 0;
+                        m_userScrolling_ = false;
+                    }
+                    // Drag: leave m_scrollVy_ as the inertia seed and let
+                    // TickKineticScroll handle the decay. m_userScrolling_
+                    // stays true until the tick decides motion has died down.
+                }
+                else if (!touchMoved_ && selected >= 0 && selected < items.Len()) {
+                    // Tap with no slide: Enter() if on the same item
                     int upIdx = TouchYToItem(event.tfinger.y);
                     if (upIdx == selected) {
                         su_inMenu = false;
