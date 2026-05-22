@@ -19,23 +19,7 @@ myeffect/
     myeffect.frag   ← GLSL fragment shader(s)
 ```
 
-The renderer loads an effect when a moviepack's `settings.cfg` contains:
-
-```
-POST_PROCESS_EFFECT myeffect
-```
-
-Or at any time from a Lua script:
-
-```lua
-aa_pp_enable("myeffect")
-```
-
-To deactivate:
-
-```lua
-aa_pp_disable()
-```
+The renderer auto-loads an effect when a moviepack named `myeffect` is activated, by probing for `shaders/postprocess/myeffect/myeffect.lua` inside the pack. The pack's name and the effect script's directory name must match. Deactivating the pack turns PP off again.
 
 The `myeffect.lua` script runs first. The global `effect` (an `EffectBuilder`
 object) is pre-injected by the renderer. The script uses it to declare which
@@ -118,17 +102,7 @@ A few things to note about the GLSL template:
 
 ### Activate it
 
-Inside a moviepack's `settings.cfg`:
-
-```
-POST_PROCESS_EFFECT passthrough
-```
-
-Or from a startup Lua script:
-
-```lua
-aa_pp_enable("passthrough")
-```
+`passthrough` is the built-in identity effect — it ships with the base game and is loaded automatically as a no-op default. You don't need to do anything to use it; any moviepack that doesn't ship its own PP effect runs through passthrough on macOS, or with PP disabled on other platforms.
 
 ---
 
@@ -441,23 +415,18 @@ Tron glow works — it brightens the screen without replacing the geometry color
 
 An effect folder can live anywhere the renderer searches:
 
-1. **Packed inside the moviepack zip** at `shaders/postprocess/myeffect/`
-2. **Installed alongside the game** at `<datadir>/shaders/postprocess/myeffect/`
+1. **Packed inside the moviepack zip** at `shaders/postprocess/<packName>/`
+2. **Installed alongside the game** at `<datadir>/shaders/postprocess/<packName>/`
 
-Moviepack `settings.cfg` activates the effect by name:
-
-```
-POST_PROCESS_EFFECT myeffect
-```
-
-No other config is needed. When the moviepack is deactivated, the renderer
-automatically calls `sr_vkPostProcessDeactivate()`.
+The effect is auto-discovered by the moviepack manager: a pack provides PP iff it ships `shaders/postprocess/<packName>/<packName>.lua` (the pack's name and the script directory name must match). No cfg key is needed — activating the pack turns PP on; deactivating turns it off.
 
 ### Minimal moviepack layout
 
+For a pack named `myeffect`:
+
 ```
-mymoviepack.aamvp.zip
-├── settings.cfg            ← POST_PROCESS_EFFECT myeffect
+myeffect.aamvp.zip
+├── settings.cfg            ← (optional) MVP_* tunables only
 └── shaders/
     └── postprocess/
         └── myeffect/
@@ -502,12 +471,9 @@ layout(push_constant) uniform PushConstants {
 } pc;
 ```
 
-### Activate / deactivate from Lua
+### Activate / deactivate
 
-```lua
-aa_pp_enable("myeffect")
-aa_pp_disable()
-```
+Both are implicit. An effect activates when the moviepack of the same name is selected and deactivates when the moviepack is changed or set to None.
 
 ### Tweak a parameter from Lua while the effect is active
 

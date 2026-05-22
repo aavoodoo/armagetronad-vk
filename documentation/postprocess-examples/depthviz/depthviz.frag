@@ -7,8 +7,8 @@
 // actually resolves distinct values for the geometry in view, or whether it
 // has collapsed to a flat slab.
 //
-// Activate:     POST_PROCESS_ENABLED 1
-//               POST_PROCESS_EFFECT  depthviz
+// Activate:     ship as moviepack named "depthviz" (the pack's PP effect
+//               is auto-discovered from shaders/postprocess/<packName>/<packName>.lua).
 //
 // Tunables (see depthviz.lua):
 //   FP(0) size        — overlay width as a fraction of the screen (0..1)

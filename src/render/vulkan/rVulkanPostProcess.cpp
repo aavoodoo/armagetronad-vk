@@ -29,6 +29,10 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 
 #ifndef DEDICATED
 
+#if defined(__APPLE__)
+#include <TargetConditionals.h>
+#endif
+
 #include <SDL3/SDL.h>
 #include "rVulkanPostProcess.h"
 #include "rVulkanContext.h"
@@ -192,10 +196,9 @@ void rVulkanPostProcess::SetActiveEffect(const std::string& name)
     std::string target = name.empty() ? "passthrough" : name;
 
     // Record the requested effect name up front. If the offscreen target
-    // hasn't been built yet (POST_PROCESS_ENABLED still false), we defer the
-    // actual load — SetEnabled(true) will pick it up from activeEffect_ once
-    // the offscreen views exist. This lets user.cfg set EFFECT and ENABLED
-    // in either order without causing null-view descriptor writes.
+    // hasn't been built yet (PP not enabled), defer the actual load —
+    // SetEnabled(true) will pick it up from activeEffect_ once the
+    // offscreen views exist.
     activeEffect_ = target;
 
     if (!offscreenBuilt_)
@@ -1645,8 +1648,16 @@ void rVulkanPostProcess::SaveMvpConfigFile(const std::string& moviepackName) con
     }
 }
 
-void rVulkanPostProcess::OnMoviepackActivated(const std::string& moviepackName,
-                                                const std::string& newEffectName)
+// macOS+MoltenVK requires PP to stay on at all times so depth is preserved
+// across the swapchain blit. Everywhere else PP is on iff a moviepack ships
+// a PP effect script.
+#if defined(__APPLE__) && !TARGET_OS_IOS
+static constexpr bool kPPAlwaysOn = true;
+#else
+static constexpr bool kPPAlwaysOn = false;
+#endif
+
+void rVulkanPostProcess::OnMoviepackActivated(const std::string& moviepackName)
 {
     // Save current values under the OLD moviepack name first. On first
     // activation mvpMoviepackName_ is empty, so this writes to
@@ -1672,33 +1683,34 @@ void rVulkanPostProcess::OnMoviepackActivated(const std::string& moviepackName,
 
     mvpMoviepackName_ = moviepackName;
 
-    // Adopt the NEW pack's intended effect (from POST_PROCESS_EFFECT in the
-    // pack's settings.cfg). Empty means "no PP effect requested" — fall back
-    // to passthrough so activeEffectPtr_ still points at a valid pipeline.
-    //
-    // Why this matters: gMoviepackManager::activate calls vkDeviceWaitIdle
-    // before us and we're still on the same thread, but a frame that was
-    // mid-record when the activation menu fired may continue into Execute
-    // before BeginFrame's pending-state path re-runs SetActiveEffect on the
-    // next frame. Execute early-returns when activeEffectPtr_ is null,
-    // skipping the swapchain layout transition and freezing the present
-    // queue. Synchronously loading the right effect here keeps that path
-    // safe; doing so with the OLD activeEffect_ (the previous code) was
-    // guaranteed to miss in the new pack's shader directory.
-    activeEffect_    = newEffectName.empty() ? "passthrough" : newEffectName;
-    activeEffectPtr_ = nullptr;
+    // Discover the pack's PP effect by file convention: a pack provides PP
+    // iff it ships shaders/postprocess/<packName>/<packName>.lua.
+    bool hasEffect = false;
+    if (!moviepackName.empty())
+    {
+        std::string sub = "shaders/postprocess/" + moviepackName + "/" + moviepackName + ".lua";
+        tString probe = sg_PPGetReadPath(sub);
+        hasEffect = (probe.Len() > 1);
+    }
 
-    if (offscreenBuilt_)
+    activeEffect_    = hasEffect ? moviepackName : "passthrough";
+    activeEffectPtr_ = nullptr;
+    SetEnabled(kPPAlwaysOn || hasEffect);
+
+    // SetEnabled handles the load itself on the disabled→enabled transition.
+    // For subsequent activations (already enabled), or if SetEnabled's load
+    // failed (Lua/shader compile error), do it here — with a passthrough
+    // fallback so a broken pack effect can't leave us enabled with no
+    // active effect pointer (which would freeze the swapchain blit on
+    // non-macOS).
+    if (IsEnabled() && !activeEffectPtr_)
     {
         Effect* ef = EnsureEffectLoaded(activeEffect_);
         if (!ef && activeEffect_ != "passthrough")
         {
-            // The pack declared an effect that didn't load (missing script,
-            // shader compile failure). Surface the failure once and fall
-            // back to passthrough so the composite pass still runs.
             std::cerr << "[PostProcess] Moviepack '" << moviepackName
-                      << "' requested effect '" << activeEffect_
-                      << "' but it failed to load — falling back to passthrough\n";
+                      << "' effect '" << activeEffect_
+                      << "' failed to load — falling back to passthrough\n";
             ef = EnsureEffectLoaded("passthrough");
             if (ef) activeEffect_ = "passthrough";
         }
@@ -1730,14 +1742,16 @@ void rVulkanPostProcess::OnMoviepackDeactivated()
 
     mvpMoviepackName_.clear();
 
-    // Deactivation always falls back to passthrough — no moviepack means no
-    // moviepack-specific effect. Loading it here keeps activeEffectPtr_ valid
-    // for any in-flight frame that hits Execute before BeginFrame's
-    // pending-state path runs (same rationale as OnMoviepackActivated).
+    // No moviepack → no pack-specific effect. On macOS keep PP on with
+    // passthrough (depth preservation); elsewhere turn PP off entirely.
     activeEffect_    = "passthrough";
     activeEffectPtr_ = nullptr;
+    SetEnabled(kPPAlwaysOn);
 
-    if (offscreenBuilt_)
+    // SetEnabled handles the initial load on the disabled→enabled
+    // transition. For macOS where PP was already enabled before the
+    // deactivation, do it here to bind passthrough as the active effect.
+    if (IsEnabled() && !activeEffectPtr_)
     {
         Effect* ef = EnsureEffectLoaded(activeEffect_);
         if (ef)
@@ -1746,13 +1760,6 @@ void rVulkanPostProcess::OnMoviepackDeactivated()
             SeedEffectDefaults(*ef);
         }
     }
-
-    // No per-moviepack overrides to load when no moviepack is active.
-    // (mvpMoviepackName_ is empty → falls back to base postprocess.cfg if a
-    // future SetActiveEffect loads it; not needed for passthrough which has
-    // no parameters.)
-    LoadMvpConfigFile(mvpMoviepackName_);
-    if (activeEffectPtr_) ApplyMvpToCurrentParams();
 }
 
 // ============================================================================

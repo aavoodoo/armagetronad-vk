@@ -123,9 +123,9 @@ The file uses the same syntax as the game's main `settings.cfg`: one setting per
 | `MOVIEPACK_WALL_STRETCH` | float | Cycle wall texture stretch factor |
 | `GRID_SIZE_MOVIEPACK` | float | Floor grid size when moviepack is active |
 | `FLOOR_DETAIL` | int (0-2) | Floor rendering detail level (0=off, 1=simple, 2=full) |
-| `POST_PROCESS_ENABLED` | bool (0/1) | Enable post-processing pipeline |
-| `POST_PROCESS_EFFECT` | string | Active post-process effect directory name |
 | `MVP_*` | float/int | Post-process and hook tunable parameters |
+
+Post-processing is not configured via cfg keys: a moviepack provides PP iff it ships `shaders/postprocess/<packName>/<packName>.lua` inside the ZIP. PP is enabled automatically when the pack is activated, and disabled when it is deactivated.
 
 Settings are applied with owner access elevation, so they can set admin-level keys that players cannot change from the console.
 
@@ -140,10 +140,15 @@ MOVIEPACK_FLOOR_BLUE 1
 
 ### Settings with post-processing
 
+Post-processing is wired up implicitly — no cfg key is needed. Name the pack to match its effect script directory and ship the script inside the ZIP. Example for a pack named `neonbloom`:
+
 ```
-# neonbloom — custom hooks + bloom effect
-POST_PROCESS_ENABLED 1
-POST_PROCESS_EFFECT bloom
+shaders/postprocess/neonbloom/neonbloom.lua   # the effect script
+settings.cfg                                  # MVP_* tunables only
+```
+
+```
+# neonbloom settings.cfg
 MVP_INTENSITY 2.5
 MVP_THRESHOLD 0.05
 MVP_TINT 0.8 0.9 1.0 1.0
@@ -321,7 +326,7 @@ The pack's texture filenames must match what the engine expects. Rim walls: `rim
 Shader files must be in `shaders/` inside the ZIP. Check stderr for compile errors — the engine logs them with file paths and line numbers.
 
 **Post-process effect not loading.**
-Verify `POST_PROCESS_ENABLED 1` and `POST_PROCESS_EFFECT <name>` are in `settings.cfg`. The effect directory must be at `shaders/postprocess/<name>/` inside the ZIP.
+The pack's PP effect is discovered by file convention: `shaders/postprocess/<packName>/<packName>.lua` must exist inside the ZIP, where `<packName>` matches the moviepack filename (case-sensitive). No cfg key is needed; if the script is present, PP turns on automatically when the pack activates.
 
 **Preview image not showing.**
 The file must be named exactly `preview.png` at the ZIP root. JPEG is not supported for previews.

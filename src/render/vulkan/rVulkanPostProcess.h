@@ -256,15 +256,12 @@ public:
     //! These settings use tSettingItem (not tConfItem) so they never get
     //! written to user.cfg and cause no "unknown setting" warnings on launch.
     //!
-    //! `newEffectName` is the value of POST_PROCESS_EFFECT after the new
-    //! moviepack's settings.cfg has been parsed — i.e. the effect the new
-    //! pack actually wants. We load this directly here instead of speculatively
-    //! retrying the previous pack's active effect: the prior pack's effect
-    //! script almost certainly does not exist inside the new pack, so the
-    //! retry just produced a misleading "Effect script not found" log. Pass
-    //! "" to leave PP unloaded (no moviepack-requested effect).
-    void OnMoviepackActivated(const std::string& moviepackName,
-                               const std::string& newEffectName);
+    //! The pack's PP effect is discovered by probing for
+    //! `shaders/postprocess/<moviepackName>/<moviepackName>.lua`. If found,
+    //! PP is enabled and that effect is loaded. If not found, PP is disabled
+    //! (except on macOS, which keeps PP forced on with passthrough for
+    //! MoltenVK depth preservation).
+    void OnMoviepackActivated(const std::string& moviepackName);
 
     //! Called by the moviepack manager when a moviepack is deactivated. Writes
     //! current MVP values to the per-moviepack cfg file, deletes all

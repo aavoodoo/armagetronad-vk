@@ -307,28 +307,6 @@ static int l_teams(lua_State* L)
 }
 
 // ---------------------------------------------------------------------------
-// Post-process control
-// ---------------------------------------------------------------------------
-
-// aa_pp_enable(effectName)  — activate post-processing with the named effect
-static int l_pp_enable(lua_State* L)
-{
-    const char* effect = luaL_checkstring(L, 1);
-    extern void sr_vkPostProcessActivate(const char* effectName);
-    sr_vkPostProcessActivate(effect);
-    return 0;
-}
-
-// aa_pp_disable()  — deactivate post-processing
-static int l_pp_disable(lua_State* L)
-{
-    (void)L;
-    extern void sr_vkPostProcessDeactivate();
-    sr_vkPostProcessDeactivate();
-    return 0;
-}
-
-// ---------------------------------------------------------------------------
 // Registration
 // ---------------------------------------------------------------------------
 
@@ -344,10 +322,6 @@ void gRegisterLuaBindings(lua_State* L)
 
     // Ephemeral setting declaration
     lua_register(L, "aa_setting",    l_setting);
-
-    // Post-processing control (moviepack Lua scripts use these)
-    lua_register(L, "aa_pp_enable",  l_pp_enable);
-    lua_register(L, "aa_pp_disable", l_pp_disable);
 
     // Bootstrap the `config` proxy table.
     //

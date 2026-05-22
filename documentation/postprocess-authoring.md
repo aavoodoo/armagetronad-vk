@@ -24,18 +24,7 @@ When post-processing is **enabled**, a frame flows through three stages:
 
 When PP is **disabled** the scene draws directly into the swapchain image and none of the PP machinery runs — zero overhead.
 
-PP is activated by the moviepack's `settings.cfg`:
-
-```
-POST_PROCESS_EFFECT bloom
-```
-
-Or from a Lua script:
-
-```lua
-aa_pp_enable("bloom")   -- activate
-aa_pp_disable()         -- deactivate
-```
+PP is activated implicitly by moviepack selection. A pack provides PP iff it ships `shaders/postprocess/<packName>/<packName>.lua` (the pack's name and the effect script's directory name must match). Activating the pack turns PP on; selecting None or another pack without PP turns it off. macOS keeps PP forced on with the built-in `passthrough` effect for MoltenVK depth preservation.
 
 ---
 
@@ -330,7 +319,7 @@ A moviepack can ship only a custom `uber_hooks.glsl` with no post-processing at 
 moviepack.aamvp/
     shaders/
         uber_hooks.glsl   # your custom hooks
-    settings.cfg          # POST_PROCESS_EFFECT (optional)
+    settings.cfg          # MVP_* tunables (optional)
 ```
 
 ---
@@ -339,9 +328,11 @@ moviepack.aamvp/
 
 A `.aamvp.zip` moviepack with post-processing looks like this:
 
+The effect directory name must match the moviepack's name. For a pack named `customBloom`:
+
 ```
 customBloom.aamvp.zip
-├── settings.cfg
+├── settings.cfg                 # (optional) MVP_* tunables
 ├── textures/                    # (standard moviepack textures, optional)
 │   └── ...
 ├── models/                      # (standard moviepack models, optional)
@@ -349,19 +340,18 @@ customBloom.aamvp.zip
 └── shaders/
     ├── uber_hooks.glsl          # (optional — override scene hooks)
     └── postprocess/
-        └── <effect_name>/
-            ├── <effect_name>.lua
-            ├── <effect_name>.frag
+        └── customBloom/         # ← directory name matches pack name
+            ├── customBloom.lua
+            ├── customBloom.frag
             └── ...
 ```
 
-`settings.cfg` activates your effect:
+The PP effect is auto-discovered on activation — no cfg key wires it up. `settings.cfg` is for MVP_* tunables only:
 
 ```
 # customBloom.aamvp — Tron glow
-POST_PROCESS_EFFECT bloom
-MVP_BLOOM_INTENSITY 2.0
-MVP_BLOOM_TINT 0.8 0.9 1.0 1.0
+MVP_CUSTOMBLOOM_INTENSITY 2.0
+MVP_CUSTOMBLOOM_TINT 0.8 0.9 1.0 1.0
 ```
 
 All config items in `settings.cfg` are applied with owner-level elevation when the moviepack activates.
@@ -382,8 +372,8 @@ Complete working files are in `documentation/postprocess-examples/`.
 
 ## 10. Troubleshooting
 
-**Nothing happens when I activate my effect.**
-Check that the directory name under `shaders/postprocess/` exactly matches the string you set `POST_PROCESS_EFFECT` to. Case-sensitive.
+**Nothing happens when I activate my moviepack.**
+The PP effect is discovered by file convention: `shaders/postprocess/<packName>/<packName>.lua` must exist inside the pack, where `<packName>` matches the moviepack's name exactly (case-sensitive).
 
 **"Effect script not found"**
 The engine couldn't find `<effect_name>.lua` in the search path. The effect name must match the directory name.
