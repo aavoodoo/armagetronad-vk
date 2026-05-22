@@ -1459,22 +1459,32 @@ void RenderAllViewports(eGrid *grid){
 
 					ePlayer::PlayerConfig(p)->Render();
 					ePlayerNetID::ResetDisplayedScores();
-					ePlayerNetID::DisplayScores();
+					ePlayerNetID::DisplayScores(i);
 
-					// Center-screen flash message ("Round 3", "GO!" etc.) —
-					// always per-viewport. Works identically whether there is
-					// one viewport or several: one iteration → one draw at the
-					// natural orientation; N iterations → N draws inside each
-					// rotated viewport FBO. No need to special-case the
-					// single-viewport mode here OR in rConsole::Render.
+					// Center-screen flash message — submitted per-viewport so
+					// it lands inside the rotated FBO in split-screen mode.
 					sr_con.RenderCenterMessage();
-					rRenderQueue::Instance().ExecutePhase(rRenderPhase::HUD);
 
-					// In multi-viewport mode, render per-player cockpit INTO the
-					// viewport FBO so the UV rotation in the composite pass applies
-					// uniformly to both 3D and cockpit. (BUG 17 fix)
+					// Touch buttons render as cockpit widgets now — they
+					// live inside each player's cockpit (loaded as an
+					// optional second-slot file by cCockpit::ProcessCockpit)
+					// and draw in the cockpit render pass below.
+
+					// Multi-viewport: per-player cockpit inside the FBO.
+					// Order matters here because sr_RenderViewportCockpit
+					// swaps the Vulkan viewport to an aspect-square one
+					// (EqualAspectBottom) so its widgets render undistorted.
+					// Anything previously submitted to the HUD bucket
+					// (overlay icons, center message, score table) was
+					// queued at the FBO-full viewport — flush it first so
+					// those draws record with the right viewport state,
+					// then let sr_RenderViewportCockpit do its own flush
+					// for the cockpit geometry with the new viewport.
+					// Single-viewport intentionally relies on the natural
+					// frame-end HUD flush — see earlier comment block.
 					if (numViewports > 1)
 					{
+						rRenderQueue::Instance().ExecutePhase(rRenderPhase::HUD);
 						sr_RenderViewportCockpit(i, p);
 						sr_EndViewportFBO();
 					}

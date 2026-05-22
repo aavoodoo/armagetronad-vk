@@ -99,6 +99,62 @@ void rViewport::Perspective(REAL fov,REAL nnear,REAL ffar,REAL xshift){
 #endif
 }
 
+bool rViewport::Contains(float sx, float sy) const {
+    // sy is SDL touch (y=0 top). Viewport y-axis is OpenGL (y=0 bottom).
+    const float yFlipped = 1.0f - sy;
+    return sx >= left && sx < left + width &&
+           yFlipped >= bottom && yFlipped < bottom + height;
+}
+
+void rViewport::TouchToCockpitHud(float sx, float sy, float& hx, float& hy, int rotDeg) const {
+    // Step 1: SDL touch → viewport-local SDL [0,1] (y=0 top of viewport).
+    // Viewport's top edge in SDL coords = 1 - (bottom + height).
+    const float topInSdl = 1.0f - bottom - height;
+    const float invW = (width  > 0.0f) ? 1.0f / width  : 1.0f;
+    const float invH = (height > 0.0f) ? 1.0f / height : 1.0f;
+    float lx = (sx - left)      * invW;
+    float ly = (sy - topInSdl)  * invH;
+
+    // Step 2: undo viewport's visual rotation (rotates around viewport
+    // center (0.5, 0.5) in local coords). Same convention as
+    // su_RotateTouchCoord in uInput.cpp — +rotDeg gives the inverse.
+    if (rotDeg != 0) {
+        const float cx  = lx - 0.5f;
+        const float cy  = ly - 0.5f;
+        const float rad = (float)rotDeg * (float)M_PI / 180.0f;
+        const float c   = cosf(rad);
+        const float s   = sinf(rad);
+        lx = c * cx - s * cy + 0.5f;
+        ly = s * cx + c * cy + 0.5f;
+    }
+
+    // Step 3: viewport-local SDL → cockpit HUD (NDC). Must mirror the
+    // OpenGL viewport that the cockpit renders with — which is now
+    //   glViewport(0, 0, vpW_px, max(vpW_px, vpH_px))
+    // because EqualAspectBottom does std::max(width × sr_W/sr_H, 1.0)
+    // when fed rViewport(0,0,1,1). The OpenGL viewport's pixel HEIGHT
+    // therefore equals max(vpW_px, vpH_px). NDC y -1..+1 maps linearly
+    // to that pixel range, starting at the FBO bottom (bottom-anchored).
+    //
+    //   - Landscape sub-viewport (vpW > vpH): vp height = vpW_px. NDC y
+    //     +1 → pixel vpW_px (above the FBO top, clipped). FBO top sits
+    //     at NDC y = 2 × vpH/vpW − 1 (e.g. 0.125 for 16:9).
+    //   - Portrait sub-viewport (vpW < vpH): vp height = vpH_px. NDC y
+    //     +1 → pixel vpH_px = FBO top exactly.
+    //
+    // Unified formula: NDC y for a click at viewport-local SDL ly =
+    //   (vpH_px × (1 − ly)) × 2 / max(vpW_px, vpH_px) − 1
+    const float vpW_px      = width  * (float)sr_screenWidth;
+    const float vpH_px      = height * (float)sr_screenHeight;
+    const float vpAxisMax   = std::max(vpW_px, vpH_px);
+    hx = lx * 2.0f - 1.0f;
+    if (vpAxisMax > 0.0f) {
+        hy = (1.0f - ly) * vpH_px * 2.0f / vpAxisMax - 1.0f;
+    } else {
+        hy = 1.0f - ly * 2.0f;
+    }
+}
+
 rViewport rViewport::s_viewportFullscreen(0,0,1,1);
 
 rViewport rViewport::s_viewportTop(0,.5,1,.5);
@@ -404,7 +460,20 @@ rViewport rViewport::CorrectAspectBottom( void ) const
 rViewport rViewport::EqualAspectBottom( void ) const
 {
     rViewport ret( *this );
-    ret.height = width * sr_screenWidth / sr_screenHeight;
+    // Square in pixels: viewport height = width × (screen_W / screen_H) in
+    // pixels. For landscape FBOs (W ≥ H) this gives a viewport TALLER than
+    // the FBO — extends above the visible area, clipped at the FBO top by
+    // the scissor (intentional: keeps cockpit NDC square in pixels).
+    //
+    // For portrait-leaning FBOs (W < H) the square is SHORTER than the
+    // FBO, which used to leave an empty strip at the FBO top that
+    // anchorV="top" widgets couldn't reach (cockpit NDC y=+1 = top of
+    // square, not top of FBO). The std::max(…, 1.0) extends the viewport
+    // upward to cover the full FBO in that case — NDC y=+1 then lands at
+    // the actual FBO top, no clipping. Gauges in such FBOs render with the
+    // taller NDC y range (their pixel position moves accordingly — see
+    // ApplyAnchorLayout).
+    ret.height = std::max(width * sr_screenWidth / sr_screenHeight, 1.0f);
 
     return ret;
 }

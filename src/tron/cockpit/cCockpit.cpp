@@ -35,6 +35,7 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 #include "cockpit/cRectangle.h"
 #include "cockpit/cTouchButton.h"
 #include "nConfig.h"
+#include "tResourceManager.h"
 
 #ifndef DEDICATED
 
@@ -61,7 +62,28 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 // Forward: ensure cockpit pack ZIP is extracted before loading
 extern void sr_EnsureCockpitPackExtracted();
 
+// Forward: the COCKPIT_FILE-backing tString lives further down in this file
+// because tConfItem's static-initialization order depends on it. parsecockpit
+// references it for top-level dedup, so declare it here.
+extern tString cockpit_file;
+
 static void parsecockpit () {
+    // Top-level dedup: COCKPIT_FILE callback fires on every assignment,
+    // even when the cfg layer re-assigns the same value (which the pack-
+    // switch path does — once to reset to default, once to apply the
+    // pack's value, frequently identical). Without this guard we get a
+    // (2 × N cockpits) fan-out per pack switch. Skip silently when the
+    // value hasn't actually changed since our last fan-out.
+    static tString sg_lastFile;
+    if (cockpit_file == sg_lastFile) return;
+    sg_lastFile = cockpit_file;
+
+    // One log per actual file change (instead of one per cCockpit
+    // instance inside ProcessCockpit) — keeps the console quiet during
+    // moviepack switches and matches the cache-pack-extracted message
+    // style.
+    SDL_Log("[Cockpit] loading '%s'", static_cast<const char*>(cockpit_file));
+
     sr_EnsureCockpitPackExtracted();
     FOREACH_COCKPIT(i) {
         (*i)->ProcessCockpit();
@@ -162,6 +184,12 @@ m_FocusCycle(0) {
     ProcessCockpit();
 }
 
+// Forward-declared helper; implementation lives next to s_activeFingers
+// below. Scrubs any in-flight finger bindings that point at a touch button
+// we're about to free, avoiding a use-after-free on the next FINGER_MOTION
+// or FINGER_UP event if a cockpit reload happens with a finger held.
+namespace { void sg_DropFingerBindings(cWidget::TouchButton* btn); }
+
 void cCockpit::ClearWidgets(void) {
     //while(!m_Widgets_perplayer.empty()) {
     //    delete m_Widgets_perplayer.front();
@@ -171,6 +199,7 @@ void cCockpit::ClearWidgets(void) {
     //    delete m_Widgets_rootwindow.front();
     //    m_Widgets_rootwindow.pop_front();
     //}
+    for (cWidget::TouchButton* btn : m_TouchButtons) sg_DropFingerBindings(btn);
     m_Widgets.clear();
     //m_Widgets_perplayer.clear();
     //m_Widgets_cycles.clear();
@@ -436,12 +465,23 @@ tValue::BasePtr cCockpit::cb_CurrentPosY(void) {
 cCockpit* cCockpit::_instance = 0;
 
 void cCockpit::ProcessCockpit(void) {
+    // Skip if we've already loaded this exact path. parsecockpit() fans
+    // out across every cCockpit instance whenever COCKPIT_FILE is
+    // (re-)assigned, and the cockpit-pack switch reassigns it twice with
+    // the same value — without this short-circuit the touch cockpit XML
+    // loaded 4× (2 reassignments × 2 instances). Skip silently here so
+    // there's no behaviour change for an actual file change.
+    if (m_LoadedFile == cockpit_file && !m_Widgets.empty())
+        return;
+
     ClearWidgets();
 
-    SDL_Log("[Cockpit] ProcessCockpit: loading '%s'", static_cast<const char*>(cockpit_file));
+    // Single "loading 'X'" log is emitted by parsecockpit() once per actual
+    // value change; per-instance success is silent. Failures still log
+    // below — they're real and need to be visible.
     if (!LoadWithParsing(cockpit_file))
     {
-        SDL_Log("[Cockpit] ProcessCockpit: FAILED to load '%s'", static_cast<const char*>(cockpit_file));
+        SDL_Log("[Cockpit] FAILED to load '%s'", static_cast<const char*>(cockpit_file));
         // If loading fails and it's not the default cockpit, fall back to default
         // and try to extract the pack on next menu access.
         static const char* defaultCockpit = "Anonymous/standard-0.0.1.aacockpit.xml";
@@ -456,7 +496,7 @@ void cCockpit::ProcessCockpit(void) {
         else
             return;
     }
-    SDL_Log("[Cockpit] ProcessCockpit: loaded OK");
+    m_LoadedFile = cockpit_file;
     node cur = GetFileContents();
     if(!cur) {
         tERR_WARN("No Cockpit node found!");
@@ -467,12 +507,41 @@ void cCockpit::ProcessCockpit(void) {
     }
     if (cur.IsOfType("Cockpit")) {
         ProcessWidgets(cur);
+        ProcessTouchOverlay();
         if(sr_screenWidth != 0) Readjust();
         return;
     } else {
         tERR_WARN("Found a node of type '" + cur.GetName() + "' where type 'Cockpit' was expected");
         return;
     }
+}
+
+// Default path (relative; resource manager handles directory search).
+// The "touch/" subdir comes from the file's category="touch" XML attribute
+// which the resource-install script (`batch/make/copyresources.py`) uses
+// to rename the file at install time. User overrides at the same relative
+// path under the user resource dir are found first by
+// tResourceManager::locateResource.
+static char const * const sg_touchCockpitFile =
+    "AATeam/touch/touch-buttons-0.1.aacockpit.xml";
+
+void cCockpit::ProcessTouchOverlay(void) {
+    // Optional file — silent no-op when not present (touch overlay isn't
+    // shipped on every install). Probe first so we don't get parser noise
+    // for a missing-by-design file.
+    tString located = tResourceManager::locateResource(sg_touchCockpitFile, "");
+    if (located.Len() <= 1) return;
+
+    // LoadWithParsing replaces m_Doc with the touch file's tree; the
+    // primary's widgets have already been appended to m_Widgets above and
+    // remain there. This call appends touch widgets on top — render order
+    // matches insertion order, so touch buttons draw last (= on top).
+    if (!LoadWithParsing(sg_touchCockpitFile)) return;
+    m_LoadedTouchFile = sg_touchCockpitFile;
+
+    node cur = GetFileContents();
+    if (!cur) return;
+    if (cur.IsOfType("Cockpit")) ProcessWidgets(cur);
 }
 
 void cCockpit::ProcessWidgets(node cur) {
@@ -651,9 +720,6 @@ void cCockpit::Render() {
             if(m_Player->cam) {
 
                 if (m_FocusCycle && ( !m_Player->netPlayer || !m_Player->netPlayer->IsChatting()) && se_GameTime()>-2){
-                    static int rl = 0;
-                    if (rl++ < 3) SDL_Log("[Cockpit] Rendering %d widgets, type=VIEWPORT_ALL", (int)m_Widgets.size());
-
                     for(widget_list_t::const_iterator i=m_Widgets.begin(); i!=m_Widgets.end(); ++i)
                     {
                         int cam = (*i)->GetCam();
@@ -819,6 +885,15 @@ static rPerFrameTask dfps(&display_cockpit_lucifer);
 
 // Render a single player's cockpit into the current viewport FBO.
 // Called from RenderAllViewports in multi-viewport mode (BUG 17 fix).
+//
+// Aspect-ratio handling mirrors display_cockpit_lucifer (the single-
+// viewport path): inside the per-viewport FBO scope sr_screenWidth /
+// sr_screenHeight have been swapped to the FBO's pixel dimensions (see
+// sr_BeginViewportFBO), so EqualAspectBottom() builds a square-in-pixels
+// rendering region on the FBO — NDC (0.12, 0.12) renders as a true
+// square regardless of how stretched the FBO itself is (e.g. 1920×540
+// for the top half of a 16:9 split). Without this the cockpit widgets
+// inherit the FBO's raw aspect and look smeared horizontally.
 void sr_RenderViewportCockpit(int viewport, int playerID)
 {
     if (!(se_mainGameTimer &&
@@ -832,10 +907,12 @@ void sr_RenderViewportCockpit(int viewport, int playerID)
 
     rViewport *port = viewportConfiguration->Port(viewport);
     if (!port) return;
-    tCoord dims = port->GetDimensions();
 
-    // Use the FBO's full viewport (not the sub-viewport on the swapchain)
-    // since we're rendering inside the viewport FBO.
+    // Switch to an aspect-square Vulkan viewport carved from the FBO's
+    // bottom edge. The FBO covers the player's portion of the screen;
+    // EqualAspectBottom turns NDC (0.12, 0.12) into a square in pixels.
+    rViewport(0, 0, 1, 1).EqualAspectBottom().Select();
+
     RenderDisableState(rCapability::DepthTest);
     RenderDepthMask(false);
 
@@ -845,8 +922,13 @@ void sr_RenderViewportCockpit(int viewport, int playerID)
         player->cockpit = player_cockpit;
     }
     {
+        // Single-viewport-style readjustment factor — works directly on
+        // the FBO because sr_screenWidth/Height are already the FBO's
+        // dimensions inside this scope. The previous code multiplied by
+        // an extra `dims.y / dims.x` correction that double-counted the
+        // viewport fraction and squashed widgets to a sliver.
         float factor = 4./3. / (static_cast<float>(sr_screenWidth)/static_cast<float>(sr_screenHeight));
-        player_cockpit->Readjust(factor * dims.y / dims.x);
+        player_cockpit->Readjust(factor);
     }
 
     player_cockpit->SetPlayer(player);
@@ -931,66 +1013,103 @@ ePlayerNetID *cCockpit::GetCurrentOrFocusedPlayer() {
     }
 }
 
-// Maps finger ID → the button currently held by that finger
-static std::map<int64_t, cWidget::TouchButton*> s_activeFingers;
+// Active-finger state. Stores the viewport index that owned the FINGER_DOWN
+// so MOTION/UP events transform their coordinates with the *same* viewport's
+// EqualAspectBottom math — even if the finger drifts into another viewport
+// on the screen.
+struct ActiveFingerBinding {
+    cWidget::TouchButton* btn;
+    int vpIdx;
+};
+static std::map<int64_t, ActiveFingerBinding> s_activeFingers;
+
+// Defined here (next to s_activeFingers) but forward-declared in the same
+// translation unit so cCockpit::ClearWidgets (defined above) can call it.
+// Erases any finger-binding entries that point to the given button, so a
+// cockpit reload that frees the button doesn't leave dangling pointers
+// for the next MOTION / UP dispatch.
+namespace {
+    void sg_DropFingerBindings(cWidget::TouchButton* btn) {
+        for (auto it = s_activeFingers.begin(); it != s_activeFingers.end(); ) {
+            if (it->second.btn == btn) it = s_activeFingers.erase(it);
+            else                       ++it;
+        }
+    }
+}
+
+namespace {
+    // Look up the cCockpit instance that owns the player rendered into the
+    // given viewport. Returns nullptr if either the viewport or its player
+    // has no cockpit (e.g. unconfigured slot).
+    cCockpit* CockpitForViewport(int vpIdx) {
+        const int playerID = sr_viewportBelongsToPlayer[vpIdx];
+        ePlayer* player = ePlayer::PlayerConfig(playerID);
+        if (!player) return nullptr;
+        return dynamic_cast<cCockpit*>(player->cockpit.get());
+    }
+}
 
 bool cCockpit::ProcessTouch(float x, float y, uint32_t type, int64_t fingerId) {
-    // Convert from [0,1] touch space to [-1,1] HUD space.
-    // The cockpit viewport uses EqualAspectBottom: a square viewport
-    // (screenW × screenW pixels) anchored at the bottom of the screen.
-    // X: touch [0,1] → pixel [0,screenW] → NDC [-1,1] (direct)
-    // Y: touch [0,1] → pixel [(1-y)*screenH from bottom] → NDC [2*(1-y)*H/W - 1]
-    float hx = x * 2.0f - 1.0f;
-    float hy;
-    if (sr_screenWidth > 0 && sr_screenHeight > 0) {
-        hy = 2.0f * (1.0f - y) * static_cast<float>(sr_screenHeight) / static_cast<float>(sr_screenWidth) - 1.0f;
-    } else {
-        hy = 1.0f - y * 2.0f;
-    }
+    rViewportConfiguration* config = rViewportConfiguration::CurrentViewportConfiguration();
+    if (!config) return false;
+    const int confNum = rViewportConfiguration::CurrentConfNum();
 
     if (type == SDL_EVENT_FINGER_DOWN) {
-        static int tlog = 0;
-        if (tlog++ < 10) {
-            int nBtns = 0;
-            FOREACH_COCKPIT(cockpit) { nBtns += (int)(*cockpit)->m_TouchButtons.size(); }
-            SDL_Log("[Touch] FINGER_DOWN raw=(%.3f,%.3f) hud=(%.3f,%.3f) btns=%d", x, y, hx, hy, nBtns);
-            FOREACH_COCKPIT(cockpit) {
-                for (cWidget::TouchButton* btn : (*cockpit)->m_TouchButtons) {
-                    SDL_Log("[Touch]   active=%d hit=%d", btn->IsActiveInCurrentMode(), btn->HitTest(hx, hy));
-                }
-            }
-        }
-        FOREACH_COCKPIT(cockpit) {
-            for (cWidget::TouchButton* btn : (*cockpit)->m_TouchButtons) {
-                if (btn->IsActiveInCurrentMode() && btn->activeFinger_ == -1 && btn->HitTest(hx, hy)) {
+        for (int i = 0; i < config->num_viewports; i++) {
+            rViewport* vp = config->Port(i);
+            if (!vp || !vp->Contains(x, y)) continue;
+
+            cCockpit* cockpit = CockpitForViewport(i);
+            if (!cockpit) return false;
+
+            const int rotDeg = sr_GetViewportRotationDeg(confNum, i);
+            float hx, hy;
+            vp->TouchToCockpitHud(x, y, hx, hy, rotDeg);
+
+            for (cWidget::TouchButton* btn : cockpit->m_TouchButtons) {
+                if (btn->IsActiveInCurrentMode() && btn->IsVisible() &&
+                    btn->activeFinger_ == -1 && btn->HitTest(hx, hy)) {
                     btn->activeFinger_ = fingerId;
-                    s_activeFingers[fingerId] = btn;
-                    btn->Activate(true);
+                    s_activeFingers[fingerId] = { btn, i };
+                    btn->OnPress(i, hx, hy);
                     return true;
                 }
             }
+            return false; // touch was inside a viewport but didn't hit any button
         }
-        return false;
+        return false; // touch wasn't in any viewport
     }
 
-    // FINGER_UP / FINGER_MOTION: look up the active button for this finger
+    // FINGER_UP / FINGER_MOTION: dispatch via the viewport the FINGER_DOWN landed in.
     auto it = s_activeFingers.find(fingerId);
     if (it == s_activeFingers.end()) return false;
-
-    cWidget::TouchButton* btn = it->second;
+    cWidget::TouchButton* btn   = it->second.btn;
+    const int             vpIdx = it->second.vpIdx;
 
     if (type == SDL_EVENT_FINGER_UP) {
         btn->activeFinger_ = -1;
-        btn->Activate(false);
+        btn->OnRelease(vpIdx);
         s_activeFingers.erase(it);
         return true;
     }
 
     if (type == SDL_EVENT_FINGER_MOTION) {
-        if (!btn->HitTest(hx, hy)) {
-            // Finger dragged outside — release
+        rViewport* vp = (vpIdx >= 0 && vpIdx < config->num_viewports) ? config->Port(vpIdx) : nullptr;
+        if (!vp) {
+            // Viewport config changed mid-press; release and drop.
             btn->activeFinger_ = -1;
-            btn->Activate(false);
+            btn->OnRelease(vpIdx);
+            s_activeFingers.erase(it);
+            return true;
+        }
+        const int rotDeg = sr_GetViewportRotationDeg(confNum, vpIdx);
+        float hx, hy;
+        vp->TouchToCockpitHud(x, y, hx, hy, rotDeg);
+        // OnDrag returns false when the button has decided to drop the
+        // binding (drag-out cancel on a non-picker button; picker buttons
+        // stay bound until release). Clean up our per-finger record then.
+        if (!btn->OnDrag(vpIdx, hx, hy)) {
+            btn->activeFinger_ = -1;
             s_activeFingers.erase(it);
         }
         return true;
@@ -1010,3 +1129,4 @@ bool cCockpit_ProcessTouch(float x, float y, uint32_t type, int64_t fingerId) {
     return false;
 #endif
 }
+

@@ -91,9 +91,12 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 #if defined(__ANDROID__) || (defined(__APPLE__) && TARGET_OS_IOS)
 #include <unistd.h>
 #endif
-#if defined(__APPLE__) && TARGET_OS_IOS
-#include "rTouchOverlayIOS.h"
-#endif
+// On-screen touch buttons are cockpit widgets now: each player's cockpit
+// loads an optional touch-overlay XML (default
+// AATeam/touch/touch-buttons-0.1.aacockpit.xml) on top of its primary
+// cockpit, and the buttons render + route input through the standard
+// cCockpit/cWidget::TouchButton pipeline. No platform-specific overlay
+// code is needed any more.
 
 static gCommandLineJumpStartAnalyzer sg_jumpStartAnalyzer;
 #endif
@@ -990,10 +993,6 @@ int main(int argc,char **argv){
     #endif
 
                 if (sr_InitDisplay()){
-
-#if defined(__APPLE__) && TARGET_OS_IOS
-                aa_installTouchOverlay();
-#endif
 
                 sg_SetIcon();
 

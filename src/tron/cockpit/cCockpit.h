@@ -116,6 +116,25 @@ public:
 private:
     static cCockpit* _instance; //!< Stores a pointer to the current instance of the cockpit
 
+    //! Path of the cockpit XML last successfully loaded into this widget
+    //! tree. ProcessCockpit() compares this against the current
+    //! COCKPIT_FILE value and short-circuits when they match — avoids the
+    //! 4×-load fan-out we used to get on cockpit-pack activation (the
+    //! pack switch reassigns COCKPIT_FILE twice and the callback fans out
+    //! to every cCockpit instance in Cockpits()).
+    tString m_LoadedFile;
+    //! Path of the touch-overlay cockpit XML last appended on top of the
+    //! primary. Empty when the optional touch cockpit isn't shipped/
+    //! installed. See ProcessTouchOverlay() and the two-slot merge model
+    //! in project_cockpit_redesign_2026_05_22.
+    tString m_LoadedTouchFile;
+
+    //! Append widgets from the optional touch-overlay cockpit on top of
+    //! the primary. Called at the end of ProcessCockpit() after the
+    //! primary has been parsed and adjusted. Silent no-op when the file
+    //! isn't shipped (no error on missing — touch overlay is optional).
+    void ProcessTouchOverlay(void);
+
     int m_Cam; //!< The currently active camera
     ePlayer* m_Player; //!< The player the viewport belongs to
     ePlayerNetID *m_FocusPlayer; //!< the player currently being watched

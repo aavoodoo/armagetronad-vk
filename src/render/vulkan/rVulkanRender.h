@@ -137,6 +137,13 @@ public:
     bool IsFrameStarted() const override { return frameStarted_; }
     VkDevice GetDevice() const { return context_.GetDevice(); }
 
+    //! Free all cached + deferred descriptor sets and rebuild the dummy.
+    //! Caller MUST have already waited for GPU idle (vkDeviceWaitIdle or
+    //! equivalent). Used by sr_vkWaitIdle so the moviepack switch path
+    //! can safely destroy textures whose image views were referenced by
+    //! the descriptor cache.
+    void FlushDescriptorCache();
+
     //! Check if Vulkan is initialized
     bool IsInitialized() const { return context_.IsValid(); }
 
@@ -150,8 +157,9 @@ public:
     //! Called after returning from background so the Metal surface is re-queried.
     void SetNeedsSwapchainRecreation() { needsSwapchainRecreation_ = true; }
 
-    //! Access the post-processing subsystem. Used by sr_vkPostProcess*
-    //! free functions exposed to the moviepack manager.
+    //! Access the post-processing subsystem. Used by the
+    //! sr_vkPostProcessOnMoviepack* lifecycle hooks called from the
+    //! moviepack manager.
     rVulkanPostProcess& GetPostProcess() { return postProcess_; }
 
     //! Get current command buffer (for recording draw commands)

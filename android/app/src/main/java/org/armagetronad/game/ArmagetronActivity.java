@@ -151,7 +151,15 @@ public class ArmagetronActivity extends SDLActivity {
     // -----------------------------------------------------------------------
     // Overlay setup
     // -----------------------------------------------------------------------
+    // Touch buttons are cockpit widgets now (see src/tron/cockpit/cTouchButton).
+    // The Java overlay below is retained as dead code in case we need to
+    // restore Android-native UI elements (it does not participate in the
+    // touch path — the early-return below keeps it out of the view tree).
+    // Sensor listeners and keyboard / network-state plumbing are unaffected;
+    // they live in other methods and continue through the JNI bridge in
+    // rTouchBridgeAndroid.cpp.
     private void setupTouchOverlay() {
+        if (true) return;
         // Pass-through container — intercepts nothing by itself
         FrameLayout overlay = new FrameLayout(this) {
             @Override public boolean onInterceptTouchEvent(MotionEvent e) { return false; }

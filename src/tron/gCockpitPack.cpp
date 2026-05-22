@@ -46,6 +46,16 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 #include <sys/stat.h>
 #include <unistd.h>
 
+// Debug-only tracing macro. Expands to the SDL_Log call in DEBUG builds
+// and to nothing in release, keeping the existing call sites unchanged.
+// The scan / pack-switch flow logs ~10 lines per activation; useful when
+// chasing cockpit-pack issues but noisy for normal play.
+#ifdef DEBUG
+#  define CP_DBG(...) SDL_Log(__VA_ARGS__)
+#else
+#  define CP_DBG(...) ((void)0)
+#endif
+
 // miniz for ZIP extraction — header only (symbols compiled via gMoviepack.cpp)
 #include "../thirdparty/miniz/miniz.h"
 
@@ -240,7 +250,7 @@ void gCockpitPackManager::ScanPacks()
     tArray<tString> paths;
     tDirectories::Data().GetPaths(paths);
 
-    SDL_Log("[CockpitPack] Scanning %d data paths", paths.Len());
+    CP_DBG("[CockpitPack] Scanning %d data paths", paths.Len());
     for (int p = 0; p < paths.Len(); ++p)
     {
         tString cockpitsDir = paths(p);
@@ -249,7 +259,7 @@ void gCockpitPackManager::ScanPacks()
         tArray<tString> files;
         tDirectories::GetFiles(cockpitsDir, tString("*.aacockpit.zip"), files,
                                tDirectories::eGetFilesFilesOnly);
-        SDL_Log("[CockpitPack]   %s -> %d files", static_cast<const char*>(cockpitsDir), files.Len());
+        CP_DBG("[CockpitPack]   %s -> %d files", static_cast<const char*>(cockpitsDir), files.Len());
 
         for (int f = 0; f < files.Len(); ++f)
         {
@@ -315,9 +325,9 @@ void gCockpitPackManager::ScanPacks()
                 packs_(j) = tmp;
             }
 
-    SDL_Log("[CockpitPack] Scan complete: %d packs total", packs_.Len());
+    CP_DBG("[CockpitPack] Scan complete: %d packs total", packs_.Len());
     for (int i = 0; i < packs_.Len(); ++i)
-        SDL_Log("[CockpitPack]   [%d] %s", i, static_cast<const char*>(packs_(i)->name));
+        CP_DBG("[CockpitPack]   [%d] %s", i, static_cast<const char*>(packs_(i)->name));
 
     // Restore from saved name
     if (sg_cockpitPackName.Len() > 1)
@@ -336,7 +346,7 @@ void gCockpitPackManager::ScanPacks()
 
 void gCockpitPackManager::SetActiveIndex(int index)
 {
-    SDL_Log("[CockpitPack] SetActiveIndex(%d) current=%d total=%d", index, activeIndex_, packs_.Len());
+    CP_DBG("[CockpitPack] SetActiveIndex(%d) current=%d total=%d", index, activeIndex_, packs_.Len());
     if (index < 0 || index >= packs_.Len() || index == activeIndex_)
         return;
 
@@ -407,11 +417,11 @@ void gCockpitPackManager::SetActiveIndex(int index)
                     // is read-only, so we must use GetWritePath (resource/automatic/).
                     // The DTD resolves via myxmlParserInputBufferCreateFilenameFunc which
                     // uses tResourceManager::openResource — searches all resource paths.
-                    SDL_Log("[CockpitPack] resourcePath=%s", static_cast<const char*>(resourcePath));
+                    CP_DBG("[CockpitPack] resourcePath=%s", static_cast<const char*>(resourcePath));
                     tString resDir;
                     {
                         tString writePath = tDirectories::Resource().GetWritePath(resourcePath);
-                        SDL_Log("[CockpitPack] writePath=%s (len=%d)", static_cast<const char*>(writePath), writePath.Len());
+                        CP_DBG("[CockpitPack] writePath=%s (len=%d)", static_cast<const char*>(writePath), writePath.Len());
                         if (writePath.Len() > 1)
                         {
                             // Strip filename from write path to get directory
@@ -431,7 +441,7 @@ void gCockpitPackManager::SetActiveIndex(int index)
                             resDir += author.c_str();
                             if (!category.empty()) { resDir += "/"; resDir += category.c_str(); }
                         }
-                        SDL_Log("[CockpitPack] resDir=%s", static_cast<const char*>(resDir));
+                        CP_DBG("[CockpitPack] resDir=%s", static_cast<const char*>(resDir));
                     }
 
                     if (resDir.Len() > 1)
@@ -451,11 +461,11 @@ void gCockpitPackManager::SetActiveIndex(int index)
                         destFile += destName.c_str();
 
                         // If source != dest (they differ when ZIP uses generic name)
-                        SDL_Log("[CockpitPack] srcFile=%s", static_cast<const char*>(srcFile));
-                        SDL_Log("[CockpitPack] destFile=%s", static_cast<const char*>(destFile));
+                        CP_DBG("[CockpitPack] srcFile=%s", static_cast<const char*>(srcFile));
+                        CP_DBG("[CockpitPack] destFile=%s", static_cast<const char*>(destFile));
                         {
                             struct stat st;
-                            SDL_Log("[CockpitPack] srcFile exists=%d", stat(static_cast<const char*>(srcFile), &st) == 0);
+                            CP_DBG("[CockpitPack] srcFile exists=%d", stat(static_cast<const char*>(srcFile), &st) == 0);
                         }
                         if (srcFile != destFile)
                         {
@@ -463,13 +473,13 @@ void gCockpitPackManager::SetActiveIndex(int index)
                             unlink(static_cast<const char*>(destFile));
                             int rv = rename(static_cast<const char*>(srcFile),
                                             static_cast<const char*>(destFile));
-                            SDL_Log("[CockpitPack] rename rv=%d errno=%d", rv, rv != 0 ? errno : 0);
+                            CP_DBG("[CockpitPack] rename rv=%d errno=%d", rv, rv != 0 ? errno : 0);
                             if (rv != 0)
                             {
                                 // rename failed — try copy instead (cross-device)
                                 std::ifstream src(static_cast<const char*>(srcFile), std::ios::binary);
                                 std::ofstream dst(static_cast<const char*>(destFile), std::ios::binary);
-                                SDL_Log("[CockpitPack] copy fallback: src=%d dst=%d", (bool)src, (bool)dst);
+                                CP_DBG("[CockpitPack] copy fallback: src=%d dst=%d", (bool)src, (bool)dst);
                                 if (src && dst)
                                 {
                                     dst << src.rdbuf();

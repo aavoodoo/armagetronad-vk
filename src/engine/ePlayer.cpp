@@ -170,6 +170,15 @@ static tSettingItem< bool > se_allowTeamChangesConf( "ALLOW_TEAM_CHANGE", se_all
 static bool se_enableChat = true;    //flag indicating whether chat should be allowed at all (logged in players can always chat)
 static tSettingItem< bool > se_enaChat("ENABLE_CHAT", se_enableChat);
 
+// Exposed for cockpit TouchButton's visibleIf="chatEnabled" predicate.
+// Returns true iff chat is allowed AND we're in a networked game. The
+// CHAT player-action's handler at ePlayer.cpp:4705 gates on
+// `sn_GetNetState() != nSTANDALONE`, so chat is a no-op in local games
+// (single-player or local split-screen) — hide the button there to match.
+bool se_IsChatEnabled() {
+    return se_enableChat && sn_GetNetState() != nSTANDALONE;
+}
+
 static bool se_autoCompleteWithColor = false;
 static tConfItem< bool > se_autoComplColor("AUTO_COMPLETE_WITH_COLOR", se_autoCompleteWithColor);
 
@@ -7079,16 +7088,32 @@ void ePlayerNetID::ResetScore(){
 // flag memorizing whether the scores already have been rendered this frame
 static bool se_alreadyDisplayedScores = false;
 
-static bool show_scores=false;
+// Per-viewport scoreboard visibility. Each viewport has its own flag (R1
+// touch button toggles its own slot); the global SCORE action / TAB key
+// flips every slot to the same state. See SetShowScoresViewport.
+static bool show_scores[MAX_VIEWPORTS] = {};
 
 void ePlayerNetID::ResetDisplayedScores()
 {
     se_alreadyDisplayedScores = false;
 }
 
-void ePlayerNetID::DisplayScores()
+void ePlayerNetID::SetShowScoresViewport(int viewportIdx, bool show)
 {
-    if( !show_scores || !se_mainGameTimer || se_alreadyDisplayedScores )
+    if (viewportIdx < 0 || viewportIdx >= MAX_VIEWPORTS) return;
+    show_scores[viewportIdx] = show;
+}
+
+bool ePlayerNetID::GetShowScoresViewport(int viewportIdx)
+{
+    if (viewportIdx < 0 || viewportIdx >= MAX_VIEWPORTS) return false;
+    return show_scores[viewportIdx];
+}
+
+void ePlayerNetID::DisplayScores(int viewportIdx)
+{
+    if (viewportIdx < 0 || viewportIdx >= MAX_VIEWPORTS) return;
+    if (!show_scores[viewportIdx] || !se_mainGameTimer || se_alreadyDisplayedScores)
     {
         return;
     }
@@ -8117,14 +8142,22 @@ void ePlayerNetID::GetScoreFromDisconnectedCopy()
 
 static bool ass=true;
 
+// Set every viewport's flag to the same value. Used by se_AutoShowScores
+// (round-end auto-display) and se_UserShowScores (script / menu hook).
+static void se_SetShowScoresAll(bool show)
+{
+    for (int i = 0; i < MAX_VIEWPORTS; ++i)
+        show_scores[i] = show;
+}
+
 void se_AutoShowScores(){
     if (ass)
-        show_scores=true;
+        se_SetShowScoresAll(true);
 }
 
 
 void se_UserShowScores(bool show){
-    show_scores=show;
+    se_SetShowScoresAll(show);
 }
 
 void se_SetShowScoresAuto(bool a){
@@ -8132,7 +8165,7 @@ void se_SetShowScoresAuto(bool a){
 }
 
 static void scores(){
-    ePlayerNetID::DisplayScores();
+    ePlayerNetID::DisplayScores(0);
     se_alreadyDisplayedScores = false;
 }
 
@@ -8140,21 +8173,25 @@ static void scores(){
 static rPerFrameTask pf(&scores);
 
 // static bool force_small_cons(){
-//    return show_scores;
+//    return show_scores[0];
 // }
 
 // static rSmallConsoleCallback sc(&force_small_cons);
 
 //static void cd(){
-//    show_scores = false;
+//    se_SetShowScoresAll(false);
 //}
 //static rCenterDisplayCallback c_d(&cd);
 
 static uActionGlobal score("SCORE");
 
 
+// Global SCORE binding (TAB key by default). Flips every viewport's slot
+// to the opposite of viewport 0's current state so the keyboard toggle
+// behaves like a single global show/hide — matches the pre-per-viewport
+// behaviour. R1 button per-viewport touches show_scores[N] individually.
 static bool sf(REAL x){
-    if (x>0) show_scores = !show_scores;
+    if (x>0) se_SetShowScoresAll(!show_scores[0]);
     return true;
 }
 

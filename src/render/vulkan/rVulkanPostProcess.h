@@ -316,6 +316,15 @@ public:
                  VkExtent2D extent,
                  float time);
 
+    //! Free every per-effect descriptor set + framebuffer + cached pipeline
+    //! that may reference swapchain or viewport-FBO image views, AND the
+    //! offscreen FBO. Called by vkRenderer::RecreateSwapchain BEFORE the
+    //! global swapchain teardown so we don't leave PP descriptor sets
+    //! holding stale references to image views about to be destroyed
+    //! (VUID-vkDestroyImageView-imageView-01026 / -framebuffer-00892).
+    //! Caller must follow with OnSwapchainResized() to rebuild.
+    void ReleaseFrameResources(rVulkanContext& ctx);
+
 private:
     // Create all resources that depend on swapchain extent (offscreen images,
     // offscreen render pass, offscreen framebuffer, descriptor set pointing

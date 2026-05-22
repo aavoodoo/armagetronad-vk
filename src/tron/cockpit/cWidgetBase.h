@@ -105,6 +105,49 @@ typedef std::unique_ptr<Base> Base_ptr; //!< simple shortcut; used in the derive
 class WithCoordinates : virtual public Base {
     tCoord m_originalPosition; //!< The position without any transformations applied
     tCoord m_originalSize; //!< The size without any transformations applied
+
+protected:
+    //! New anchor-based layout opt-in. Set by Process() when the widget's
+    //! Position node uses any of the new attributes (anchorH/V, offsetX/Y,
+    //! stretch*). When false, the legacy additive `m_position += shift`
+    //! path runs unchanged. See project_cockpit_redesign_2026_05_22.
+    //! Exposed to derived widgets (TouchButton uses them in
+    //! LayoutForFullFBO for the separate touch-button render pass).
+    bool m_useAnchorPos = false;
+    //! As m_useAnchorPos but for the Size node (mode, width, height, longest,
+    //! aspect). Independent so widgets can partially migrate.
+    bool m_useAnchorSize = false;
+
+    //! Parsed anchor intent. Final m_position/m_size are computed from this
+    //! in SetFactor() once the per-viewport aspect is known.
+    struct AnchorSpec {
+        enum class Anchor : unsigned char { Min, Center, Max, Stretch };
+        enum class SizeMode : unsigned char { Fixed, Proportional, AspectLocked };
+
+        Anchor anchorH = Anchor::Center;
+        Anchor anchorV = Anchor::Center;
+        float  offsetX = 0.0f;          //!< nudge from anchor, viewport fraction
+        float  offsetY = 0.0f;
+        float  stretchMinX = 0.0f;      //!< when anchorH==Stretch, range in 0..1
+        float  stretchMaxX = 1.0f;
+        float  stretchMinY = 0.0f;
+        float  stretchMaxY = 1.0f;
+
+        SizeMode sizeMode = SizeMode::Fixed;
+        float  width  = 0.1f;           //!< Fixed/Proportional: viewport fraction
+        float  height = 0.1f;
+        float  longest = 0.1f;          //!< AspectLocked: longer axis (vp frac)
+        float  aspectRatio = 1.0f;      //!< AspectLocked: w/h in pixels
+    } m_anchor;
+
+    //! Parse the new attributes off a Position node. Returns true iff at
+    //! least one new attribute was present (i.e. anchor layout was opted into).
+    bool ParseAnchorPosition(tXmlParser::node const & cur);
+    //! Same for a Size node.
+    bool ParseAnchorSize(tXmlParser::node const & cur);
+    //! Compute m_position/m_size from m_anchor for a viewport with the given
+    //! aspect factor (4/3 / aspect_ratio — same convention as SetFactor).
+    void ApplyAnchorLayout(float factor);
 protected:
     tCoord m_position; //!< The x- and y- coordinates of the widget
     tCoord m_size; //!< The size as width and height

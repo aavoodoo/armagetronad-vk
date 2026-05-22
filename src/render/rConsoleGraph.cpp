@@ -59,10 +59,16 @@ static REAL Time;
 // flag memorizing whether the console already has been rendered this frame
 static bool sr_alreadyDisplayed = false;
 
-// Left/right insets in OpenGL units (0 = no inset). Set by iOS overlay to avoid
-// overlapping corner buttons. Values are in the [-1,+1] viewport coordinate space.
+// Left/right insets in OpenGL units (0 = no inset). Auto-driven by the
+// touch-buttons cockpit's side columns when ENABLE_TOUCH is on (see the
+// inset computation at the top of rConsole::Render). Values are in the
+// [-1,+1] viewport coordinate space.
 float sr_consoleInsetLeft  = 0.0f;
 float sr_consoleInsetRight = 0.0f;
+
+// Forward-declared from uInput.h to avoid pulling the UI library include
+// path into the render module. Returns 0 (touch off), 1, 2, or 3.
+int su_GetEnableTouch();
 
 static void sr_ConsolePerFrame(){
     if (sr_con.autoDisplayAtSwap)
@@ -119,6 +125,20 @@ void rConsole::Render(){
 
     if (!sr_glOut)
         return;
+
+    // When the touch-buttons cockpit is active (ENABLE_TOUCH >= 1), the
+    // left and right system columns occupy the screen edges. Pull the
+    // chat scroll inward so it doesn't render under them. The buttons
+    // ship with longest=0.057 (5.7% of viewport longest pixel axis) and
+    // a small offset from the edge; 0.13 in NDC clears them with a
+    // sliver of margin. 0 when touch is off — chat reclaims full width.
+    if (su_GetEnableTouch() >= 1) {
+        sr_consoleInsetLeft  = 0.13f;
+        sr_consoleInsetRight = 0.13f;
+    } else {
+        sr_consoleInsetLeft  = 0.0f;
+        sr_consoleInsetRight = 0.0f;
+    }
 
     static REAL lastBottom = -1.0;
 
@@ -203,13 +223,16 @@ void rConsole::Render(){
 
             if( sr_alphaBlend && sr_chatLayer > 0 && predictBottom < out.GetTop() )
             {
-                // Semi-transparent background for message area
+                // Semi-transparent background. Match the text inset so
+                // the touch-button stacks aren't covered by chat dim.
                 REAL bottom = predictBottom - .4*out.GetCHeight();
+                REAL bgLeft  = -1.0f + sr_consoleInsetLeft;
+                REAL bgRight =  1.0f - sr_consoleInsetRight;
                 uint8_t chatA = static_cast<uint8_t>(sr_chatLayer * 255.0f);
-                rVertex20 v0(-1, bottom, 0, 0, 0, 0, chatA, 0, 0);
-                rVertex20 v1( 1, bottom, 0, 0, 0, 0, chatA, 0, 0);
-                rVertex20 v2( 1,      1, 0, 0, 0, 0, chatA, 0, 0);
-                rVertex20 v3(-1,      1, 0, 0, 0, 0, chatA, 0, 0);
+                rVertex20 v0(bgLeft,  bottom, 0, 0, 0, 0, chatA, 0, 0);
+                rVertex20 v1(bgRight, bottom, 0, 0, 0, 0, chatA, 0, 0);
+                rVertex20 v2(bgRight,      1, 0, 0, 0, 0, chatA, 0, 0);
+                rVertex20 v3(bgLeft,       1, 0, 0, 0, 0, chatA, 0, 0);
                 rRenderStateKey state = rRenderStateKey::HUD(0, rBlendMode::Alpha);
                 rRenderQueue::Instance().SubmitQuad(rRenderPhase::HUD, state, v0, v1, v2, v3);
                 // Flush immediately so background renders BEFORE the text that follows

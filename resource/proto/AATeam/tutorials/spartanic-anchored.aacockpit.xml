@@ -1,0 +1,153 @@
+<?xml version="1.0" encoding="ISO-8859-1" standalone="no"?>
+<!DOCTYPE Resource SYSTEM "cockpit.dtd">
+
+<!--
+    spartanic-anchored — same widgets as `spartanic.aacockpit.xml` but
+    authored against the new anchor-based layout (locked 2026-05-22, see
+    project_cockpit_redesign_2026_05_22 in memory).
+
+    All Position/Size attrs are viewport-normalized in [0,1]. anchorH/V picks
+    the reference point on the viewport; offsetX/Y nudges from it. y in 0..1
+    grows DOWN (screen-space convention): anchorV="top" is the upper edge.
+
+    Auto-pivot: anchorH="left" aligns the widget's LEFT edge with the anchor
+    (and so on). Camview is the exception — it renders m_position as the
+    bottom-left corner, not the center, so its anchor needs an explicit
+    offsetX that cancels the auto-pivot. (Documented inline below.)
+
+    The widget code paths are unchanged from the legacy renderer, so this
+    cockpit demonstrates the new layout pipeline; legacy cockpits keep
+    working untouched.
+-->
+
+<Resource type="aacockpit" name="spartanic-anchored" version="0.0.1"
+          author="AATeam" category="tutorial">
+    <Cockpit version="0.0.1">
+
+        <!--
+            Left rear-view mirror. anchorH="left" + auto-pivot would put the
+            camview's LEFT edge at viewport x=0 — but Camview interprets
+            m_position as the bottom-left corner of its sub-viewport, so we
+            cancel the pivot shift with offsetX = -halfWidth (-0.15) to land
+            the actual sub-viewport edge flush with x=0. Same for Y.
+        -->
+        <Camview camera="in" view="in">
+            <Position anchorH="left" anchorV="bottom"
+                      offsetX="-0.13" offsetY="0.05"/>
+            <Size mode="fixed" width="0.3" height="0.15"/>
+            <Translation x="0.5" y="0" z="0" />
+            <Rotation value="150" />
+            <Mirror value="true" />
+        </Camview>
+
+        <!-- Right rear-view mirror — same idea, mirrored. -->
+        <Camview camera="in" view="in">
+            <Position anchorH="right" anchorV="bottom"
+                      offsetX="-0.17" offsetY="0.05"/>
+            <Size mode="fixed" width="0.3" height="0.15"/>
+            <Translation x="-0.5" y="0" z="0" />
+            <Rotation value="210" />
+            <Mirror value="true" />
+        </Camview>
+
+        <!--
+            Clock template. Square (aspect=1), pinned to the upper-right
+            corner with a small inset. aspect-locked: longest=0.075 means
+            "the longer pixel side is 7.5% of the viewport along its own
+            axis"; the other side is derived so the widget stays square in
+            pixels regardless of viewport aspect ratio.
+        -->
+        <WidgetTemplate id="Clock">
+            <Position anchorH="right" anchorV="top"
+                      offsetX="-0.04" offsetY="0.04"/>
+            <Size mode="aspect-locked" longest="0.075" aspect="1.0"/>
+            <Foreground>
+                <Solid>
+                    <Color r="1." g="1." b="1." alpha="1." />
+                </Solid>
+            </Foreground>
+            <ShowCurrent value="false" />
+            <ShowMaximum value="false" />
+            <ShowMinimum value="false" />
+        </WidgetTemplate>
+
+        <!--
+            Speed needle gauge. Bottom-centre, square (aspect=1), sized as
+            15% of the viewport's longest pixel axis. Aspect-locked guarantees
+            the gauge stays round in pixels across split-screen viewports.
+        -->
+        <NeedleGauge camera="^in">
+            <DataSet>
+                <AtomicData field="source"  source="player_speed" />
+                <AtomicData field="minimum" source="0" />
+                <AtomicData field="maximum" source="max_speed" />
+            </DataSet>
+            <Position anchorH="center" anchorV="bottom"
+                      offsetX="0" offsetY="-0.04"/>
+            <Size mode="aspect-locked" longest="0.15" aspect="1.0"/>
+            <ShowCurrent value="true" />
+            <ShowMaximum value="true" />
+            <ShowMinimum value="true" />
+            <Caption location="bottom">
+                <Text value="Speed" />
+            </Caption>
+            <Foreground>
+                <Solid>
+                    <Color r="1." g="0." b="0." alpha="1." />
+                </Solid>
+            </Foreground>
+        </NeedleGauge>
+
+        <!--
+            Rubber bar — proportional sizing (independent width/height).
+            anchored to bottom-left, lifted to clear the camview sitting
+            below. 30% wide × 5% tall.
+        -->
+        <BarGauge camera="^in">
+            <DataSet>
+                <AtomicData field="source"  source="player_rubber" />
+                <AtomicData field="minimum" source="0" />
+                <AtomicData field="maximum" source="cycle_rubber" />
+            </DataSet>
+            <Position anchorH="left" anchorV="bottom"
+                      offsetX="0.02" offsetY="-0.22"/>
+            <Size mode="proportional" width="0.3" height="0.05"/>
+            <ShowCurrent value="true" />
+            <ShowMaximum value="true" />
+            <ShowMinimum value="true" />
+            <Caption location="bottom">
+                <Text value="Rubber" />
+            </Caption>
+            <Background>
+                <Image>
+                    <Graphic author="wrtlprnft" version="1"
+                             name="gauge_horizontal"
+                             uri="http://wrtlprnft.ath.cx/gauge_horizontal.png" />
+                </Image>
+                <Solid>
+                    <Color r="1." g="1." b="1." alpha=".5" />
+                </Solid>
+            </Background>
+            <Foreground>
+                <Image>
+                    <Graphic author="wrtlprnft" version="1"
+                             name="gauge_horizontal_filled"
+                             uri="http://wrtlprnft.ath.cx/gauge_horizontal_filled.png" />
+                </Image>
+                <Gradient orientation="value">
+                    <Color r="0." g="1." b="0." alpha=".9" at="0." />
+                    <Color r="0." g="1." b="0." alpha=".9" at=".3" />
+                    <Color r="1." g="1." b="0." alpha=".9" at=".6" />
+                    <Color r="1." g="0." b="0." alpha=".9" at=".8" />
+                    <Color r="1." g="0." b="0." alpha=".9" at="1." />
+                </Gradient>
+            </Foreground>
+            <LineColor>
+                <Solid>
+                    <Color r="0" g="0" b="0" alpha="0" />
+                </Solid>
+            </LineColor>
+        </BarGauge>
+
+    </Cockpit>
+</Resource>

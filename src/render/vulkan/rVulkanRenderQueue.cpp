@@ -384,13 +384,15 @@ void rVulkanRenderQueue::CompactIfNeeded(VkDevice /*device*/)
     }
 }
 
-void rVulkanRenderQueue::CleanupOldBuffers()
+void rVulkanRenderQueue::CleanupOldBuffers(uint32_t frameSlot)
 {
     if (!ctx_) return;
     VmaAllocator vma = ctx_->GetAllocator();
-    // Only clean the active frame slot's old buffers — the fence for this slot
-    // was just waited on, so these buffers are guaranteed no longer in use.
-    auto& obs = oldBuffers_[activeFrame_];
+    // Free old buffers for the slot whose fence the caller just waited on
+    // (= the slot whose CB has completed). NOT activeFrame_, which at
+    // BeginFrame-call time is still the previous frame's slot and whose
+    // CB may still be in flight (its fence wasn't waited).
+    auto& obs = oldBuffers_[frameSlot % kMaxFrames];
     for (auto& ob : obs)
         vmaDestroyBuffer(vma, ob.buffer, ob.allocation);
     obs.clear();

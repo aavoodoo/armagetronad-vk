@@ -169,8 +169,15 @@ public:
     //! RecreateSwapchain() and ReloadShaders().
     void CompactIfNeeded(VkDevice device);
 
-    //! Clean up old buffers (call after frame completes / fence signaled)
-    void CleanupOldBuffers();
+    //! Drain deferred-destroy buffers for the given frame slot. Caller must
+    //! pass the slot whose fence has *just been waited on* — that's the slot
+    //! whose CB has completed, so any oldBuffers queued during its previous
+    //! turn on this slot are safe to free. Using the stored `activeFrame_`
+    //! here was WRONG — at BeginFrame call time `activeFrame_` is still the
+    //! *previous* frame's slot (SetCurrentFrame is called later in the
+    //! frame), and its CB may still be in flight, triggering
+    //! VUID-vkDestroyBuffer-buffer-00922.
+    void CleanupOldBuffers(uint32_t frameSlot);
 };
 
 #endif // DEDICATED

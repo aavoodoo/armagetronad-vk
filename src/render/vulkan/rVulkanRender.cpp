@@ -113,16 +113,6 @@ static bool s_lastFrameWasInGame = false;
 static bool sr_vulkanValidation = false;
 static tConfItem<bool> sr_vulkanValidationCI("VULKAN_ENABLE_VALIDATION", sr_vulkanValidation);
 
-// Post-processing activation state.
-// No config items — driven exclusively by:
-//   • sr_vkPostProcessActivate / sr_vkPostProcessDeactivate (C++ API, called by moviepack)
-//   • aa_pp_enable / aa_pp_disable (Lua API, exposed via gLuaBindings)
-//   • macOS BeginFrame block (force-enables passthrough for depth preservation)
-// All callers run on the render thread, so no mutex is needed.
-static bool   s_pendingPPEnabled = false;
-static std::string s_pendingPPEffect;
-static bool   s_pendingPPDirty   = true;  // apply on first BeginFrame
-
 // ============================================================================
 // Constructor / Destructor
 // ============================================================================
@@ -700,6 +690,15 @@ bool vkRenderer::RecreateSwapchain(int width, int height)
     vkDeviceWaitIdle(context_.GetDevice());
     vulkanQueue_.CompactIfNeeded(context_.GetDevice());
 
+    // Reset the entire graphics command pool. RELEASE_RESOURCES_BIT puts
+    // every CB back in the Initial state with no recorded references —
+    // safe because vkDeviceWaitIdle above guarantees the GPU is idle.
+    // (A previous attempt to free + re-allocate CBs here was strictly
+    // worse: vkFreeCommandBuffers on a CB the validator still considers
+    // pending triggered VUID-00047 cascades and ended in DEVICE_LOST.)
+    vkResetCommandPool(context_.GetDevice(), commandPool_,
+                       VK_COMMAND_POOL_RESET_RELEASE_RESOURCES_BIT);
+
     // GPU is idle — free ALL descriptor sets immediately so that the image
     // views they reference can be safely destroyed below.  Without this,
     // cached and deferred descriptor sets still formally "reference" their
@@ -710,6 +709,14 @@ bool vkRenderer::RecreateSwapchain(int width, int height)
     // never bind a stale handle.
     dummyDescriptorSet_ = descriptorManager_.GetOrCreateTextureSet(
         dummyTexture_.view, dummyTexture_.sampler);
+
+    // Post-process keeps its OWN descriptor pool and effect framebuffers
+    // outside the global descriptor manager. FlushAllDeferred doesn't
+    // touch those — but their descriptor sets and framebuffers reference
+    // image views we're about to destroy in DestroyViewportFBOs. Release
+    // them here so the validator doesn't fire VUID-01026 / VUID-00892.
+    // OnSwapchainResized (called later) rebuilds them at the new size.
+    postProcess_.ReleaseFrameResources(context_);
 
     // Destroy viewport FBOs — they're sized to viewport dimensions which change
     DestroyViewportFBOs();
@@ -755,8 +762,8 @@ bool vkRenderer::RecreateSwapchain(int width, int height)
     // Re-activate the effect — OnSwapchainResized cleared all effects and
     // set activeEffectPtr_ to nullptr. Without this, the composite pass
     // doesn't run and swapchain images stay UNDEFINED (magenta screen).
-    if (postProcess_.IsEnabled() && !s_pendingPPEffect.empty())
-        postProcess_.SetActiveEffect(s_pendingPPEffect.c_str());
+    if (postProcess_.IsEnabled() && !postProcess_.GetActiveEffect().empty())
+        postProcess_.SetActiveEffect(postProcess_.GetActiveEffect());
 
     // Resize semaphores if swapchain image count changed
     uint32_t newImageCount = swapchain_.GetImageCount();
@@ -1052,9 +1059,9 @@ void vkRenderer::BeginFrame()
         auto ext = swapchain_.GetExtent();
         postProcess_.OnSwapchainResized(context_, ext.width, ext.height,
                                         framebuffer_.GetRenderPass());
-        // Use passthrough as the bootstrap effect. If a custom effect is pending
-        // (s_pendingPPDirty), the pending handler below will overwrite it immediately
-        // after the offscreen is built.
+        // Use passthrough as the bootstrap effect. A subsequent moviepack
+        // activation (OnMoviepackActivated) will swap to the pack's effect
+        // once the renderer is ready.
         postProcess_.SetActiveEffect("passthrough");
         // Reset enabled_ to force SetEnabled to re-enter the build path
         postProcess_.SetEnabled(false);
@@ -1076,30 +1083,6 @@ void vkRenderer::BeginFrame()
         }
     }
 #endif
-
-    // Apply pending post-process activation requests.
-    // s_pendingPPDirty is set by sr_vkPostProcessActivate / sr_vkPostProcessDeactivate.
-    // On macOS this runs after the force-enable block, so the offscreen is already
-    // built and SetActiveEffect loads the effect immediately (no deferral).
-    //
-    // This MUST run before the shader reload below: SetEnabled(true) calls
-    // BuildOffscreen which registers the PP scene render pass with
-    // pipelineManager_. DoReloadShaders's PP-RP prewarm depends on that
-    // registration being current, and on the new render pass existing if PP
-    // was just toggled on by a moviepack switch.
-    if (s_pendingPPDirty)
-    {
-        s_pendingPPDirty = false;
-        if (!s_pendingPPEffect.empty())
-            postProcess_.SetActiveEffect(s_pendingPPEffect.c_str());
-#if defined(__APPLE__) && !(TARGET_OS_IOS)
-        // macOS: PP must always be enabled (depth preservation for MoltenVK).
-        // Already handled by the force-enable block above.
-        (void)s_pendingPPEnabled;
-#else
-        postProcess_.SetEnabled(s_pendingPPEnabled);
-#endif
-    }
 
     // Honour deferred shader reload. Multiple requests (moviepack deactivate +
     // activate) are coalesced into one rebuild here at the frame boundary.
@@ -1136,8 +1119,11 @@ void vkRenderer::BeginFrame()
     }
 
     // GPU work for this slot is now complete — safe to free deferred resources.
-    // Vertex buffers replaced mid-frame (P0-2 fix)
-    vulkanQueue_.CleanupOldBuffers();
+    // Vertex buffers replaced mid-frame (P0-2 fix). Pass currentFrame_
+    // explicitly: the queue's internal activeFrame_ is still the *previous*
+    // frame's slot at this point (SetCurrentFrame is called later), so
+    // using it would drain the wrong list — see CleanupOldBuffers comment.
+    vulkanQueue_.CleanupOldBuffers(currentFrame_);
     // Reset staging pool ring for this slot — fence guarantees GPU is done reading it
     stagingPool_.Reset(currentFrame_);
 
@@ -4946,7 +4932,7 @@ void vkRenderer::DoReloadShaders()
     std::vector<std::string> includePaths;
 
     tString mvHooks = tDirectories::Data().GetReadPath("moviepack/shaders/uber_hooks.glsl");
-    std::cerr << "[Vulkan] ReloadShaders: mvHooks='" << static_cast<const char*>(mvHooks) << "' len=" << mvHooks.Len() << std::endl;
+    VK_LOG_INFO("[Vulkan] ReloadShaders: mvHooks='" << static_cast<const char*>(mvHooks) << "' len=" << mvHooks.Len() << std::endl);
     if (mvHooks.Len() > 1)
     {
         std::string p = static_cast<const char*>(mvHooks);
@@ -4955,7 +4941,7 @@ void vkRenderer::DoReloadShaders()
     }
 
     tString sysHooks = tDirectories::Data().GetReadPath("shaders/uber_hooks.glsl");
-    std::cerr << "[Vulkan] ReloadShaders: sysHooks='" << static_cast<const char*>(sysHooks) << "'" << std::endl;
+    VK_LOG_INFO("[Vulkan] ReloadShaders: sysHooks='" << static_cast<const char*>(sysHooks) << "'" << std::endl);
     if (sysHooks.Len() > 1)
     {
         std::string p = static_cast<const char*>(sysHooks);
@@ -4963,7 +4949,7 @@ void vkRenderer::DoReloadShaders()
         if (slash != std::string::npos) includePaths.push_back(p.substr(0, slash));
     }
 
-    std::cerr << "[Vulkan] ReloadShaders: includePaths =";
+    VK_LOG_INFO("[Vulkan] ReloadShaders: includePaths =");
     for (const auto& p : includePaths) VK_LOG_INFO(" [" << p << "]");
     VK_LOG_INFO("\n");
 
@@ -5223,6 +5209,25 @@ bool sr_vkIsFrameStarted()
     return s_vkRenderer && s_vkRenderer->IsFrameStarted();
 }
 
+void vkRenderer::FlushDescriptorCache()
+{
+    // Reset all CBs in the graphics pool. Caller must have already waited
+    // for GPU idle; pool reset releases recorded references so the
+    // FlushAllDeferred / texture destruction that follows in the moviepack
+    // path doesn't trigger validator VUID-01026 / VUID-00892. (Earlier
+    // attempt to free + re-allocate CBs here ended in cascading
+    // VUID-00047 + DEVICE_LOST — keep this conservative.)
+    vkResetCommandPool(context_.GetDevice(), commandPool_,
+                       VK_COMMAND_POOL_RESET_RELEASE_RESOURCES_BIT);
+
+    descriptorManager_.FlushAllDeferred();
+    // FlushAllDeferred also frees the dummy slot — rebuild immediately
+    // so any draw that falls back to "no texture" never binds a stale
+    // handle. Same pattern as RecreateSwapchain and DoReloadShaders.
+    dummyDescriptorSet_ = descriptorManager_.GetOrCreateTextureSet(
+        dummyTexture_.view, dummyTexture_.sampler);
+}
+
 void sr_vkWaitIdle()
 {
     if (s_vkRenderer && s_vkRenderer->IsInitialized())
@@ -5233,50 +5238,39 @@ void sr_vkWaitIdle()
         if (s_vkRenderer->IsFrameStarted())
             s_vkRenderer->EndFrame();
         vkDeviceWaitIdle(s_vkRenderer->GetDevice());
+
+        // Free cached/deferred descriptor sets while the GPU is idle.
+        // Callers of sr_vkWaitIdle (notably the moviepack switch flow)
+        // immediately destroy textures via rITexture::UnloadAll, and any
+        // descriptor set still referencing those textures' image views
+        // would trigger VUID-01026 ("imageView in use by descriptor set"
+        // when destroyed). Flushing the cache here turns sr_vkWaitIdle
+        // into a full "safe to destroy any GPU resource" barrier, matching
+        // the pattern RecreateSwapchain already uses (WaitIdle →
+        // FlushAllDeferred → destroy).
+        s_vkRenderer->FlushDescriptorCache();
     }
 }
 
 //! Called from gMoviepackManager::ActivateMoviepack after resources have
-//! been reloaded. Rebinds the post-process subsystem's effect registry to
-//! the newly-active moviepack (effects get re-loaded from the moviepack's
-//! shader directory on next use) and loads MVP parameter overrides from
-//! the per-moviepack cfg file.
-void sr_vkPostProcessOnMoviepackActivated(const char* moviepackName,
-                                            const char* newEffectName)
+//! been reloaded. The PP subsystem discovers the pack's effect by probing
+//! shaders/postprocess/<packName>/<packName>.lua and enables PP iff that
+//! script exists (macOS keeps PP forced on for depth preservation).
+void sr_vkPostProcessOnMoviepackActivated(const char* moviepackName)
 {
     if (s_vkRenderer)
         s_vkRenderer->GetPostProcess().OnMoviepackActivated(
-            moviepackName  ? std::string(moviepackName)  : std::string(),
-            newEffectName  ? std::string(newEffectName)  : std::string());
+            moviepackName ? std::string(moviepackName) : std::string());
 }
 
 //! Called from gMoviepackManager::DeactivateMoviepack before resources are
 //! reloaded from the base game. Writes current MVP values to the old
-//! moviepack's cfg file, unregisters the dynamic tSettingItems, and
-//! destroys cached effects so they get rebuilt from the base game path.
+//! moviepack's cfg file, unregisters the dynamic tSettingItems, destroys
+//! cached effects, and disables PP (macOS keeps PP on with passthrough).
 void sr_vkPostProcessOnMoviepackDeactivated()
 {
     if (s_vkRenderer)
         s_vkRenderer->GetPostProcess().OnMoviepackDeactivated();
-}
-
-//! Activate post-processing with the given effect (called by moviepack system and Lua aa_pp_enable).
-//! Thread: render thread only.
-void sr_vkPostProcessActivate(const char* effectName)
-{
-    s_pendingPPEnabled = true;
-    s_pendingPPEffect  = effectName ? effectName : "";
-    s_pendingPPDirty   = true;
-}
-
-//! Deactivate post-processing (called by moviepack system and Lua aa_pp_disable).
-//! On macOS, PP infrastructure stays enabled (passthrough) for depth preservation.
-//! Thread: render thread only.
-void sr_vkPostProcessDeactivate()
-{
-    s_pendingPPEnabled = false;
-    s_pendingPPEffect.clear();
-    s_pendingPPDirty   = true;
 }
 
 #endif // DEDICATED

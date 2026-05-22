@@ -150,6 +150,38 @@ void rVulkanPostProcess::ClearRenderPassRefs(VkRenderPass rp)
             if (pass.renderPass == rp) pass.renderPass = VK_NULL_HANDLE;
 }
 
+void rVulkanPostProcess::ReleaseFrameResources(rVulkanContext& ctx)
+{
+    // Mirror the cleanup loop of OnSwapchainResized — destroy every
+    // per-effect resource that holds a reference to a swapchain or
+    // viewport-FBO image view. Caller (RecreateSwapchain) needs this to
+    // happen BEFORE DestroyViewportFBOs so the validator doesn't see
+    // image views with live descriptor-set references.
+    VkDevice dev = ctx.GetDevice();
+    for (auto& pair : effects_)
+    {
+        for (auto& pass : pair.second.passes)
+        {
+            if (pass.pipeline)    vkDestroyPipeline(dev, pass.pipeline, nullptr);
+            if (pass.fragShader)  vkDestroyShaderModule(dev, pass.fragShader, nullptr);
+            if (pass.descSet[0])  vkFreeDescriptorSets(dev, pair.second.descriptorPool, 1, &pass.descSet[0]);
+            if (pass.framebuffer) vkDestroyFramebuffer(dev, pass.framebuffer, nullptr);
+            // Render passes shared with the swapchain/offscreen are
+            // destroyed elsewhere; only destroy effect-owned ones here.
+            if (pass.renderPass &&
+                pass.renderPass != swapchainRenderPass_ &&
+                pass.renderPass != offscreenRenderPass_)
+                vkDestroyRenderPass(dev, pass.renderPass, nullptr);
+        }
+        pair.second.pool.Destroy(ctx.GetAllocator(), dev);
+        if (pair.second.descriptorPool)
+            vkDestroyDescriptorPool(dev, pair.second.descriptorPool, nullptr);
+    }
+    effects_.clear();
+    activeEffectPtr_ = nullptr;
+    DestroyOffscreen();
+}
+
 bool rVulkanPostProcess::OnSwapchainResized(rVulkanContext& ctx, uint32_t width, uint32_t height,
                                             VkRenderPass swapchainRenderPass,
                                             VkRenderPass oldSwapchainRP)

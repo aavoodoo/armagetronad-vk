@@ -70,6 +70,25 @@ public:
     tCoord GetDimensions() const {return tCoord(width, height);}
     tCoord GetPosition() const {return tCoord(left, bottom);}
 
+    //! True iff (sx, sy) — SDL touch coordinate with y=0 at top — falls
+    //! inside this viewport's screen rect. Used by the touch dispatcher
+    //! to route a finger event to the right per-viewport cockpit
+    //! (replaces FOREACH_COCKPIT in cCockpit::ProcessTouch).
+    bool Contains(float sx, float sy) const;
+
+    //! Convert SDL touch (sx, sy) into the cockpit HUD coordinate space
+    //! that lives inside *this* viewport — i.e. the (-1, +1) NDC square
+    //! that EqualAspectBottom().Select() establishes per viewport.
+    //!   - X: viewport-local left edge → -1, right edge → +1.
+    //!   - Y: bottom of viewport's EqualAspectBottom square → -1, top → +1.
+    //!     The square is vpW × vpW pixels at the bottom of the vpW × vpH
+    //!     viewport, so a Y above the square ends up > +1 (a miss).
+    //!   - `rotDeg` is the viewport's visual rotation (0/90/180/270);
+    //!     this undoes it so the touch lands in the cockpit's
+    //!     pre-rotation frame.
+    //! Caller must have verified Contains(sx, sy) first.
+    void TouchToCockpitHud(float sx, float sy, float& hx, float& hy, int rotDeg) const;
+
     static rViewport s_viewportFullscreen,
     s_viewportLeft,s_viewportRight,
     s_viewportTop,s_viewportBottom,

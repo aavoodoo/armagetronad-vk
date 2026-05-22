@@ -29,6 +29,7 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 #include "cockpit/cCockpit.h"
 #include "tValueParser.h"
 #include "tResourceManager.h"
+#include "rScreen.h"   // sr_screenWidth, sr_screenHeight (aspect-locked size math)
 
 #ifndef DEDICATED
 
@@ -64,28 +65,286 @@ WithCoordinates::WithCoordinates() : m_originalPosition(0,0), m_originalSize(1,1
 
 bool WithCoordinates::Process(tXmlParser::node cur) {
     if(cur.IsOfType("Position")) {
-        tCoord shift;
-        cur.GetProp("x", shift.x);
-        cur.GetProp("y", shift.y);
-        m_position += shift;
-        m_originalPosition = m_position;
+        if (ParseAnchorPosition(cur)) {
+            m_useAnchorPos = true;
+        } else {
+            tCoord shift;
+            cur.GetProp("x", shift.x);
+            cur.GetProp("y", shift.y);
+            m_position += shift;
+            m_originalPosition = m_position;
+        }
         return true;
     }
     if(cur.IsOfType("Size")) {
-        tCoord factor;
-        cur.GetProp("width", factor.x);
-        cur.GetProp("height", factor.y);
-        m_size *= factor;
-        m_originalSize = m_size;
+        if (ParseAnchorSize(cur)) {
+            m_useAnchorSize = true;
+        } else {
+            tCoord factor;
+            cur.GetProp("width", factor.x);
+            cur.GetProp("height", factor.y);
+            m_size *= factor;
+            m_originalSize = m_size;
+        }
         return true;
     }
     return Base::Process(cur);
 }
 
+// Parse anchor-style Position attributes. Returns true iff at least one
+// new-style attribute was present (which opts this widget into the new
+// layout pipeline).
+bool WithCoordinates::ParseAnchorPosition(tXmlParser::node const & cur) {
+    const bool anyNew =
+        cur.HasProp("anchorH")     || cur.HasProp("anchorV")     ||
+        cur.HasProp("offsetX")     || cur.HasProp("offsetY")     ||
+        cur.HasProp("stretchMinX") || cur.HasProp("stretchMaxX") ||
+        cur.HasProp("stretchMinY") || cur.HasProp("stretchMaxY");
+    if (!anyNew) return false;
+
+    auto parseAnchor = [](tString const & s) -> AnchorSpec::Anchor {
+        if (s == "left"   || s == "top")    return AnchorSpec::Anchor::Min;
+        if (s == "center")                  return AnchorSpec::Anchor::Center;
+        if (s == "right"  || s == "bottom") return AnchorSpec::Anchor::Max;
+        if (s == "stretch")                 return AnchorSpec::Anchor::Stretch;
+        return AnchorSpec::Anchor::Center;
+    };
+
+    if (cur.HasProp("anchorH"))     m_anchor.anchorH = parseAnchor(cur.GetProp("anchorH"));
+    if (cur.HasProp("anchorV"))     m_anchor.anchorV = parseAnchor(cur.GetProp("anchorV"));
+    if (cur.HasProp("offsetX"))     cur.GetProp("offsetX",     m_anchor.offsetX);
+    if (cur.HasProp("offsetY"))     cur.GetProp("offsetY",     m_anchor.offsetY);
+    if (cur.HasProp("stretchMinX")) cur.GetProp("stretchMinX", m_anchor.stretchMinX);
+    if (cur.HasProp("stretchMaxX")) cur.GetProp("stretchMaxX", m_anchor.stretchMaxX);
+    if (cur.HasProp("stretchMinY")) cur.GetProp("stretchMinY", m_anchor.stretchMinY);
+    if (cur.HasProp("stretchMaxY")) cur.GetProp("stretchMaxY", m_anchor.stretchMaxY);
+    return true;
+}
+
+// Parse anchor-style Size attributes. Returns true iff at least one
+// new-style attribute was present.
+bool WithCoordinates::ParseAnchorSize(tXmlParser::node const & cur) {
+    const bool anyNew =
+        cur.HasProp("mode") || cur.HasProp("longest") || cur.HasProp("aspect");
+    if (!anyNew) return false;
+
+    if (cur.HasProp("mode")) {
+        tString m = cur.GetProp("mode");
+        if      (m == "proportional")  m_anchor.sizeMode = AnchorSpec::SizeMode::Proportional;
+        else if (m == "aspect-locked") m_anchor.sizeMode = AnchorSpec::SizeMode::AspectLocked;
+        else                           m_anchor.sizeMode = AnchorSpec::SizeMode::Fixed;
+    }
+    if (cur.HasProp("width"))   cur.GetProp("width",   m_anchor.width);
+    if (cur.HasProp("height"))  cur.GetProp("height",  m_anchor.height);
+    if (cur.HasProp("longest")) cur.GetProp("longest", m_anchor.longest);
+    if (cur.HasProp("aspect"))  cur.GetProp("aspect",  m_anchor.aspectRatio);
+    return true;
+}
+
+// Compute m_position and m_size from m_anchor for a viewport with the given
+// aspect factor. `factor` is (4/3) / (viewportWidth/viewportHeight) — the
+// same convention as the legacy SetFactor.
+//
+// New model coordinates are viewport-normalized [0,1] with y growing DOWN
+// (screen-space convention: anchorV="top" is y=0). Legacy m_position uses
+// [-1,+1] with y growing UP (anchorV="top" is y=+1). One axis is flipped on
+// conversion. m_size is half-extent in legacy [-1,+1] space (numerically
+// equal to the viewport-fraction of the widget's full extent).
+void WithCoordinates::ApplyAnchorLayout(float factor) {
+    // Visible cockpit NDC bounds, used both for the stretched-Y size
+    // override (just below) and for anchor placement (further down).
+    // Hoisted out of the position block so size math can reach it.
+    const float vpAspect  = (factor > 0.0f) ? ((4.0f / 3.0f) / factor) : (4.0f / 3.0f);
+    // Visible-top in cockpit NDC. With EqualAspectBottom's new max(.,1)
+    // clamp, the viewport pixel height = max(sr_W, sr_H) (when the
+    // cockpit rViewport's width fraction is 1.0). The visible NDC y
+    // range in clip space is always [-1, +1].
+    //   - Landscape FBO (W ≥ H): viewport is W × W pixels, anchored at
+    //     FBO bottom. FBO top sits at NDC y = 2H/W − 1 (less than +1;
+    //     the cockpit square extends above the screen and is clipped).
+    //   - Portrait FBO (W < H): viewport is W × H pixels (covers full
+    //     FBO after the max clamp). FBO top = NDC y +1.
+    // The std::min(1, …) collapses both cases to the right value.
+    const float visTopY   = std::min(1.0f, 2.0f / vpAspect - 1.0f);
+    const float visBotY   = -1.0f;
+    const float visRangeY = visTopY - visBotY;  // = visTopY + 1
+
+    // ---- Size first (position depends on widget half-extent for pivot) ----
+    float wFrac = m_useAnchorSize ? m_anchor.width  : m_size.x;
+    float hFrac = m_useAnchorSize ? m_anchor.height : m_size.y;
+
+    if (m_useAnchorSize && m_anchor.sizeMode == AnchorSpec::SizeMode::AspectLocked) {
+        // Pixel-square aspect-locked widgets. The pixel size is keyed off
+        // min(W, H), NOT max(W, H). Effects:
+        //   - Landscape 1920×1080 → button = 110 px (unchanged; this
+        //     calibrates with kSizeBase = 16/9 so existing XMLs that
+        //     used longest=0.057 still produce 110-px buttons here).
+        //   - Ultrawide 21:9 3440×1440 → 146 px (vs 196 px before;
+        //     scaled to the shorter axis, not the wider).
+        //   - Ultrawide 32:9 5120×1440 → 146 px (same as 21:9 — no
+        //     further growth with W).
+        //   - Square 1080×1080 → 110 px (calibration baseline).
+        //   - Portrait 1080×1920 → 110 px (same as rotated 16:9, since
+        //     min stays at 1080).
+        //   - Extreme portrait 540×1920 → 55 px (the "slight shrinking
+        //     when W < H" the user asked for — naturally proportional
+        //     to W/H since min picks W in portrait).
+        // The 16/9 multiplier is a calibration constant so longest values
+        // tuned on 16:9 landscape don't need updating.
+        const float fboW       = static_cast<float>(sr_screenWidth);
+        const float fboH       = static_cast<float>(sr_screenHeight);
+        const float minDim     = std::min(fboW, fboH);
+        constexpr float kSizeBase = 16.0f / 9.0f;
+        const float pixelFull  = m_anchor.longest * minDim * kSizeBase;
+
+        // Apply widget aspect ratio (default 1.0 = square in pixels).
+        const float widgetAspect = (m_anchor.aspectRatio > 0.0f) ? m_anchor.aspectRatio : 1.0f;
+        float pixHalfX, pixHalfY;
+        if (widgetAspect >= 1.0f) { pixHalfX = pixelFull * 0.5f; pixHalfY = pixelFull * 0.5f / widgetAspect; }
+        else                      { pixHalfY = pixelFull * 0.5f; pixHalfX = pixelFull * 0.5f * widgetAspect; }
+
+        // Convert pixel half-extents to NDC. EqualAspectBottom's OpenGL
+        // viewport has: width = fboW, height = max(fboW, fboH). Landscape
+        // gives a square viewport (= 2 × fboW/2 NDC pixel range); portrait
+        // gives the full FBO (Y scaled to fboH pixels). hFrac uses the
+        // larger denominator on portrait so the widget remains pixel-
+        // square regardless of FBO aspect.
+        const float vpWidthPx  = fboW;
+        const float vpHeightPx = std::max(fboW, fboH);
+        if (vpWidthPx  > 0.0f) wFrac = pixHalfX / (vpWidthPx  * 0.5f);
+        if (vpHeightPx > 0.0f) hFrac = pixHalfY / (vpHeightPx * 0.5f);
+    }
+
+    // Stretch overrides size on the stretched axis.
+    //   X: SDL fraction × 1.0 → NDC half-extent (SDL X range 1.0 maps to
+    //      NDC range 2.0, so half-extent = SDL fraction). Note: hFrac uses
+    //      visRangeY because the Y axis is compressed in landscape — see
+    //      the visTopY clamp in the position block below.
+    if (m_useAnchorPos) {
+        if (m_anchor.anchorH == AnchorSpec::Anchor::Stretch)
+            wFrac = m_anchor.stretchMaxX - m_anchor.stretchMinX;
+        if (m_anchor.anchorV == AnchorSpec::Anchor::Stretch)
+            hFrac = 0.5f * (m_anchor.stretchMaxY - m_anchor.stretchMinY) * visRangeY;
+    }
+
+    if (m_useAnchorSize) {
+        // m_size half-extent in [-1,+1] space equals fraction of viewport.
+        m_size.x = wFrac;
+        m_size.y = hFrac;
+        m_originalSize = m_size;
+    }
+
+    // ---- Position with auto-pivot ----
+    if (m_useAnchorPos) {
+        // visTopY / visBotY / visRangeY are hoisted to the top of the
+        // function so the size block can use them too. anchorV="top" is
+        // clamped to the visible cockpit area (which falls below NDC y=+1
+        // in landscape because EqualAspectBottom extends the cockpit
+        // viewport above the actual screen — see rViewport.cpp:449).
+
+        // Anchor reference in NDC.
+        auto anchorXNdc = [](AnchorSpec::Anchor a) -> float {
+            switch (a) {
+                case AnchorSpec::Anchor::Min:     return -1.0f;
+                case AnchorSpec::Anchor::Center:  return  0.0f;
+                case AnchorSpec::Anchor::Max:     return  1.0f;
+                case AnchorSpec::Anchor::Stretch: return  0.0f;
+            }
+            return 0.0f;
+        };
+        auto anchorYNdc = [&](AnchorSpec::Anchor a) -> float {
+            switch (a) {
+                case AnchorSpec::Anchor::Min:     return visTopY;
+                case AnchorSpec::Anchor::Center:  return 0.5f * (visTopY + visBotY);
+                case AnchorSpec::Anchor::Max:     return visBotY;
+                case AnchorSpec::Anchor::Stretch: return 0.5f * (visTopY + visBotY);
+            }
+            return 0.0f;
+        };
+
+        // Pivot offsets directly in NDC. m_size half-extents already are
+        // in NDC ([-1,+1] half-extent). Auto-pivot for anchorV="top"
+        // means the widget TOP edge sits at the anchor — its center is
+        // BELOW (smaller NDC y) by halfH.
+        auto pivotShiftX = [](AnchorSpec::Anchor a, float halfExt) -> float {
+            switch (a) {
+                case AnchorSpec::Anchor::Min:     return +halfExt;
+                case AnchorSpec::Anchor::Center:  return 0.0f;
+                case AnchorSpec::Anchor::Max:     return -halfExt;
+                case AnchorSpec::Anchor::Stretch: return 0.0f;
+            }
+            return 0.0f;
+        };
+        auto pivotShiftY = [](AnchorSpec::Anchor a, float halfExt) -> float {
+            switch (a) {
+                case AnchorSpec::Anchor::Min:     return -halfExt;  // top edge at anchor
+                case AnchorSpec::Anchor::Center:  return 0.0f;
+                case AnchorSpec::Anchor::Max:     return +halfExt;  // bottom edge at anchor
+                case AnchorSpec::Anchor::Stretch: return 0.0f;
+            }
+            return 0.0f;
+        };
+
+        float ax, ay;
+        if (m_anchor.anchorH == AnchorSpec::Anchor::Stretch) {
+            // Stretch X: anchor at midpoint of stretchMinX..stretchMaxX,
+            // those values are SDL 0..1 → NDC -1..+1 (range 2).
+            const float midSdl = 0.5f * (m_anchor.stretchMinX + m_anchor.stretchMaxX);
+            ax = midSdl * 2.0f - 1.0f;
+        } else {
+            ax = anchorXNdc(m_anchor.anchorH);
+        }
+        if (m_anchor.anchorV == AnchorSpec::Anchor::Stretch) {
+            const float midSdl = 0.5f * (m_anchor.stretchMinY + m_anchor.stretchMaxY);
+            ay = visTopY - midSdl * visRangeY;  // SDL Y is compressed into visible range
+        } else {
+            ay = anchorYNdc(m_anchor.anchorV);
+        }
+
+        // Offsets in SDL fractions of the visible range.
+        const float offsetXNdc =  m_anchor.offsetX * 2.0f;     // SDL X range = NDC 2.0
+        const float offsetYNdc = -m_anchor.offsetY * visRangeY;// SDL Y down → NDC y down
+
+        m_position.x = ax + pivotShiftX(m_anchor.anchorH, m_size.x) + offsetXNdc;
+        m_position.y = ay + pivotShiftY(m_anchor.anchorV, m_size.y) + offsetYNdc;
+        m_originalPosition = m_position;
+    }
+}
+
+// Legacy y-correction factor, adjusted for the post-2026-05-22
+// EqualAspectBottom widening. The cockpit's GL viewport pixel height is
+// max(vpW, vpH); for landscape FBOs that's vpW (= 4/3 / factor in this
+// scope, ≥ 1 when vpAspect ≥ 1) — unchanged from before, so legacy
+// gauges land in the same pixel position. For portrait FBOs the
+// viewport widened to vpH pixels, which would shift legacy gauges UP if
+// we kept passing the same factor; scaling by vpAspect = vpW/vpH brings
+// them back to their old pixel position (~67% from FBO bottom for a
+// centered widget on a 960×1080 sub-viewport, matching the pre-widening
+// behaviour of all legacy cockpits including the default).
+//
+// The new anchor model is NOT affected — ApplyAnchorLayout reads vpAspect
+// from `factor` directly so it sees the unmodified value.
+static float sg_LegacyYFactor(float factor) {
+    if (factor <= 0.0f) return factor;
+    const float vpAspect = (4.0f / 3.0f) / factor;
+    return (vpAspect >= 1.0f) ? factor : factor * vpAspect;
+}
+
 //!@arg factor the factor to multiply with
 void WithCoordinates::SetFactor(float factor) {
-    m_position.y = (m_originalPosition.y + 1.) * factor - 1.;
-    m_size.y = m_originalSize.y * factor;
+    // Mixed widgets are supported: a dimension that opted into the anchor
+    // model is computed via ApplyAnchorLayout; the other dimension (if any)
+    // falls back to the legacy y-aspect tweak.
+    if (m_useAnchorPos || m_useAnchorSize) {
+        ApplyAnchorLayout(factor);
+        const float legacy = sg_LegacyYFactor(factor);
+        if (!m_useAnchorPos) m_position.y = (m_originalPosition.y + 1.) * legacy - 1.;
+        if (!m_useAnchorSize) m_size.y = m_originalSize.y * legacy;
+        return;
+    }
+    const float legacy = sg_LegacyYFactor(factor);
+    m_position.y = (m_originalPosition.y + 1.) * legacy - 1.;
+    m_size.y = m_originalSize.y * legacy;
 }
 
 bool WithDataFunctions::Process(tXmlParser::node cur) {
@@ -466,12 +725,16 @@ void WithColorFunctions::ProcessImage(tXmlParser::node cur, rGradient &gradient,
                 else if (mode == "msdf") gradient.SetSDFMode(2);
                 else if (mode == "mtsdf") gradient.SetSDFMode(3);
 
-                // Optional outline parameters
+                // Optional outline parameters. Each GetProp(name, T&) call
+                // logs a "Call for non-existent Attribute" warning when the
+                // attribute is missing, so gate the read on HasProp first
+                // — the no-outline case is the common one and the warnings
+                // were flooding the console every time a Graphic loaded.
                 float outW = 0.0f, outR = 0.0f, outG = 0.0f, outB = 0.0f;
-                cur.GetProp("outline", outW);
-                cur.GetProp("outlineR", outR);
-                cur.GetProp("outlineG", outG);
-                cur.GetProp("outlineB", outB);
+                if (cur.HasProp("outline"))  cur.GetProp("outline",  outW);
+                if (cur.HasProp("outlineR")) cur.GetProp("outlineR", outR);
+                if (cur.HasProp("outlineG")) cur.GetProp("outlineG", outG);
+                if (cur.HasProp("outlineB")) cur.GetProp("outlineB", outB);
                 gradient.SetSDFOutline(outW, outR, outG, outB);
             }
         }

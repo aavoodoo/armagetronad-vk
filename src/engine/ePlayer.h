@@ -445,8 +445,20 @@ public:
 
     static void  ResetScore();  // resets the ranking list
 
-    static void DisplayScores(); // display scores on the screen
+    //! Display the scoreboard for one viewport. Each viewport has its own
+    //! show/hide flag (see SetShowScoresViewport); the call is a no-op when
+    //! the requested viewport's flag is false. viewportIdx defaults to 0 for
+    //! the global SCORE-action / per-frame-task call sites that don't have a
+    //! viewport context.
+    static void DisplayScores(int viewportIdx = 0);
     static void ResetDisplayedScores(); // allow DisplayScores() to run again (multi-viewport)
+
+    //! Per-viewport scoreboard visibility. R1 on viewport N toggles only
+    //! show_scores[N]; the global SCORE keybinding (TAB) flips every slot
+    //! to the opposite of viewport 0's current state (so TAB on a desktop
+    //! keyboard still acts as a single global toggle).
+    static void SetShowScoresViewport(int viewportIdx, bool show);
+    static bool GetShowScoresViewport(int viewportIdx);
 
     void GreetHighscores(tString &s); // tell him his positions in the
     // highscore lists (defined in game.cpp)

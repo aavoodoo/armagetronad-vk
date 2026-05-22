@@ -458,12 +458,10 @@ foreach(_icon ${APP_ICON_FILES})
 endforeach()
 
 # ============================================================================
-# rTouchOverlayIOS.mm uses weak properties and requires ARC.
-# The bridge file (rTouchBridgeIOS.mm) stays MRC so it can include C++ headers.
+# All iOS-specific touch overlay code has been retired. Touch buttons render
+# as cockpit widgets (see src/tron/cockpit/cTouchButton.{h,cpp} and the
+# default AATeam/touch/touch-buttons-0.1.aacockpit.xml).
 # ============================================================================
-set_source_files_properties("${SRC}/render/rTouchOverlayIOS.mm"
-    PROPERTIES COMPILE_FLAGS "-fobjc-arc"
-)
 
 # ============================================================================
 # Launch screen storyboard — required to opt out of iOS legacy 320×480 mode.
