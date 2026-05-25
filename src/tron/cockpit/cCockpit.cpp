@@ -26,6 +26,7 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 */
 
 #include "cockpit/cCockpit.h"
+#include <algorithm>
 #include "tValue.h"
 #include "values/vParser.h"
 #include "cockpit/cGauges.h"
@@ -98,7 +99,7 @@ static void readjust_cockpit () {
 
 static rCallbackAfterScreenModeChange reloadft(&readjust_cockpit);
 
-tString cockpit_file("Anonymous/standard-0.0.1.aacockpit.xml");
+tString cockpit_file("AATeam/mobile-0.0.1.aacockpit.xml");
 static tConfItem<tString> cf("COCKPIT_FILE",cockpit_file,&parsecockpit);
 
 typedef std::pair<tString, tValue::Callback<cCockpit>::cb_ptr> cbpair;
@@ -523,7 +524,7 @@ void cCockpit::ProcessCockpit(void) {
 // path under the user resource dir are found first by
 // tResourceManager::locateResource.
 static char const * const sg_touchCockpitFile =
-    "AATeam/touch/touch-buttons-0.1.aacockpit.xml";
+    "AATeam/touch/touchbuttons-0.1.aacockpit.xml";
 
 void cCockpit::ProcessTouchOverlay(void) {
     // Optional file — silent no-op when not present (touch overlay isn't
@@ -1057,27 +1058,74 @@ bool cCockpit::ProcessTouch(float x, float y, uint32_t type, int64_t fingerId) {
     if (type == SDL_EVENT_FINGER_DOWN) {
         for (int i = 0; i < config->num_viewports; i++) {
             rViewport* vp = config->Port(i);
-            if (!vp || !vp->Contains(x, y)) continue;
+            if (!vp) continue;
+            if (!vp->Contains(x, y)) continue;
 
             cCockpit* cockpit = CockpitForViewport(i);
-            if (!cockpit) return false;
+            if (!cockpit) continue; // no cockpit for this viewport yet; check others
 
             const int rotDeg = sr_GetViewportRotationDeg(confNum, i);
             float hx, hy;
             vp->TouchToCockpitHud(x, y, hx, hy, rotDeg);
 
-            for (cWidget::TouchButton* btn : cockpit->m_TouchButtons) {
-                if (btn->IsActiveInCurrentMode() && btn->IsVisible() &&
-                    btn->activeFinger_ == -1 && btn->HitTest(hx, hy)) {
-                    btn->activeFinger_ = fingerId;
-                    s_activeFingers[fingerId] = { btn, i };
-                    btn->OnPress(i, hx, hy);
-                    return true;
+            // Readjust button positions only when the viewport factor changes.
+            {
+                float vpW = vp->GetDimensions().x * static_cast<float>(sr_screenWidth);
+                float vpH = vp->GetDimensions().y * static_cast<float>(sr_screenHeight);
+                if (rotDeg == 90 || rotDeg == 270) std::swap(vpW, vpH);
+                if (vpW > 0.0f && vpH > 0.0f) {
+                    float factor = 4.f/3.f * vpH / vpW;
+                    static float lastFactor = -1.0f;
+                    if (fabsf(factor - lastFactor) > 0.001f) {
+                        cockpit->Readjust(factor);
+                        lastFactor = factor;
+                    }
                 }
             }
-            return false; // touch was inside a viewport but didn't hit any button
+
+            // Find the closest button to the touch point. Since only one
+            // button fires per finger, we can use a generous tolerance zone
+            // and just pick the nearest center — no ambiguity.
+            {
+                cWidget::TouchButton* bestBtn = nullptr;
+                float bestDist2 = 1e30f;
+                for (cWidget::TouchButton* btn : cockpit->m_TouchButtons) {
+                    if (!btn->IsActiveInCurrentMode() || !btn->IsVisible())
+                        continue;
+                    if (btn->activeFinger_ != -1 && btn->activeFinger_ != fingerId)
+                        continue; // already held by another finger
+                    float dx = hx - btn->GetNDCPosition().x;
+                    float dy = hy - btn->GetNDCPosition().y;
+                    float d2 = dx * dx + dy * dy;
+                    if (d2 < bestDist2) {
+                        bestDist2 = d2;
+                        bestBtn   = btn;
+                    }
+                }
+                // Accept if within twice the button's half-extent (generous).
+                if (bestBtn) {
+                    float maxR = 2.0f * std::max(bestBtn->GetNDCSize().x,
+                                                  bestBtn->GetNDCSize().y);
+                    if (bestDist2 <= maxR * maxR) {
+                        // Release stale finger on THIS button only (missed
+                        // FINGER_UP from a system interruption).
+                        if (bestBtn->activeFinger_ != -1 && bestBtn->activeFinger_ != fingerId) {
+                            s_activeFingers.erase(bestBtn->activeFinger_);
+                            bestBtn->activeFinger_ = -1;
+                            bestBtn->pressed_ = false;
+                        }
+                        if (bestBtn->activeFinger_ == -1) {
+                            bestBtn->activeFinger_ = fingerId;
+                            s_activeFingers[fingerId] = { bestBtn, i };
+                            bestBtn->OnPress(i, hx, hy);
+                            return true;
+                        }
+                    }
+                }
+            }
+            return false; // touch was in this viewport but hit no button
         }
-        return false; // touch wasn't in any viewport
+        return false; // touch wasn't in any viewport with a valid cockpit
     }
 
     // FINGER_UP / FINGER_MOTION: dispatch via the viewport the FINGER_DOWN landed in.
@@ -1105,6 +1153,18 @@ bool cCockpit::ProcessTouch(float x, float y, uint32_t type, int64_t fingerId) {
         const int rotDeg = sr_GetViewportRotationDeg(confNum, vpIdx);
         float hx, hy;
         vp->TouchToCockpitHud(x, y, hx, hy, rotDeg);
+        // Re-apply the same factor used at FINGER_DOWN so picker drag
+        // coordinates stay in the same NDC space as the button positions.
+        {
+            cCockpit* cockpit = CockpitForViewport(vpIdx);
+            if (cockpit) {
+                float vpW = vp->GetDimensions().x * static_cast<float>(sr_screenWidth);
+                float vpH = vp->GetDimensions().y * static_cast<float>(sr_screenHeight);
+                if (rotDeg == 90 || rotDeg == 270) std::swap(vpW, vpH);
+                if (vpW > 0.0f && vpH > 0.0f)
+                    cockpit->Readjust(4.f/3.f * vpH / vpW);
+            }
+        }
         // OnDrag returns false when the button has decided to drop the
         // binding (drag-out cancel on a non-picker button; picker buttons
         // stay bound until release). Clean up our per-finger record then.

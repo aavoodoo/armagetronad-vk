@@ -1,0 +1,260 @@
+<?xml version="1.0" encoding="ISO-8859-1" standalone="no"?>
+<!DOCTYPE Resource SYSTEM "cockpit.dtd">
+
+<!--
+    touch-buttons — default touch-input cockpit overlay (loaded as the
+    second slot on top of the player's primary cockpit, see
+    project_cockpit_redesign_2026_05_22 in memory).
+
+    LAYOUT
+      System buttons (touchMode="all", visible in every ENABLE_TOUCH
+      mode) line the LEFT and RIGHT borders from the top down:
+
+        Left, top → down:  ESC (with touch-mode picker), Score, Gyro
+        Right, top → down: Chat (with instant-chat picker), Camera, Spec
+
+      Control buttons (touchMode="3", in-game button mode only) sit
+      above the bottom of the screen with an offset that clears the
+      regular cockpit (gauges) area:
+
+        Left:  Turn-Left
+        Right: Turn-Right (upper)
+               Brake      (lower, closer to the resting thumb;
+                           actionMode="hold" — brake is the one action
+                           in the engine whose handler consumes the
+                           release event)
+
+    All anchored against the viewport edges with the anchor-layout
+    attributes — positions stay correct under split-screen and any
+    viewport rotation.
+
+    All backgrounds reference SDF icon resources from
+    resource/binary/armagetronad/cockpits/. Captions are dropped for
+    icon-bearing buttons (the icon IS the label).
+-->
+
+<Resource type="aacockpit" name="touchbuttons" version="0.1"
+          author="AATeam" category="touch">
+    <Cockpit version="0.0.1">
+
+        <!-- ==================== LEFT SYSTEM COLUMN ==================== -->
+
+        <!-- ESC / menu. Tap toggles the in-game menu (INGAME_MENU global
+             action). Drag opens the touch-mode picker (3 slots: zones /
+             gestures / buttons — currently-active mode highlighted). -->
+        <TouchButton action="INGAME_MENU" touchMode="all" viewport="all"
+                     picker="touch_mode">
+            <Position anchorH="left" anchorV="top"
+                      offsetX="0.010" offsetY="0.02"/>
+            <Size mode="aspect-locked" longest="0.057" aspect="1.0"/>
+            <Background>
+                <Image>
+                    <Graphic name="overlay_menu_sdf" version="0.1"
+                             author="armagetronad" category="cockpits"
+                             extension="png" sdf="sdf"/>
+                </Image>
+            </Background>
+        </TouchButton>
+
+        <!-- Score table. Tap toggles this viewport's score table
+             (per-viewport via ePlayerNetID::SetShowScoresViewport,
+             handled inside cTouchButton when actionName == "SCORE").
+             toggleVisual reflects the per-viewport show-scores flag;
+             default green tint marks the active state. -->
+        <TouchButton action="SCORE" touchMode="all" viewport="all"
+                     toggleVisual="true">
+            <Position anchorH="left" anchorV="top"
+                      offsetX="0.010" offsetY="0.14"/>
+            <Size mode="aspect-locked" longest="0.057" aspect="1.0"/>
+            <Background>
+                <Image>
+                    <Graphic name="overlay_score_sdf" version="0.1"
+                             author="armagetronad" category="cockpits"
+                             extension="png" sdf="sdf"/>
+                </Image>
+            </Background>
+        </TouchButton>
+
+        <!-- Gyro toggle. Bound to COCKPIT_KEY_3 today — a real
+             GYRO_TOGGLE uAction is future work. Mobile-only: the Java
+             gyro listener (ArmagetronActivity / iOS sensors) decides
+             when to send camera input regardless of this button.
+             visibleIf="gyroAvailable" hides it on hosts without a
+             gyroscope (desktop). toggleVisual reflects su_IsGyroActive(). -->
+        <TouchButton action="COCKPIT_KEY_3" touchMode="all" viewport="all"
+                     toggleVisual="true" visibleIf="gyroAvailable">
+            <Position anchorH="left" anchorV="top"
+                      offsetX="0.010" offsetY="0.27"/>
+            <Size mode="aspect-locked" longest="0.057" aspect="1.0"/>
+            <Background>
+                <Image>
+                    <Graphic name="overlay_gyro_sdf" version="0.1"
+                             author="armagetronad" category="cockpits"
+                             extension="png" sdf="sdf"/>
+                </Image>
+            </Background>
+        </TouchButton>
+
+        <!-- ==================== RIGHT SYSTEM COLUMN ==================== -->
+
+        <!-- Chat. Tap OR drag opens the instant-chat picker (8 slots,
+             labels from INSTANT_CHAT_STRING_<player>_<i> cfg).
+             Normal keyboard chat is omitted — impractical while playing
+             on a touch device. The fallback CHAT action remains bound
+             but is never fired (picker intercepts the tap in OnRelease).
+             visibleIf="chatEnabled" hides the button when ENABLE_CHAT
+             is false (local-game chat disable). -->
+        <TouchButton action="CHAT" touchMode="all" viewport="all"
+                     picker="instant_chat" visibleIf="chatEnabled">
+            <Position anchorH="right" anchorV="top"
+                      offsetX="-0.010" offsetY="0.02"/>
+            <Size mode="aspect-locked" longest="0.057" aspect="1.0"/>
+            <Background>
+                <Image>
+                    <Graphic name="overlay_chat_sdf" version="0.1"
+                             author="armagetronad" category="cockpits"
+                             extension="png" sdf="sdf"/>
+                </Image>
+            </Background>
+        </TouchButton>
+
+        <!-- Camera switch. uActionCamera — toggles in-cycle / external
+             / etc. on press, release is a no-op. -->
+        <TouchButton action="SWITCH_VIEW" touchMode="all" viewport="all">
+            <Position anchorH="right" anchorV="top"
+                      offsetX="-0.010" offsetY="0.14"/>
+            <Size mode="aspect-locked" longest="0.057" aspect="1.0"/>
+            <Background>
+                <Image>
+                    <Graphic name="overlay_camera_sdf" version="0.1"
+                             author="armagetronad" category="cockpits"
+                             extension="png" sdf="sdf"/>
+                </Image>
+            </Background>
+        </TouchButton>
+
+        <!-- Spec toggle. The icon (gaming-pad) represents "play", and
+             we want it to look ACTIVE when the player is NOT spectating
+             (i.e. is playing). toggleVisual reads ePlayer::spectate (the
+             INTENT — updates immediately on press, before the next-round
+             sync); invert flips it so the lit state means "playing".
+             Default green tint shows on the lit state. Tap fires
+             TOGGLE_SPECTATOR. -->
+        <TouchButton action="TOGGLE_SPECTATOR" touchMode="all" viewport="all"
+                     toggleVisual="true" invert="true">
+            <Position anchorH="right" anchorV="top"
+                      offsetX="-0.010" offsetY="0.27"/>
+            <Size mode="aspect-locked" longest="0.057" aspect="1.0"/>
+            <Background>
+                <Image>
+                    <Graphic name="overlay_play_sdf" version="0.1"
+                             author="armagetronad" category="cockpits"
+                             extension="png" sdf="sdf"/>
+                </Image>
+            </Background>
+        </TouchButton>
+
+        <!-- ==================== BOTTOM CONTROL BUTTONS ==================== -->
+        <!-- Mode 3 only. Offset upward from the bottom so the regular
+             cockpit (gauges) has the bottom ~16% to itself. -->
+
+        <!-- Cockpit action keys, stacked above the turn-left button.
+             COCKPIT_KEY_{1,2} are global uActions dispatched to the
+             cockpit's event handlers (HUD widget toggles, map mode
+             cycling, etc.). touchMode="3" matches the rest of the
+             control column so they only appear in buttons mode — modes
+             1/2 use this screen area for tap zones / gestures and we
+             don't want to block those. -->
+        <TouchButton action="COCKPIT_KEY_2" touchMode="3" viewport="all">
+            <Position anchorH="left" anchorV="bottom"
+                      offsetX="0.075" offsetY="-0.45"/>
+            <Size mode="aspect-locked" longest="0.055" aspect="1.0"/>
+            <Background>
+                <Image>
+                    <Graphic name="btn_2_sdf" version="0.1"
+                             author="armagetronad" category="cockpits"
+                             extension="png" sdf="sdf"/>
+                </Image>
+            </Background>
+        </TouchButton>
+
+        <TouchButton action="COCKPIT_KEY_1" touchMode="3" viewport="all">
+            <Position anchorH="left" anchorV="bottom"
+                      offsetX="0.075" offsetY="-0.33"/>
+            <Size mode="aspect-locked" longest="0.055" aspect="1.0"/>
+            <Background>
+                <Image>
+                    <Graphic name="btn_1_sdf" version="0.1"
+                             author="armagetronad" category="cockpits"
+                             extension="png" sdf="sdf"/>
+                </Image>
+            </Background>
+        </TouchButton>
+
+        <!-- COCKPIT_KEY_3: third cockpit-action key, offset to the right
+             so it nests between buttons 1 and 2 visually. Triangle icon
+             (btn_3_sdf). Auto-hides when no widget registers for key 3
+             (same logic as buttons 1 and 2 — see TouchButton::IsVisible). -->
+        <TouchButton action="COCKPIT_KEY_3" touchMode="3" viewport="all">
+            <Position anchorH="left" anchorV="bottom"
+                      offsetX="0.14" offsetY="-0.39"/>
+            <Size mode="aspect-locked" longest="0.055" aspect="1.0"/>
+            <Background>
+                <Image>
+                    <Graphic name="btn_3_sdf" version="0.1"
+                             author="armagetronad" category="cockpits"
+                             extension="png" sdf="sdf"/>
+                </Image>
+            </Background>
+        </TouchButton>
+
+        <!-- Turn left. CYCLE_TURN_LEFT — the engine handler gates on
+             x > .5, so the release event is ignored and the new default
+             (tap) is correct here. -->
+        <TouchButton action="CYCLE_TURN_LEFT" touchMode="3" viewport="all">
+            <Position anchorH="left" anchorV="bottom"
+                      offsetX="0.075" offsetY="-0.12"/>
+            <Size mode="aspect-locked" longest="0.11" aspect="1.0"/>
+            <Background>
+                <Image>
+                    <Graphic name="btn_left_sdf" version="0.1"
+                             author="armagetronad" category="cockpits"
+                             extension="png" sdf="sdf"/>
+                </Image>
+            </Background>
+        </TouchButton>
+
+        <!-- Brake. Upper of the two right-side controls.
+             actionMode="hold" because CYCLE_BRAKE's handler genuinely
+             consumes both press (start braking) and release (stop). -->
+        <TouchButton action="CYCLE_BRAKE" touchMode="3" viewport="all"
+                     actionMode="hold">
+            <Position anchorH="right" anchorV="bottom"
+                      offsetX="-0.075" offsetY="-0.33"/>
+            <Size mode="aspect-locked" longest="0.11" aspect="1.0"/>
+            <Background>
+                <Image>
+                    <Graphic name="btn_brake_sdf" version="0.1"
+                             author="armagetronad" category="cockpits"
+                             extension="png" sdf="sdf"/>
+                </Image>
+            </Background>
+        </TouchButton>
+
+        <!-- Turn right. Lower of the two right-side controls — closest
+             to the resting thumb. -->
+        <TouchButton action="CYCLE_TURN_RIGHT" touchMode="3" viewport="all">
+            <Position anchorH="right" anchorV="bottom"
+                      offsetX="-0.075" offsetY="-0.12"/>
+            <Size mode="aspect-locked" longest="0.11" aspect="1.0"/>
+            <Background>
+                <Image>
+                    <Graphic name="btn_right_sdf" version="0.1"
+                             author="armagetronad" category="cockpits"
+                             extension="png" sdf="sdf"/>
+                </Image>
+            </Background>
+        </TouchButton>
+
+    </Cockpit>
+</Resource>

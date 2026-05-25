@@ -107,51 +107,57 @@ bool rViewport::Contains(float sx, float sy) const {
 }
 
 void rViewport::TouchToCockpitHud(float sx, float sy, float& hx, float& hy, int rotDeg) const {
-    // Step 1: SDL touch → viewport-local SDL [0,1] (y=0 top of viewport).
-    // Viewport's top edge in SDL coords = 1 - (bottom + height).
+    // Step 1: SDL touch → viewport-local [0,1] (lx: 0=left,1=right; ly: 0=top,1=bottom).
     const float topInSdl = 1.0f - bottom - height;
     const float invW = (width  > 0.0f) ? 1.0f / width  : 1.0f;
     const float invH = (height > 0.0f) ? 1.0f / height : 1.0f;
-    float lx = (sx - left)      * invW;
-    float ly = (sy - topInSdl)  * invH;
+    const float lx = (sx - left)     * invW;
+    const float ly = (sy - topInSdl) * invH;
 
-    // Step 2: undo viewport's visual rotation (rotates around viewport
-    // center (0.5, 0.5) in local coords). Same convention as
-    // su_RotateTouchCoord in uInput.cpp — +rotDeg gives the inverse.
-    if (rotDeg != 0) {
-        const float cx  = lx - 0.5f;
-        const float cy  = ly - 0.5f;
-        const float rad = (float)rotDeg * (float)M_PI / 180.0f;
-        const float c   = cosf(rad);
-        const float s   = sinf(rad);
-        lx = c * cx - s * cy + 0.5f;
-        ly = s * cx + c * cy + 0.5f;
+    // Step 2: Compute FBO UV — the texture coordinate sampled at screen (lx, ly).
+    // Derived analytically from the uvTable in CompositeViewportFBOs (rVulkanRender.cpp).
+    // FBO UV convention: u=0 left, u=1 right; v=0 FBO-top, v=1 FBO-bottom.
+    //
+    //   0°:   (u,v) = (lx,   ly  )   — no rotation
+    //   90°:  (u,v) = (ly,   1-lx)   — CW 90° for left-side player
+    //  180°:  (u,v) = (1-lx, 1-ly)   — 180° for top-side player (top-bottom split)
+    //  270°:  (u,v) = (1-ly, lx  )   — CCW 90° for right-side player
+    const int normRot = ((rotDeg % 360) + 360) % 360;
+    float fbo_u, fbo_v;
+    switch (normRot) {
+    case  90: fbo_u = ly;        fbo_v = 1.0f - lx; break;
+    case 180: fbo_u = 1.0f - lx; fbo_v = 1.0f - ly; break;
+    case 270: fbo_u = 1.0f - ly; fbo_v = lx;         break;
+    default:  fbo_u = lx;        fbo_v = ly;          break; // 0°
     }
 
-    // Step 3: viewport-local SDL → cockpit HUD (NDC). Must mirror the
-    // OpenGL viewport that the cockpit renders with — which is now
-    //   glViewport(0, 0, vpW_px, max(vpW_px, vpH_px))
-    // because EqualAspectBottom does std::max(width × sr_W/sr_H, 1.0)
-    // when fed rViewport(0,0,1,1). The OpenGL viewport's pixel HEIGHT
-    // therefore equals max(vpW_px, vpH_px). NDC y -1..+1 maps linearly
-    // to that pixel range, starting at the FBO bottom (bottom-anchored).
+    // Step 3: FBO UV → cockpit NDC (hx, hy).
+    // For 90°/270° the FBO is created with W and H swapped relative to the
+    // screen viewport dimensions (BeginViewportFBO). sr_RenderViewportCockpit
+    // sees the swapped dims as sr_screenWidth/Height and computes factor and
+    // visTopY from them, so the touch mapping must use the same swapped FBO size.
     //
-    //   - Landscape sub-viewport (vpW > vpH): vp height = vpW_px. NDC y
-    //     +1 → pixel vpW_px (above the FBO top, clipped). FBO top sits
-    //     at NDC y = 2 × vpH/vpW − 1 (e.g. 0.125 for 16:9).
-    //   - Portrait sub-viewport (vpW < vpH): vp height = vpH_px. NDC y
-    //     +1 → pixel vpH_px = FBO top exactly.
-    //
-    // Unified formula: NDC y for a click at viewport-local SDL ly =
-    //   (vpH_px × (1 − ly)) × 2 / max(vpW_px, vpH_px) − 1
-    const float vpW_px      = width  * (float)sr_screenWidth;
-    const float vpH_px      = height * (float)sr_screenHeight;
-    const float vpAxisMax   = std::max(vpW_px, vpH_px);
-    hx = lx * 2.0f - 1.0f;
-    if (vpAxisMax > 0.0f) {
-        hy = (1.0f - ly) * vpH_px * 2.0f / vpAxisMax - 1.0f;
+    // NDC x = 2*fbo_u − 1
+    // NDC y = (1 − fbo_v) × fboH × 2 / max(fboW,fboH) − 1
+    //   (mirrors EqualAspectBottom, which sets viewport height =
+    //    max(fboW/fboH, 1), so visTopY = min(1, 2*fboH/fboAxisMax − 1))
+    const float vpW_px = width  * (float)sr_screenWidth;
+    const float vpH_px = height * (float)sr_screenHeight;
+    float fboW, fboH;
+    if (normRot == 90 || normRot == 270) {
+        fboW = vpH_px;   // FBO created with swapped W×H for 90°/270°
+        fboH = vpW_px;
     } else {
-        hy = 1.0f - ly * 2.0f;
+        fboW = vpW_px;
+        fboH = vpH_px;
+    }
+    const float fboAxisMax = std::max(fboW, fboH);
+
+    hx = fbo_u * 2.0f - 1.0f;
+    if (fboAxisMax > 0.0f) {
+        hy = (1.0f - fbo_v) * fboH * 2.0f / fboAxisMax - 1.0f;
+    } else {
+        hy = 1.0f - fbo_v * 2.0f;
     }
 }
 

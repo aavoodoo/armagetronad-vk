@@ -471,7 +471,11 @@ bool tXmlParser::ValidateXml(FILE* docfd, const char* uri, const char* filepath)
     // etc.) but skip validation (DTD paths don't resolve on Android).
     int xmlParseOpts = XML_PARSE_DTDLOAD | XML_PARSE_NONET;
 #else
-    int xmlParseOpts = XML_PARSE_DTDVALID;
+    // XML_PARSE_NONET: prevent libxml2 from making network requests when
+    // resolving DTD SYSTEM URIs. Without this, a missing local DTD causes
+    // a DNS lookup + TCP connect attempt that hangs for several seconds
+    // (observed as startup freeze on macOS). All DTDs ship locally.
+    int xmlParseOpts = XML_PARSE_DTDVALID | XML_PARSE_NONET;
 #endif
     m_Doc = xmlCtxtReadIO(ctxt, myxmlInputReadFILE, 0, docfd,
 #if HAVE_LIBXML2_WO_PIBCREATE

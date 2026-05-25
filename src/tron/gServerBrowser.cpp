@@ -44,6 +44,7 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 
 #include "uMenu.h"
 #include "uInputQueue.h"
+#include "uInput.h"
 
 #include "tMemManager.h"
 #include "tSysTime.h"
@@ -574,6 +575,24 @@ gServerMenu::gServerMenu(const char *title)
     // bounce. See uMenu kKinetic* constants for the tuning knobs.
     m_useKineticScroll_ = true;
 
+#ifndef DEDICATED
+    // On touch devices, the browser font is scaled up independently of the
+    // menu line step. Compute a spacing factor so rendered text fits its slot
+    // without overlapping. 30% breathing room on top of the exact fit.
+    {
+        REAL scale = sr_TouchUIScale();
+        if (su_GetEnableTouch() > 0) scale *= 2.0f;
+        REAL textH  = 0.05f * scale;                     // sg_BrowserTextHeight()
+        REAL menuH  = uMenu_LineHeight();                 // sr_MenuTextHeight()
+        REAL s      = sr_TouchUIScale();
+        REAL shrink = 0.6f + 0.3f * (s - 1.0f);
+        if (shrink > 0.85f) shrink = 0.85f;              // sg_BrowserShrink()
+        REAL screenSpacing = menuH * shrink;
+        if (textH > screenSpacing * 0.8f)
+            SetLineSpacingFactor(textH * 1.3f / screenSpacing);
+    }
+#endif
+
     nServerInfo *run = nServerInfo::GetFirstServer();
     
     while (run)
@@ -605,7 +624,12 @@ static REAL text_height_browser=.05;
 
 static REAL sg_BrowserTextHeight()
 {
-    return text_height_browser * sr_TouchUIScale();
+    REAL scale = sr_TouchUIScale();
+    // Server browser entries are very small on touch devices — apply an extra
+    // 2x multiplier so items are comfortably finger-sized.
+    if (su_GetEnableTouch() > 0)
+        scale *= 2.0f;
+    return text_height_browser * scale;
 }
 #define text_height sg_BrowserTextHeight()
 

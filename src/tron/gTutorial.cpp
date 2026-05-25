@@ -2247,6 +2247,21 @@ bool sg_TutorialsCompleted()
 // ok, that's one too many.
 // static gMazeChallengeDragon sg_challengeDragon5("dragon5", 9, 15, 1.1);
 
+// "Unlock All Tutorials" item — declared FIRST so it lands at the bottom of the
+// visual menu (YPos is inverted: first item added = lowest index = bottom).
+static void sg_UnlockAll()
+{
+    gTutorial::SetAll( true, true );
+    st_Include( tString("uphillbothways.cfg") );
+    con << "All tutorials and challenges unlocked.\n";
+}
+
+static uMenuItemFunction sg_unlockAllItem(
+    &sg_tutorialMenu,
+    tOutput("Unlock All Tutorials"),
+    tOutput("Mark all tutorials as completed."),
+    sg_UnlockAll );
+
 static gMazeChallengeHilbert sg_challengeHilbert4("hilbert4", 4, 15, 1);
 static gAIChallengeFixed sg_AIChallenge8("ai8", 15, 100, -2, 60, 20);
 static gChallengeSurvivalWithEnemies sg_challengeSurvival4("survival4", 60, -5, -.1, 3 );

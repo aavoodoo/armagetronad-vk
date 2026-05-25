@@ -54,37 +54,114 @@ static tSettingItem< int > su_enableTouchConf( "ENABLE_TOUCH", su_enableTouch );
 void su_EnableTouchDefault() {
 #if defined(__ANDROID__) || (defined(__APPLE__) && TARGET_OS_IOS)
     if (su_enableTouch == 0)
-        su_enableTouch = 1;   // default to tap zones (L/R/brake) on mobile
+        su_enableTouch = 3;   // default to cockpit buttons on mobile
+    // Disable control-key tooltips on touchscreen devices — the on-screen
+    // buttons make keyboard hints pointless and they clutter the display.
+    // Level below Level_Essential (0) suppresses all tooltips.
+    extern uActionTooltip::Level su_helpLevel;
+    su_helpLevel = static_cast<uActionTooltip::Level>(-1);
 #endif
 }
 
 int su_GetEnableTouch() { return su_enableTouch; }
 extern "C" void su_SetEnableTouch(int mode) { su_enableTouch = mode; }
 
-// Gyro camera look — when active, mouse motion events are forwarded even in touch mode.
-static int su_gyroActive = 0;
-extern "C" void su_SetGyroActive(int active) { su_gyroActive = active; }
+// Per-player touch mode for split-screen (0 = inherit global su_enableTouch).
+static int su_playerTouchMode[MAX_VIEWPORTS] = {};
 
-// Cockpit TouchButton state queries:
-//   su_IsGyroActive():   true iff the gyro listener is currently feeding
-//                        camera input. Drives the green "active" tint on
-//                        the gyro button.
-//   su_HasGyroSensor():  true iff the host exposes a usable gyroscope.
-//                        Drives the gyro button's visibleIf check — on
-//                        desktop without a sensor the button hides.
-bool su_IsGyroActive()  { return su_gyroActive != 0; }
-bool su_HasGyroSensor()
+int su_GetEnableTouchForPlayer(int playerIdx) {
+    if (playerIdx < 0 || playerIdx >= MAX_VIEWPORTS) return su_enableTouch;
+    int m = su_playerTouchMode[playerIdx];
+    return m > 0 ? m : su_enableTouch;
+}
+void su_SetEnableTouchForPlayer(int playerIdx, int mode) {
+    if (playerIdx >= 0 && playerIdx < MAX_VIEWPORTS)
+        su_playerTouchMode[playerIdx] = mode;
+}
+
+// Returns true if any player's effective touch mode equals `mode`.
+// Used to activate zone/gesture handlers when any player needs them,
+// even if the global su_enableTouch is different (split-screen mixed modes).
+static bool su_AnyPlayerHasTouchMode(int mode) {
+    for (int i = 0; i < MAX_VIEWPORTS; i++) {
+        if (su_GetEnableTouchForPlayer(i) == mode) return true;
+    }
+    return false;
+}
+
+// Forward declaration — eCamera.cpp provides the implementation.
+// Sets absolute camera look offset in radians (yaw, pitch) with orbital
+// compensation so the cycle stays at the same screen position.
+extern "C" void aa_SetGyroCameraOffset(float yaw, float pitch);
+
+// Gyro camera look — complementary filter (gyro + accelerometer).
+// Gyroscope: smooth, fast response, but drifts over time.
+// Accelerometer: absolute tilt from gravity, noisy but drift-free.
+// Blend: 98% gyro + 2% accel correction each frame.
+static int su_gyroActive = 0;
+static SDL_Sensor* su_accelSensor = nullptr;
+static SDL_Sensor* su_gyroSensor  = nullptr;
+static float su_refAngle     = 0.0f;  // reference angle at activation
+static bool  su_refCaptured  = false;
+static float su_accelAngle   = 0.0f;  // latest absolute angle from accelerometer
+static float su_steerAngle   = 0.0f;  // filtered steering output (radians)
+static Uint64 su_lastGyroTs  = 0;     // last gyro timestamp (nanoseconds)
+
+static SDL_SensorID su_FindSensor(SDL_SensorType type)
 {
-#if defined(__ANDROID__) || (defined(__APPLE__) && TARGET_OS_IOS)
-    // Mobile platforms always have a gyroscope. SDL3's per-sensor open is
-    // gated behind permissions on iOS and adds startup cost — assume yes.
-    return true;
-#else
     int count = 0;
     SDL_SensorID* ids = SDL_GetSensors(&count);
-    if (ids) SDL_free(ids);
-    return count > 0;
-#endif
+    if (!ids) return 0;
+    SDL_SensorID found = 0;
+    for (int i = 0; i < count; i++) {
+        if (SDL_GetSensorTypeForID(ids[i]) == type) {
+            found = ids[i];
+            break;
+        }
+    }
+    SDL_free(ids);
+    return found;
+}
+
+extern "C" void su_SetGyroActive(int active) {
+    su_gyroActive = active;
+    if (active) {
+        if (!su_accelSensor) {
+            SDL_SensorID id = su_FindSensor(SDL_SENSOR_ACCEL);
+            if (id) {
+                su_accelSensor = SDL_OpenSensor(id);
+                if (!su_accelSensor) con << "Warning: failed to open accelerometer\n";
+            }
+        }
+        if (!su_gyroSensor) {
+            SDL_SensorID id = su_FindSensor(SDL_SENSOR_GYRO);
+            if (id) {
+                su_gyroSensor = SDL_OpenSensor(id);
+                if (!su_gyroSensor) con << "Warning: failed to open gyroscope\n";
+            }
+        }
+        su_refCaptured = false;
+        su_steerAngle  = 0.0f;
+        su_accelAngle  = 0.0f;
+        su_lastGyroTs  = 0;
+    } else {
+        if (su_accelSensor) { SDL_CloseSensor(su_accelSensor); su_accelSensor = nullptr; }
+        if (su_gyroSensor)  { SDL_CloseSensor(su_gyroSensor);  su_gyroSensor  = nullptr; }
+        su_refCaptured = false;
+        su_steerAngle  = 0.0f;
+        aa_SetGyroCameraOffset(0.0f, 0.0f);
+    }
+}
+
+bool su_IsGyroActive()  { return su_gyroActive != 0; }
+
+// Cached — avoids SDL_GetSensors() + SDL_free() per frame.
+static int su_hasGyroSensorCached = -1;
+bool su_HasGyroSensor() {
+    if (su_hasGyroSensorCached < 0)
+        su_hasGyroSensorCached = (su_FindSensor(SDL_SENSOR_ACCEL) != 0 ||
+                                   su_FindSensor(SDL_SENSOR_GYRO)  != 0) ? 1 : 0;
+    return su_hasGyroSensorCached != 0;
 }
 
 bool su_mouseGrab = false;
@@ -406,6 +483,7 @@ static uTouchInput& su_GetTouchInput(int playerN = 1)
 static int su_FindViewportForTouch(float x, float y)
 {
     rViewportConfiguration* vc = rViewportConfiguration::CurrentViewportConfiguration();
+    if (!vc) return -1;
     float yFlipped = 1.0f - y; // convert SDL top-origin to OpenGL bottom-origin
     for (int i = 0; i < vc->num_viewports; i++) {
         rViewport* vp = vc->Port(i);
@@ -432,13 +510,16 @@ static void su_RotateTouchCoord(float& x, float& y, int rotDeg)
 }
 
 // Rotate delta vector (dx, dy) to undo the viewport's visual rotation.
+// SDL screen coordinates use y+ downward, so the correct rotation matrix
+// negates the sin terms relative to standard y-up math convention.
+// At 0°/180° sin=0 so the sign has no effect; ±90° is the critical case.
 static void su_RotateTouchDelta(float& dx, float& dy, int rotDeg)
 {
     if (rotDeg == 0) return;
     float rad = (float)rotDeg * (float)M_PI / 180.0f;
     float c = cosf(rad), s = sinf(rad);
-    float nx = c * dx - s * dy;
-    float ny = s * dx + c * dy;
+    float nx =  c * dx + s * dy; // negated sin: y-down screen convention
+    float ny = -s * dx + c * dy;
     dx = nx;
     dy = ny;
 }
@@ -1083,15 +1164,19 @@ static void su_TransformEvent( SDL_Event & e, std::vector< uTransformEventInfo >
         // event from mouse motion when the LEFT button is held. SDL3 maps
         // touches → mouse on mobile via SDL_HINT_MOUSE_TOUCH_EVENTS; this
         // is the reverse for desktop. Uses a fixed synthetic finger ID.
-        if (su_enableTouch >= 1)
+        // Skip synthesis when mouse motion was synthesized from a touch by SDL
+        // (which == SDL_TOUCH_MOUSEID): real FINGER_MOTION events handle it.
+        if (su_enableTouch >= 1 && e.motion.which != SDL_TOUCH_MOUSEID)
         {
             static bool s_mouseHeld = false;
             // Track LMB held state across motion events.
             s_mouseHeld = (SDL_GetMouseState(nullptr, nullptr) & SDL_BUTTON_MASK(SDL_BUTTON_LEFT)) != 0;
             if (s_mouseHeld) {
                 const long kMouseFingerId = -42;
-                const float fx = e.motion.x / static_cast<float>(sr_screenWidth);
-                const float fy = e.motion.y / static_cast<float>(sr_screenHeight);
+                int winW = sr_screenWidth, winH = sr_screenHeight;
+                if (sr_screen) SDL_GetWindowSize(sr_screen, &winW, &winH);
+                const float fx = e.motion.x / static_cast<float>(winW);
+                const float fy = e.motion.y / static_cast<float>(winH);
                 if (cCockpit_ProcessTouch(fx, fy, SDL_EVENT_FINGER_MOTION, kMouseFingerId))
                     break; // consumed by a cockpit touch button drag
             }
@@ -1165,13 +1250,22 @@ static void su_TransformEvent( SDL_Event & e, std::vector< uTransformEventInfo >
         // Desktop testing: synthesise a finger DOWN/UP from the primary
         // mouse button so overlay buttons can be tapped without a touch
         // device. Right/middle clicks fall through to the original handler.
-        if (su_enableTouch >= 1 && e.button.button == SDL_BUTTON_LEFT)
+        // Skip synthesis when the mouse event was itself synthesized from a
+        // touch by SDL (which == SDL_TOUCH_MOUSEID): on iOS, real FINGER_DOWN
+        // events arrive for the same touch and would conflict with the -42 id.
+        if (su_enableTouch >= 1 && e.button.button == SDL_BUTTON_LEFT
+            && e.button.which != SDL_TOUCH_MOUSEID)
         {
             const long kMouseFingerId = -42;
             const uint32_t ft = (e.type == SDL_EVENT_MOUSE_BUTTON_DOWN)
                               ? SDL_EVENT_FINGER_DOWN : SDL_EVENT_FINGER_UP;
-            const float fx = e.button.x / static_cast<float>(sr_screenWidth);
-            const float fy = e.button.y / static_cast<float>(sr_screenHeight);
+            // SDL3 mouse coords are in logical (window) pixels; sr_screenWidth
+            // is the swapchain physical extent — 2× on Retina. Use the window's
+            // logical size so the fraction matches how touch events are reported.
+            int winW = sr_screenWidth, winH = sr_screenHeight;
+            if (sr_screen) SDL_GetWindowSize(sr_screen, &winW, &winH);
+            const float fx = e.button.x / static_cast<float>(winW);
+            const float fy = e.button.y / static_cast<float>(winH);
             if (cCockpit_ProcessTouch(fx, fy, ft, kMouseFingerId))
                 break; // consumed by a cockpit touch button
         }
@@ -1198,19 +1292,26 @@ static void su_TransformEvent( SDL_Event & e, std::vector< uTransformEventInfo >
         {
             break; // consumed by a cockpit button
         }
-        if (su_enableTouch==1)
+        if (su_enableTouch==1 || su_AnyPlayerHasTouchMode(1))
         {
             static SDL_FingerID finger = 0;
             static int finger_player = 1; // 1-based player for tracked brake finger
+            // Reset brake tracking on viewport config change.
+            static int lastConf1 = -1;
+            { int c = rViewportConfiguration::CurrentConfNum();
+              if (c != lastConf1) { lastConf1 = c; finger = 0; finger_player = 1; } }
 
             if (e.type == SDL_EVENT_FINGER_DOWN) {
                 float tx = e.tfinger.x;
                 float ty = e.tfinger.y;
                 int playerN = 1;
+                int effectiveMode = su_enableTouch;
 #if defined(__ANDROID__) || (defined(__APPLE__) && TARGET_OS_IOS)
                 int vpIdx = su_FindViewportForTouch(tx, ty);
                 if (vpIdx >= 0) {
-                    playerN = sr_viewportBelongsToPlayer[vpIdx] + 1; // 0-based → 1-based
+                    int pid = sr_viewportBelongsToPlayer[vpIdx];
+                    playerN = pid + 1; // 0-based → 1-based
+                    effectiveMode = su_GetEnableTouchForPlayer(pid);
                     // Get viewport-local x (0..1) for zone detection
                     rViewport* vp = rViewportConfiguration::CurrentViewportConfiguration()->Port(vpIdx);
                     tCoord pos = vp->GetPosition(); tCoord dim = vp->GetDimensions();
@@ -1221,12 +1322,14 @@ static void su_TransformEvent( SDL_Event & e, std::vector< uTransformEventInfo >
                     tx = lx; // use rotated local x for zone test below
                 }
 #endif
-                if (tx<0.33)      info.push_back( uTransformEventInfo( su_GetTouchInput(playerN).turnLeft, 1 ) );
-                else if (tx>0.67) info.push_back( uTransformEventInfo( su_GetTouchInput(playerN).turnRight, 1 ) );
-                else if (!finger) {
-                    finger = e.tfinger.fingerID;
-                    finger_player = playerN;
-                    info.push_back( uTransformEventInfo( su_GetTouchInput(playerN).brake, 1 ) );
+                if (effectiveMode == 1) {
+                    if (tx<0.33)      info.push_back( uTransformEventInfo( su_GetTouchInput(playerN).turnLeft, 1 ) );
+                    else if (tx>0.67) info.push_back( uTransformEventInfo( su_GetTouchInput(playerN).turnRight, 1 ) );
+                    else if (!finger) {
+                        finger = e.tfinger.fingerID;
+                        finger_player = playerN;
+                        info.push_back( uTransformEventInfo( su_GetTouchInput(playerN).brake, 1 ) );
+                    }
                 }
             } else if (e.type == SDL_EVENT_FINGER_UP) {
                 if (finger == e.tfinger.fingerID) {
@@ -1235,7 +1338,7 @@ static void su_TransformEvent( SDL_Event & e, std::vector< uTransformEventInfo >
                 }
             }
         }
-        else if (su_enableTouch==2)
+        if (su_enableTouch==2 || su_AnyPlayerHasTouchMode(2))
         {
             // Per-viewport state (one slot per viewport, up to MAX_VIEWPORTS)
             struct VpState {
@@ -1248,6 +1351,13 @@ static void su_TransformEvent( SDL_Event & e, std::vector< uTransformEventInfo >
                 int lockedVpIdx = -1; // viewport index locked at touch-down
             };
             static VpState vpStates[MAX_VIEWPORTS];
+            // Reset stale slots when viewport config changes.
+            static int lastConfNum = -1;
+            int curConfNum = rViewportConfiguration::CurrentConfNum();
+            if (curConfNum != lastConfNum) {
+                lastConfNum = curConfNum;
+                for (int j = 0; j < MAX_VIEWPORTS; j++) vpStates[j] = VpState{};
+            }
 
             // Find which viewport slot to use
             auto findSlot = [&](SDL_FingerID fid, int* outVp) -> VpState* {
@@ -1263,20 +1373,27 @@ static void su_TransformEvent( SDL_Event & e, std::vector< uTransformEventInfo >
 
             if (e.type == SDL_EVENT_FINGER_DOWN) {
                 if (!findSlot(e.tfinger.fingerID, nullptr)) {
+                    // Resolve which player this touch belongs to, and check
+                    // that their effective mode is 2 before allocating a slot.
+                    int gesturePlayerN = 1;
+                    int gesturePid = 0;
+                    int gestureVpIdx = -1;
+#if defined(__ANDROID__) || (defined(__APPLE__) && TARGET_OS_IOS)
+                    gestureVpIdx = su_FindViewportForTouch(e.tfinger.x, e.tfinger.y);
+                    if (gestureVpIdx >= 0) {
+                        gesturePid = sr_viewportBelongsToPlayer[gestureVpIdx];
+                        gesturePlayerN = gesturePid + 1;
+                    }
+#endif
+                    if (su_GetEnableTouchForPlayer(gesturePid) != 2) break; // player uses a different mode
+
                     VpState* s = freeSlot();
                     if (!s) break; // all slots occupied, ignore this finger
                     s->finger = e.tfinger.fingerID;
                     s->count = 0; s->dx = 0; s->dy = 0;
                     s->last_time = e.tfinger.timestamp;
-                    s->playerN = 1;
-                    s->lockedVpIdx = -1;
-#if defined(__ANDROID__) || (defined(__APPLE__) && TARGET_OS_IOS)
-                    int vpIdx = su_FindViewportForTouch(e.tfinger.x, e.tfinger.y);
-                    if (vpIdx >= 0) {
-                        s->playerN = sr_viewportBelongsToPlayer[vpIdx] + 1;
-                        s->lockedVpIdx = vpIdx;
-                    }
-#endif
+                    s->playerN = gesturePlayerN;
+                    s->lockedVpIdx = gestureVpIdx;
                     s->previous_dir = -1;
                 }
             } else if (e.type == SDL_EVENT_FINGER_UP) {
@@ -1319,7 +1436,7 @@ static void su_TransformEvent( SDL_Event & e, std::vector< uTransformEventInfo >
                                     if ((diff_dir==axes/2&&side==1)||(diff_dir==-axes/2&&side==0)) diff_dir=-diff_dir;
                                     uInput* input = diff_dir<0 ? su_GetTouchInput(s->playerN).turnLeft
                                                                : su_GetTouchInput(s->playerN).turnRight;
-                                    for (int i = abs(diff_dir); i == 1; --i)
+                                    for (int i = abs(diff_dir); i > 0; --i)
                                         info.push_back( uTransformEventInfo( input, 1 ) );
                                 }
                                 s->previous_dir = dir;
@@ -1331,6 +1448,57 @@ static void su_TransformEvent( SDL_Event & e, std::vector< uTransformEventInfo >
             }
         }
         // Mode 3 with no button hit falls through here (no zone/swipe handling)
+        break;
+    // SDL3 sensor: complementary filter (gyro + accel) → steering offset.
+    case SDL_EVENT_SENSOR_UPDATE:
+        if (!su_gyroActive) break;
+
+        // ── Accelerometer: absolute angle from gravity (noisy, drift-free) ──
+        if (su_accelSensor && e.sensor.which == SDL_GetSensorID(su_accelSensor))
+        {
+            // In landscape-right, device held upright: gravity ≈ (-g, 0, 0).
+            // Steering = rotation around Z-axis → gravity shifts onto Y.
+            // Steering angle = atan2(ay, -ax).
+            float ax = e.sensor.data[0];
+            float ay = e.sensor.data[1];
+            float angle = atan2f(ay, -ax);
+            if (!su_refCaptured) {
+                su_refAngle    = angle;
+                su_refCaptured = true;
+                su_steerAngle  = 0.0f;
+            }
+            su_accelAngle = angle - su_refAngle;
+            // Wrap to [-π, π].
+            if (su_accelAngle >  3.14159f) su_accelAngle -= 6.28318f;
+            if (su_accelAngle < -3.14159f) su_accelAngle += 6.28318f;
+
+            // If no gyro sensor available, fall back to filtered accel only.
+            if (!su_gyroSensor) {
+                su_steerAngle += (su_accelAngle - su_steerAngle) * 0.15f;
+                aa_SetGyroCameraOffset(su_steerAngle * 1.5f, 0.0f);
+            }
+        }
+
+        // ── Gyroscope: smooth angular velocity → integrate + correct ──
+        if (su_gyroSensor && e.sensor.which == SDL_GetSensorID(su_gyroSensor))
+        {
+            Uint64 now = e.sensor.sensor_timestamp;
+            if (su_lastGyroTs != 0 && now > su_lastGyroTs) {
+                float dt = static_cast<float>(now - su_lastGyroTs) * 1e-9f;
+                if (dt > 0.0f && dt < 0.25f) {
+                    // data[2] = Z-axis angular velocity (steering = rotation
+                    // around the axis pointing out of the screen).
+                    float gyroRate = -e.sensor.data[2];
+                    // Complementary filter: 98% gyro (smooth) + 2% accel (absolute).
+                    constexpr float kAlpha = 0.98f;
+                    su_steerAngle = kAlpha * (su_steerAngle + gyroRate * dt)
+                                  + (1.0f - kAlpha) * su_accelAngle;
+                    // Scale: ±90° tilt → ±135° camera.
+                    aa_SetGyroCameraOffset(su_steerAngle * 1.5f, 0.0f);
+                }
+            }
+            su_lastGyroTs = now;
+        }
         break;
     // SDL3: SDL_KEYDOWN → SDL_EVENT_KEY_DOWN, keysym → direct key access
     case SDL_EVENT_KEY_DOWN:

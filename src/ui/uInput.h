@@ -358,6 +358,11 @@ void su_EnableTouchDefault();
 // returns current value of ENABLE_TOUCH setting
 int su_GetEnableTouch();
 
+// Per-player touch mode for split-screen. playerIdx is 0-based.
+// Returns the player's mode if explicitly set, else the global ENABLE_TOUCH value.
+int  su_GetEnableTouchForPlayer(int playerIdx);
+void su_SetEnableTouchForPlayer(int playerIdx, int mode);
+
 // *****************************************************
 //  Menuitem for input selection (graphical client only)
 // *****************************************************

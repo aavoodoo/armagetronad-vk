@@ -155,6 +155,8 @@ public:
     WithCoordinates(); //!< Default constructor
     bool Process(tXmlParser::node cur); //!< This function will parse Size and Position nodes
     void SetFactor(float factor); //!< multiply all y- coordinates by a value
+    tCoord GetNDCPosition() const { return m_position; }
+    tCoord GetNDCSize()     const { return m_size; }
 };
 
 //! This class offers functions to parse DataSet and friends. It doesn't parse anything by itself, ProcessDataSet() has to be called by an inherited class

@@ -21,9 +21,11 @@ void sr_GetNativeScreenPixels(int* outWidth, int* outHeight)
 // Track the actual keyboard height via UIKit notifications.
 // The fraction is updated on every keyboard show/hide event.
 static float s_keyboardHeightFraction = 0.0f;
+static void sr_RegisterKeyboardObservers(void);  // forward declaration
 
 float sr_iOSKeyboardHeightFraction(void)
 {
+    sr_RegisterKeyboardObservers();  // idempotent; registers once on first call
     return s_keyboardHeightFraction;
 }
 
@@ -46,12 +48,15 @@ static void sr_RegisterKeyboardObservers(void)
     registered = true;
 
     NSNotificationCenter *nc = [NSNotificationCenter defaultCenter];
-    [nc addObserverForName:UIKeyboardDidShowNotification object:nil queue:nil
+    // Use "Will" variants so the fraction is set at the START of the
+    // keyboard animation — the menu avoidance spring then runs in parallel
+    // with the keyboard slide-in, giving a natural synchronized feel.
+    [nc addObserverForName:UIKeyboardWillShowNotification object:nil queue:nil
                 usingBlock:^(NSNotification *note) {
         CGRect frame = [note.userInfo[UIKeyboardFrameEndUserInfoKey] CGRectValue];
         sr_UpdateKeyboardFraction(frame.size.height);
     }];
-    [nc addObserverForName:UIKeyboardDidHideNotification object:nil queue:nil
+    [nc addObserverForName:UIKeyboardWillHideNotification object:nil queue:nil
                 usingBlock:^(NSNotification *note) {
         s_keyboardHeightFraction = 0.0f;
     }];
@@ -97,6 +102,10 @@ void sr_ForceLandscapeOrientation(void)
         }
     }
 }
+
+// CoreMotion gyro code REMOVED — gyro now uses SDL3 sensor API
+// (cross-platform, handles iOS CoreMotion internally via SDL_SENSOR_COREMOTION).
+// See uInput.cpp: SDL_EVENT_SENSOR_UPDATE handler + eCamera::ApplyGyroLook().
 
 // Recursively remove a directory using NSFileManager (sandbox-safe).
 extern "C" void sr_iOSRemoveDirectoryRecursive(const char* path)

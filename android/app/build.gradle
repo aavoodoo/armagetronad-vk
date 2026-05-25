@@ -2,6 +2,39 @@ plugins {
     id 'com.android.application'
 }
 
+// ---------------------------------------------------------------------------
+// syncAndroidResources
+//   Regenerates resource/included/ (from resource/proto/ + resource/binary/)
+//   and _manifest.txt before every build.  Runs incrementally — Gradle
+//   skips it when no input has changed and both outputs are up-to-date.
+// ---------------------------------------------------------------------------
+def repoRoot = project.rootDir.parentFile   // android/ → repo root
+def scriptFile = file("${repoRoot}/tools/sync_assets.sh")
+def protoDir   = file("${repoRoot}/resource/proto")
+def binaryDir  = file("${repoRoot}/resource/binary")
+def assetsDir  = file("${projectDir}/src/main/assets")
+
+task syncAndroidResources {
+    description 'Regenerate resource/included/ and _manifest.txt from proto/ + binary/'
+    group 'build'
+
+    inputs.file  scriptFile
+    inputs.dir   protoDir
+    // fileTree is empty (no-op) when binary/ doesn't exist — safe to declare
+    inputs.files fileTree(dir: binaryDir)
+    outputs.dir  "${assetsDir}/resource/included"
+    outputs.file "${assetsDir}/_manifest.txt"
+
+    doLast {
+        exec {
+            workingDir repoRoot
+            commandLine 'bash', 'tools/sync_assets.sh', 'android-resources'
+        }
+    }
+}
+
+preBuild.dependsOn syncAndroidResources
+
 // Read local.properties for dependency paths (sdl3.dir, protobuf.dir)
 def localProps = new Properties()
 def localPropsFile = rootProject.file("local.properties")

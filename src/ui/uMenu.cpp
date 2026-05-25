@@ -123,11 +123,16 @@ void uMenu::ReverseItems(){
 
 static REAL text_height_base=.11;
 
-// Effective text height, scaled for touch-friendly menus on small screens
-static REAL sr_MenuTextHeight()
+// Effective text height, scaled for touch-friendly menus on small screens.
+// Pass a per-menu line-spacing factor to bake spacing directly into the result.
+static REAL sr_MenuTextHeight(REAL factor = 1.0f)
 {
-    return text_height_base * sr_TouchUIScale();
+    return text_height_base * sr_TouchUIScale() * factor;
 }
+
+// Exposed for menus that need to compute a relative line-spacing factor.
+// Returns the base line height (factor = 1) so callers can derive their own.
+REAL uMenu_LineHeight() { return sr_MenuTextHeight(); }
 
 // =============================================================================
 // Kinetic-scroll tunables (uMenu opt-in via m_useKineticScroll_).
@@ -164,17 +169,27 @@ static REAL titlefac=1.2;
 int menuentries=0;
 
 REAL uMenu::YPos(int num){
-    return yOffset - sr_MenuTextHeight() * (menuentries-num);
+    return yOffset - sr_MenuTextHeight(lineSpacingFactor_) * (menuentries-num);
 }
 
 // Convert normalized touch Y [0=top, 1=bottom] to the nearest item index.
 // Inverse of YPos(): YPos(i) = yOffset - th*(menuentries-i)
-int uMenu::TouchYToItem(float touchY) const {
+// When clamp=true (default, for drag/scroll), out-of-range is clamped to
+// [0, items.Len()-1]. When clamp=false (for tap selection), returns -1 if
+// the touch does not land within half a line-height of any item center.
+int uMenu::TouchYToItem(float touchY, bool clamp) const {
     float menuY = 1.0f - 2.0f * touchY;   // touch Y+ down → menu Y+ up
-    REAL th = sr_MenuTextHeight();
+    REAL th = sr_MenuTextHeight(lineSpacingFactor_);
+    if (th < 0.001f) return clamp ? 0 : -1;
     int idx = (int)roundf(menuentries - (yOffset - menuY) / th);
-    if (idx < 0) idx = 0;
-    if (idx >= items.Len()) idx = items.Len() - 1;
+    if (idx < 0) { if (clamp) idx = 0; else return -1; }
+    if (idx >= items.Len()) { if (clamp) idx = items.Len() - 1; else return -1; }
+    if (!clamp) {
+        // Verify the touch lands within ±½ line-height of the item center.
+        // Inline YPos(idx) = yOffset - th*(menuentries-idx) to avoid const issue.
+        REAL itemY = yOffset - th * (menuentries - idx);
+        if (fabsf(menuY - itemY) > th * 0.55f) return -1;
+    }
     return idx;
 }
 
@@ -187,7 +202,7 @@ REAL uMenu::KineticScrollMax() const
     // List content height = items × line height. Visible area = menuTop - menuBot.
     // Allow scrolling until just the last item is at the top (or, if the list
     // is shorter than the view, zero scroll).
-    const REAL th       = sr_MenuTextHeight();
+    const REAL th       = sr_MenuTextHeight(lineSpacingFactor_);
     const REAL content  = items.Len() * th;
     const REAL visible  = menuTop - menuBot;
     const REAL overflow = content - visible;
@@ -201,7 +216,7 @@ void uMenu::ResetKineticScroll()
     // enter the menu (it's updated in the main loop), so use items.Len()
     // as the count. clamp() against the scroll bounds so a list that
     // doesn't need scrolling stays at offset 0.
-    const REAL th        = sr_MenuTextHeight();
+    const REAL th        = sr_MenuTextHeight(lineSpacingFactor_);
     const int  n         = items.Len();
     const REAL yCenter   = (menuTop + menuBot) * 0.5f;
     const REAL desired   = (yCenter + th * (n - selected)) - menuTop;
@@ -216,6 +231,7 @@ void uMenu::ResetKineticScroll()
     m_lastTickSec_      = tSysTimeFloat();
     m_userScrolling_    = false;
     m_lastSeenSelected_ = selected;
+    m_lastMenuBot_      = menuBot;
 }
 
 void uMenu::ScrollByDrag(REAL menuDy)
@@ -284,27 +300,34 @@ void uMenu::TickKineticScroll()
         m_scrollVy_      = 0;
     }
 
-    // Keyboard-nav follow: if `selected` changed since last tick AND the
-    // user isn't actively scrolling, scroll just enough to bring selected
-    // into the visible window (with a small border). One-shot adjust —
-    // not an animation; arrow-key nav should feel snappy.
-    if (!m_userScrolling_ && selected != m_lastSeenSelected_) {
-        m_lastSeenSelected_ = selected;
-        const REAL th     = sr_MenuTextHeight();
+    // Follow logic: scroll to keep the selected item visible when:
+    //   1. Selection changed (hardware key navigation)
+    //   2. On-screen keyboard appeared and pushed menuBot up this frame
+    // Do NOT snap back simply because the user kinetically scrolled the
+    // selected item out of view — that would fight the user's gesture.
+    if (!m_userScrolling_) {
+        const REAL th     = sr_MenuTextHeight(lineSpacingFactor_);
         const REAL border = 0.1f;
-        // YPos(selected) computed for the upcoming render's yOffset
-        // (= menuTop + m_scrollOffset_). If out of [menuBot+border,
-        // menuTop-border], pull m_scrollOffset_ to put it inside.
-        const REAL ysel = (menuTop + m_scrollOffset_) - th * (items.Len() - selected);
-        REAL adjust = 0;
-        if      (ysel < menuBot + border) adjust = (menuBot + border) - ysel;
-        else if (ysel > menuTop - border) adjust = (menuTop - border) - ysel;
-        if (adjust != 0) {
-            m_scrollOffset_ += adjust;
-            if (m_scrollOffset_ < minOffset) m_scrollOffset_ = minOffset;
-            if (m_scrollOffset_ > maxOffset) m_scrollOffset_ = maxOffset;
+        const REAL ysel   = (menuTop + m_scrollOffset_) - th * (items.Len() - selected);
+
+        const bool selectionChanged  = (selected != m_lastSeenSelected_);
+        // Keyboard appeared: menuBot rose significantly this frame
+        const bool keyboardRaised    = (menuBot > m_lastMenuBot_ + 0.05f);
+        const bool keyboardCovering  = keyboardRaised && (ysel < menuBot + border);
+
+        if (selectionChanged || keyboardCovering) {
+            m_lastSeenSelected_ = selected;
+            REAL adjust = 0;
+            if      (ysel < menuBot + border) adjust = (menuBot + border) - ysel;
+            else if (ysel > menuTop - border) adjust = (menuTop - border) - ysel;
+            if (adjust != 0) {
+                m_scrollOffset_ += adjust;
+                if (m_scrollOffset_ < minOffset) m_scrollOffset_ = minOffset;
+                if (m_scrollOffset_ > maxOffset) m_scrollOffset_ = maxOffset;
+            }
         }
     }
+    m_lastMenuBot_ = menuBot;
 }
 
 #ifndef DEDICATED
@@ -524,6 +547,20 @@ void uMenu::OnEnter(){
 
         menuentries=items.Len();
 
+        // Keyboard avoidance: raise menuBot to the keyboard's top edge so
+        // KineticScrollMax() and the follow logic both see the reduced area.
+        // The Vulkan viewport is NOT squashed for menus (Viewport() overrides
+        // the BeginFrame squash), so we handle avoidance here directly.
+#ifndef DEDICATED
+        {
+            REAL kbFrac = sr_ScreenKeyboardHeightFraction();
+            if (kbFrac > 0.01f) {
+                REAL kbTop = -1.0f + 2.0f * kbFrac + 0.05f;
+                if (kbTop > menuBot) menuBot = kbTop;
+            }
+        }
+#endif
+
         // Per-frame kinetic-scroll tick: advances velocity decay + spring
         // back. In kinetic mode, m_scrollOffset_ is the SOLE source of
         // truth for the view position — auto-keep-selected is fully
@@ -565,15 +602,40 @@ void uMenu::OnEnter(){
         rRenderFrame([&]() {
             sr_ResetRenderState(true);
             rViewport::s_viewportFullscreen.Select();
-            items[selected]->RenderBackground();
 
-            if (selected >= items.Len()) selected = items.Len()-1;
             if (items.Len() <= 0)
                 return;
+            if (selected < 0) selected = 0;
+            if (selected >= items.Len()) selected = items.Len()-1;
+
+            items[selected]->RenderBackground();
 
             if (sr_glOut && !exitFlag && !quickexit){
+                // Determine scroll indicators before rendering items so we can
+                // reserve space at the edges and avoid any overlap.
+                const REAL kmax = KineticScrollMax();
+                constexpr REAL kScrollEps = 0.01f;
+                const bool moreAbove = m_scrollOffset_ > kScrollEps;
+                const bool moreBelow = kmax > kScrollEps &&
+                                       m_scrollOffset_ < kmax - kScrollEps;
+                // Arrows sit OUTSIDE the menu content area:
+                //   bottom arrow center at menuBot - arrowSize  → stem touches menuBot
+                //   top    arrow center at menuTop + arrowSize  → stem touches menuTop
+                // Reserve 2*arrowSize at each active edge so no item renders
+                // where the arrow body/stem would appear.
+                constexpr float arrowSize = 0.020f;
+                const REAL itemBot = moreBelow ? menuBot + 2.0f * arrowSize : menuBot;
+                const REAL itemTop = moreAbove ? menuTop - 2.0f * arrowSize : menuTop;
+
                 REAL blinkAlpha = 0.7f + 0.3f * sinf(blinkTime_ * 6.0f);
-                items[selected]->Render(center,YPos(selected),blinkAlpha,true);
+                {
+                    REAL selY = YPos(selected);
+                    const REAL b = .1;
+                    if (selY < menuBot + b) blinkAlpha *= (selY - menuBot) / b;
+                    if (selY > menuTop - b) blinkAlpha *= (menuTop - selY) / b;
+                    if (selY > menuBot && selY < menuTop)
+                        items[selected]->Render(center, selY, blinkAlpha, true);
+                }
 
                 for (int i=items.Len()-1;i>=0;i--)
                     if (i!=selected){
@@ -584,7 +646,7 @@ void uMenu::OnEnter(){
                             alpha=(y-menuBot)/b;
                         if (y>menuTop-b)
                             alpha=(menuTop-y)/b;
-                        if (y>menuBot && y<menuTop)
+                        if (y>itemBot && y<itemTop)
                         {
                             rTextField::SetDefaultColor( tColor(1,1,1,1) );
                             rTextField::SetBlendColor( tColor(1,1,1,1) );
@@ -600,12 +662,15 @@ void uMenu::OnEnter(){
                               ,sr_MenuTextHeight()*titlefac,
                               title,sr_fontMenuTitle,0);
 
-                RenderDisableState(rCapability::Texture2D);
-                Color(1,.2,.2,.5);
-                if (YPos(0)<menuBot+smallborder && (int(tSysTimeFloat()))%2)
-                    arrow(.9,menuBot+.1,-1,.05);
-                if (YPos(menuentries-1)>menuTop && (int(tSysTimeFloat())+1)%2)
-                    arrow(.9,menuTop,1,.05);
+                // Scroll overflow indicators — solid arrows outside the menu.
+                if (moreAbove || moreBelow) {
+                    RenderDisableState(rCapability::Texture2D);
+                    Color(1.0f, 1.0f, 1.0f, 1.0f);
+                    if (moreBelow)
+                        arrow(center, menuBot - arrowSize, -1, arrowSize);
+                    if (moreAbove)
+                        arrow(center, menuTop + arrowSize,  1, arrowSize);
+                }
 
                 REAL helpAlpha = tSysTimeFloat()-lastkey-timeout;
                 if( helpAlpha > 1 )
@@ -764,15 +829,22 @@ void uMenu::HandleEvent( SDL_Event event )
             if (su_GetEnableTouch() > 0 && event.tfinger.fingerID == touchFingerId_) {
                 float dy = event.tfinger.y - touchLastY_;
 
-                if (m_useKineticScroll_) {
-                    // Kinetic mode: drag offsets the list, velocity tracked
-                    // via EMA. Tap-vs-drag uses CUMULATIVE motion against the
-                    // start position, so micro-jitter under the threshold
-                    // still resolves to a tap.
-                    const REAL menuDy   = -2.0f * dy;        // SDL Y down → menu Y down
+                if (m_useKineticScroll_ && touchStartedOnSelected_) {
+                    // Value-change mode (kinetic): touch started on the
+                    // already-selected item → slide changes value, not scroll.
+                    if (fabsf(dy) > 0.04f && selected >= 0 && selected < items.Len()) {
+                        touchMoved_ = true;
+                        items[selected]->LeftRight(dy > 0 ? 1 : -1);
+                        touchLastY_ = event.tfinger.y;
+                    }
+                }
+                else if (m_useKineticScroll_) {
+                    // Kinetic scroll mode: drag offsets the list, velocity
+                    // tracked via EMA. Tap-vs-drag uses CUMULATIVE motion.
+                    const REAL menuDy   = -2.0f * dy;
                     const double now    = tSysTimeFloat();
                     REAL dt             = static_cast<REAL>(now - m_lastTickSec_);
-                    if (dt <= 0) dt     = 1.0f / 120.0f;     // guard against same-frame events
+                    if (dt <= 0) dt     = 1.0f / 120.0f;
                     ScrollByDrag(menuDy);
                     const REAL instantVy = menuDy / dt;
                     m_scrollVy_ = (1.0f - kKineticVelocityBlend) * m_scrollVy_
@@ -800,11 +872,10 @@ void uMenu::HandleEvent( SDL_Event event )
                     }
                 }
                 touchLastX_ = event.tfinger.x;
-                if (touchStartedOnSelected_ && !m_useKineticScroll_) {
-                    // touchLastY_ already updated above when a step fired
-                } else {
+                if (!touchStartedOnSelected_)
                     touchLastY_ = event.tfinger.y;
-                }
+                // When touchStartedOnSelected_, touchLastY_ is updated
+                // inside the value-change branch (step anchor reset).
             }
             break;
 
@@ -815,7 +886,9 @@ void uMenu::HandleEvent( SDL_Event event )
                         // Tap: select the item under the release point and
                         // Enter it. We use the touch position at RELEASE so
                         // a slow drift under threshold still picks correctly.
-                        int upIdx = TouchYToItem(event.tfinger.y);
+                        // clamp=false: touching empty space below the last item
+                        // returns -1 and does NOT trigger that item's action.
+                        int upIdx = TouchYToItem(event.tfinger.y, /*clamp=*/false);
                         if (upIdx >= 0 && upIdx < items.Len()) {
                             SetSelected(upIdx);
                             // The tap came from a visible item, so the tick's
@@ -827,17 +900,27 @@ void uMenu::HandleEvent( SDL_Event event )
                             catch (tException const& e) { tConsole::Message(e.GetName(), e.GetDescription(), 20); }
                             su_inMenu = true;
                             s_globalRepeat = false;
+                        } else if (sr_ScreenKeyboardHeightFraction() > 0.01f) {
+                            // Tap in empty space while the on-screen keyboard is
+                            // visible → dismiss the keyboard without changing the
+                            // current text or selection. The user re-taps the item
+                            // to bring it back.
+                            SDL_StopTextInput(sr_screen);
                         }
                         m_scrollVy_      = 0;
                         m_userScrolling_ = false;
+                    } else if (touchStartedOnSelected_) {
+                        // Value-change swipe: no inertia, release scroll state.
+                        m_scrollVy_      = 0;
+                        m_userScrolling_ = false;
                     }
-                    // Drag: leave m_scrollVy_ as the inertia seed and let
-                    // TickKineticScroll handle the decay. m_userScrolling_
-                    // stays true until the tick decides motion has died down.
+                    // else: kinetic drag — leave m_scrollVy_ and m_userScrolling_
+                    // for inertia; tick handles decay.
                 }
                 else if (!touchMoved_ && selected >= 0 && selected < items.Len()) {
-                    // Tap with no slide: Enter() if on the same item
-                    int upIdx = TouchYToItem(event.tfinger.y);
+                    // Tap with no slide: Enter() if on the same item.
+                    // clamp=false: no action if touch is in empty space below the list.
+                    int upIdx = TouchYToItem(event.tfinger.y, /*clamp=*/false);
                     if (upIdx == selected) {
                         su_inMenu = false;
                         try { items[selected]->Enter(); }

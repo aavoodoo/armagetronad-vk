@@ -17,10 +17,10 @@
 // not when SDL_StartTextInput fires for generic menu string editing.
 bool sr_androidKeyboardExplicit = false;
 
-// su_SetEnableTouch is defined in uInput.cpp with extern "C" linkage
+// su_SetEnableTouch / su_SetGyroActive are defined in uInput.cpp with extern "C" linkage
 extern "C" void su_SetEnableTouch(int mode);
+extern "C" void su_SetGyroActive(int active);
 // Camera actions defined in eCamera.cpp with extern "C" linkage
-extern "C" void aa_SetGyroCameraInput(float yaw, float pitch);
 extern "C" void aa_SetGlanceForward(bool active);
 extern "C" void aa_SwitchCameraView(void);
 extern "C" void aa_SetCameraFrozen(bool frozen);
@@ -78,14 +78,13 @@ Java_org_armagetronad_game_ArmagetronActivity_nativeSetTouchMode(
     su_SetEnableTouch(static_cast<int>(mode));
 }
 
-// ---------------------------------------------------------------------------
-// Gyro camera: set yaw and pitch rates (rad/s) from the gravity sensor
-// ---------------------------------------------------------------------------
+// Gyro toggle: activates/deactivates SDL3 sensor-based gyro camera look.
+// Replaces the old Java gravity listener + nativeSetGyroCameraInput bridge.
 extern "C" JNIEXPORT void JNICALL
-Java_org_armagetronad_game_ArmagetronActivity_nativeSetGyroCameraInput(
-        JNIEnv* /*env*/, jclass /*cls*/, jfloat yaw, jfloat pitch)
+Java_org_armagetronad_game_ArmagetronActivity_nativeSetGyroActive(
+        JNIEnv* /*env*/, jclass /*cls*/, jboolean active)
 {
-    aa_SetGyroCameraInput(static_cast<float>(yaw), static_cast<float>(pitch));
+    su_SetGyroActive(active ? 1 : 0);
 }
 
 // ---------------------------------------------------------------------------

@@ -146,6 +146,14 @@ static const REAL rimDistanceHeight = 0.1f;
 REAL se_cameraRise=0;
 REAL se_cameraZ=10;
 
+// Gyroscope camera offsets — absolute yaw/pitch in radians from device tilt.
+// Applied in Render() with orbital compensation so the cycle stays centered.
+// cos/sin precomputed in aa_SetGyroCameraOffset to avoid per-frame trig.
+static float s_gyroCamYawOffset   = 0.0f;
+static float s_gyroCamPitchOffset = 0.0f;
+static float s_gyroCosYaw = 1.0f;
+static float s_gyroSinYaw = 0.0f;
+
 // List<eCamera> se_cameras;
 
 uActionCamera eCamera::se_moveBack("MOVE_BACK",
@@ -1769,18 +1777,32 @@ void eCamera::Render(){
         vp->Perspective(fov,zNear,zFar,0.);
 
         ModelMatrix();
+        // Apply absolute gyro offset (device tilt → camera look-around).
+        // Orbital compensation: camera orbits the cycle focal point so the
+        // cycle stays at the same screen position while looking around it.
+        eCoord renderDir = dir;
+        REAL   renderRise = rise;
+        eCoord renderPos  = pos;
+        if (s_gyroCamYawOffset != 0.0f || s_gyroCamPitchOffset != 0.0f) {
+            renderDir = dir.Turn(s_gyroCosYaw, s_gyroSinYaw);
+            eCoord focus = CenterPos();
+            REAL dist = (focus - pos).Norm();
+            if (dist > 0.1f)
+                renderPos = focus - renderDir * dist;
+            renderRise += s_gyroCamPitchOffset;
+        }
         LookAt(0,
                   0,
                   0,
 
-                  dir.x,
-                  dir.y,
-                  rise,
+                  renderDir.x,
+                  renderDir.y,
+                  renderRise,
 
                   top.x,top.y,
                   1);
 
-        TranslateMatrix(-pos.x,-pos.y,-z);
+        TranslateMatrix(-renderPos.x,-renderPos.y,-z);
 
         // Pass camera world position to the renderer for parallax shader effects
         sr_SetCameraWorldPos(pos.x, pos.y, z);
@@ -1868,10 +1890,6 @@ void eCamera::SwitchCenter(int d){
     }
 }
 
-// Gyroscope angular rates (radians/second) injected by the touch overlay.
-// Applied in eCamera::Timestep() when non-zero.
-static float s_gyroYaw   = 0.0f;
-static float s_gyroPitch = 0.0f;
 static bool  s_cameraFrozen = false;
 
 void eCamera::Timestep(REAL ts){
@@ -1993,16 +2011,7 @@ void eCamera::Timestep(REAL ts){
         centerDirLast = Center()->Direction();
     }
 
-    // Apply gyro camera input (mobile tilt control).
-    // Directly rotate the camera direction for yaw and adjust rise for pitch.
-    // This gives immediate look-around feel (like analog stick), not the indirect
-    // height/distance effect that 'turning' provides.
-    if (s_gyroYaw != 0.0f || s_gyroPitch != 0.0f)
-    {
-        REAL gyroYawAngle = s_gyroYaw * ts * 2.0f;
-        dir = dir.Turn(cosf(gyroYawAngle), sinf(gyroYawAngle));
-        rise += s_gyroPitch * ts;
-    }
+    // Gyro look: absolute offset applied in Render() — no per-frame velocity here.
 
     for(int i = hitCacheSize-1; i>=0; --i)
     {
@@ -2786,12 +2795,15 @@ int GetPlayerWindingNumber(int player) {
 // iOS/Android touch overlay C bridge
 // ============================================================
 
-// s_gyroYaw/s_gyroPitch/s_cameraFrozen forward-declared before eCamera::Timestep
+// s_cameraFrozen/s_gyroCamYawOffset/s_gyroCamPitchOffset
+// declared before eCamera::Timestep
 
-extern "C" void aa_SetGyroCameraInput(float yaw, float pitch)
+extern "C" void aa_SetGyroCameraOffset(float yaw, float pitch)
 {
-    s_gyroYaw   = yaw;
-    s_gyroPitch = pitch;
+    s_gyroCamYawOffset   = yaw;
+    s_gyroCamPitchOffset = pitch;
+    s_gyroCosYaw = cosf(yaw);
+    s_gyroSinYaw = sinf(yaw);
 }
 
 extern "C" void aa_SetCameraFrozen(bool frozen)

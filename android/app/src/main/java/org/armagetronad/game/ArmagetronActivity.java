@@ -13,8 +13,7 @@ import android.graphics.Paint;
 import android.graphics.RectF;
 import android.graphics.drawable.Icon;
 import android.hardware.Sensor;
-import android.hardware.SensorEvent;
-import android.hardware.SensorEventListener;
+// SensorEvent/SensorEventListener removed — gyro uses SDL3 sensors natively
 import android.hardware.SensorManager;
 import android.os.Build;
 import android.os.Bundle;
@@ -33,7 +32,7 @@ public class ArmagetronActivity extends SDLActivity {
     // Native methods (implemented in rTouchBridgeAndroid.cpp)
     // -----------------------------------------------------------------------
     private static native void    nativeInjectSdlKey(int scancode);
-    private static native void    nativeSetGyroCameraInput(float yaw, float pitch);
+    private static native void    nativeSetGyroActive(boolean active);
     private static native void    nativeSetGlanceForward(boolean active);
     private static native void    nativeSwitchCameraView();
     private static native boolean nativeIsGameRunning();
@@ -58,47 +57,14 @@ public class ArmagetronActivity extends SDLActivity {
     private Handler       mPollHandler      = new Handler();
     private boolean       mNativeLibLoaded  = false;
 
-    // Gyro / sensor state
+    // Gyro state — sensor handling moved to SDL3 (cross-platform).
+    // Java only toggles the native gyro on/off via nativeSetGyroActive().
     private SensorManager        mSensorManager;
-    private Sensor               mGravitySensor;
     private AAGyroButton         mGyroBtn;
-    private float                mGyroBaseX = Float.NaN;
-    private float                mGyroBaseY = Float.NaN;
-    // Android gravity sensor values are in m/s² (max ~9.81); normalize by dividing by 9.81
-    private static final float GYRO_G             = 9.81f;
-    private static final float GYRO_YAW_SENS      = 3.0f / GYRO_G;  // rad/s per m/s²
-    private static final float GYRO_PITCH_SENS    = 1.5f / GYRO_G;
-
-    private final SensorEventListener mGravityListener = new SensorEventListener() {
-        @Override
-        public void onSensorChanged(SensorEvent event) {
-            float gx = event.values[0]; // lateral axis
-            float gy = event.values[1]; // longitudinal axis
-            if (Float.isNaN(mGyroBaseX)) {
-                mGyroBaseX = gx;
-                mGyroBaseY = gy;
-                return;
-            }
-            // Same sign convention as iOS: top-right tilt → look right → negative yaw
-            float yaw   = -(gx - mGyroBaseX) * GYRO_YAW_SENS;
-            float pitch =  (gy - mGyroBaseY) * GYRO_PITCH_SENS;
-            if (mNativeLibLoaded) {
-                try { nativeSetGyroCameraInput(yaw, pitch); } catch (Throwable ignored) {}
-            }
-        }
-        @Override public void onAccuracyChanged(Sensor sensor, int accuracy) {}
-    };
 
     void onGyroToggled(boolean enabled) {
-        if (mSensorManager == null || mGravitySensor == null) return;
-        if (enabled) {
-            mGyroBaseX = Float.NaN;
-            mGyroBaseY = Float.NaN;
-            mSensorManager.registerListener(mGravityListener, mGravitySensor,
-                    SensorManager.SENSOR_DELAY_GAME);
-        } else {
-            mSensorManager.unregisterListener(mGravityListener);
-            if (mNativeLibLoaded) try { nativeSetGyroCameraInput(0, 0); } catch (Throwable ignored) {}
+        if (mNativeLibLoaded) {
+            try { nativeSetGyroActive(enabled); } catch (Throwable ignored) {}
         }
     }
 
@@ -112,8 +78,6 @@ public class ArmagetronActivity extends SDLActivity {
         super.onCreate(savedInstanceState);
         mNativeLibLoaded = true;
         mSensorManager  = (SensorManager) getSystemService(Context.SENSOR_SERVICE);
-        if (mSensorManager != null)
-            mGravitySensor = mSensorManager.getDefaultSensor(Sensor.TYPE_GRAVITY);
         setupTouchOverlay();
         requestHomeScreenShortcut();
     }
@@ -144,7 +108,7 @@ public class ArmagetronActivity extends SDLActivity {
     @Override
     protected void onDestroy() {
         mPollHandler.removeCallbacksAndMessages(null);
-        if (mSensorManager != null) mSensorManager.unregisterListener(mGravityListener);
+        // Gyro cleanup handled by SDL3 sensor subsystem on native side.
         super.onDestroy();
     }
 

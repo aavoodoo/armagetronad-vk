@@ -565,5 +565,22 @@
             </Background>
         </Map>
 
+        <!-- On-screen touch buttons — rendered only when ENABLE_TOUCH=3 -->
+        <TouchButton action="CYCLE_TURN_LEFT" player="1" camera="in">
+            <Position x="-0.78" y="-0.75"/>
+            <Size width="0.18" height="0.18"/>
+            <Caption>&#9664;</Caption>
+        </TouchButton>
+        <TouchButton action="CYCLE_TURN_RIGHT" player="1" camera="in">
+            <Position x="0.78" y="-0.75"/>
+            <Size width="0.18" height="0.18"/>
+            <Caption>&#9654;</Caption>
+        </TouchButton>
+        <TouchButton action="CYCLE_BRAKE" player="1" camera="in">
+            <Position x="0.0" y="-0.88"/>
+            <Size width="0.18" height="0.12"/>
+            <Caption>&#9632;</Caption>
+        </TouchButton>
+
     </Cockpit>
 </Resource>

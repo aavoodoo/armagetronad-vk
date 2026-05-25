@@ -617,9 +617,27 @@ void gMoviepackManager::NotifyRendererReady()
 
     const gMoviepack* activePack = moviepacks_(activeIndex_);
 
+    // Mirror the renderer-dependent steps from ActivateMoviepack() that were
+    // skipped at startup because sr_glOut was 0 when ScanMoviepacks() ran.
+    // This is equivalent to a full moviepack (re-)activation, which is why
+    // switching moviepacks at runtime (which calls ActivateMoviepack() with
+    // sr_glOut=1) works fine but startup didn't — it was missing these steps.
+
+    // Wait for any in-flight GPU work before touching renderer state.
+    extern void sr_vkWaitIdle();
+    sr_vkWaitIdle();
+
+    // Reload all assets so the moviepack's textures and models take effect.
+    // At startup these are either empty or hold base-game assets loaded before
+    // the moviepack search path was established.
+    gLogo::ResetTexture();
+    rSurfaceCache::ClearCache();
+    rITexture::UnloadAll();
+    rModel::ClearCache();
+    eLegacyWavData::UnloadAll();
+    sr_ReloadFont();
+
     // Reload uber shaders from the moviepack's pre-compiled SPVs.
-    // On startup, ScanMoviepacks() extracted the ZIP but sr_glOut was 0,
-    // so ActivateMoviepack()'s shader reload was skipped. Do it now.
     extern void sr_vkRendererReloadShaders();
     sr_vkRendererReloadShaders();
 

@@ -225,10 +225,10 @@
 <!ATTLIST Caption location (top | bottom | off) "bottom">
 
 <!-- Touch-input button widget (mobile/tablet only).
-     Content model widened so cockpit authors can size, place, and skin a
-     button just like other widgets. `touchMode` selects which ENABLE_TOUCH
-     mode the button is active in: either "all" (every mode 1..3) or a
-     single mode number ("1", "2", or "3"). -->
+     Content model widened (2026-05-21) so cockpit authors can size, place,
+     and skin a button just like other widgets. `touchMode` selects which
+     ENABLE_TOUCH mode the button is active in: either "all" (every mode
+     1..3) or a single mode number ("1", "2", or "3"). -->
 <!ELEMENT TouchButton (Position?, Size?, Caption?, Background?) >
 <!ATTLIST TouchButton
     action     CDATA #REQUIRED

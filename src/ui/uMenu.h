@@ -114,7 +114,7 @@ protected:
     REAL                 blinkTime_;
 
     REAL YPos(int num);
-    int  TouchYToItem(float touchY) const;   // convert normalized touch Y [0..1] to item index
+    int  TouchYToItem(float touchY, bool clamp = true) const;   // convert touch Y [0..1] to item index; clamp=false returns -1 when outside any item
 
     // Touch tracking state for menu navigation (ENABLE_TOUCH > 0)
     int64_t touchFingerId_           = -1;
@@ -135,6 +135,7 @@ protected:
     double  m_lastTickSec_        = 0;
     bool    m_userScrolling_      = false;  // finger down or inertia still alive
     int     m_lastSeenSelected_   = -1;     // for keyboard-nav follow logic
+    REAL    m_lastMenuBot_        = -1.0f;  // detects on-screen keyboard appearance
 
     // Per-frame animation: advances m_scrollOffset_ by m_scrollVy_ × dt,
     // applies exponential friction, and (when out of bounds) springs back.
@@ -149,13 +150,21 @@ protected:
     // (0 = list fits entirely; positive = scroll range).
     REAL KineticScrollMax() const;
 protected:
-    // Subclasses opt in to kinetic scroll by flipping this in their
-    // constructor. Long-list menus (server browser, replay browser…)
-    // benefit from it. Short menus (settings) keep the index-based
-    // touch behavior.
-    bool    m_useKineticScroll_ = false;
+    // All menus use kinetic scroll (rubber band at edges, inertia for
+    // long lists). Short menus that fit entirely on screen get pure
+    // rubber-band bounce with no actual scrolling range. Subclasses can
+    // flip this back to false if they need the old index-based drag
+    // (value-change swipe on selected item).
+    bool    m_useKineticScroll_ = true;
+
+    // Per-menu line spacing multiplier. 1.1 gives a comfortable default gap
+    // between items for all menus. Menus with larger text (e.g. the server
+    // browser on mobile) compute and set a larger value in their constructor.
+    REAL    lineSpacingFactor_  = 1.1f;
 private:
 public:
+    void SetLineSpacingFactor(REAL f) { lineSpacingFactor_ = f; }
+
     static bool          wrap;
     
     // different quick exit types
@@ -792,6 +801,10 @@ public:
     static void MenuBackground();
 };
 
+
+// Returns the base menu line height (sr_MenuTextHeight). Use to compute
+// a relative line-spacing factor for menus with non-standard font sizes.
+REAL uMenu_LineHeight();
 
 inline void uMenu::AddItem(uMenuItem* item)     { items.Add(item, item->idnum); }
 inline void uMenu::RemoveItem(uMenuItem* item)  { items.Remove(item, item->idnum); }

@@ -861,6 +861,10 @@ int main(int argc,char **argv){
         // su_KeyInit();
         su_KeyInit();
 
+        // SDL3 sensor subsystem — needed for gyroscope on mobile.
+        if (!SDL_InitSubSystem(SDL_INIT_SENSOR))
+            std::cout << "Error initializing sensor subsystem\n";
+
 #ifndef NOJOYSTICK
         // SDL3: SDL_InitSubSystem returns true on success (opposite of SDL2)
         if (!SDL_InitSubSystem(SDL_INIT_JOYSTICK))

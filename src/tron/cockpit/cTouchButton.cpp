@@ -52,6 +52,7 @@ extern "C" void su_SetEnableTouch(int mode);
 // translation unit doesn't have to pull uInput.h / ePlayer engine internals.
 extern bool su_IsGyroActive();    // uInput.cpp
 extern bool su_HasGyroSensor();   // uInput.cpp
+extern "C" void su_SetGyroActive(int active); // uInput.cpp
 extern bool se_IsChatEnabled();   // ePlayer.cpp
 
 namespace cWidget {
@@ -135,7 +136,21 @@ bool TouchButton::Process(tXmlParser::node cur)
 
 bool TouchButton::IsActiveInCurrentMode() const
 {
-    int mode = su_GetEnableTouch();
+    // In split-screen each player may have their own touch mode. Derive the
+    // player index from the cockpit owner so the correct per-player mode is
+    // used for both rendering (button visibility) and HitTest.
+    int mode = su_GetEnableTouch(); // global fallback
+    if (m_Cockpit) {
+        ePlayer* p = m_Cockpit->GetPlayer();
+        if (p) {
+            for (int i = 0; i < MAX_VIEWPORTS; i++) {
+                if (ePlayer::PlayerConfig(i) == p) {
+                    mode = su_GetEnableTouchForPlayer(i);
+                    break;
+                }
+            }
+        }
+    }
     if (mode < 1 || mode > 3) return false;
     return (touchModeMask_ & (1 << mode)) != 0;
 }
@@ -186,8 +201,9 @@ void TouchButton::ResolveAction()
 
 bool TouchButton::HitTest(float hx, float hy) const
 {
-    return hx >= m_position.x - m_size.x && hx <= m_position.x + m_size.x &&
-           hy >= m_position.y - m_size.y && hy <= m_position.y + m_size.y;
+    constexpr float kMargin = 0.02f; // tap forgiveness: ~1% of viewport width inward
+    return hx >= m_position.x - m_size.x - kMargin && hx <= m_position.x + m_size.x + kMargin &&
+           hy >= m_position.y - m_size.y - kMargin && hy <= m_position.y + m_size.y + kMargin;
 }
 
 // Dispatch the button's bound `actionName_` with the given value, using the
@@ -203,7 +219,12 @@ void TouchButton::DispatchBoundAction(bool on, int vpIdx)
         int keyNum = actionName_[12] - '0';
         if (keyNum >= 1 && keyNum <= 5 && on)
         {
-            FOREACH_COCKPIT(j) { (*j)->HandleEvent(keyNum, true); }
+            bool handled = false;
+            FOREACH_COCKPIT(j) { if ((*j)->HandleEvent(keyNum, true)) handled = true; }
+            // Gyro-slot fallback: COCKPIT_KEY_3 with visibleIf="gyroAvailable" toggles
+            // the gyro camera when no cockpit widget claims the event.
+            if (!handled && keyNum == 3 && visibleIf_ == "gyroAvailable")
+                su_SetGyroActive(su_IsGyroActive() ? 0 : 1);
         }
         return;
     }
@@ -229,7 +250,15 @@ void TouchButton::DispatchBoundAction(bool on, int vpIdx)
 
     // Player/camera action. Hold-style (CYCLE_BRAKE): press fires 1.0,
     // release fires 0.0. Tap-style: press fires 1.0, release no-op.
-    uPlayerPrototype* pc = uPlayerPrototype::PlayerConfig(player_ - 1);
+    // Resolve player from the viewport (split-screen: each viewport has
+    // its own player). Fall back to the XML-declared player_ when vpIdx
+    // is out of range (e.g. global actions with no viewport context).
+    int playerN = player_;
+    if (vpIdx >= 0 && vpIdx < MAX_VIEWPORTS) {
+        int pid = sr_viewportBelongsToPlayer[vpIdx];
+        if (pid >= 0) playerN = pid + 1;
+    }
+    uPlayerPrototype* pc = uPlayerPrototype::PlayerConfig(playerN - 1);
     if (!pc) return;
     if (on) pc->Act(action_, 1.0f);
     else if (!tapMode_) pc->Act(action_, 0.0f);
@@ -244,10 +273,14 @@ void TouchButton::BuildSlots(int vpIdx)
 
     if (pickerName_ == "touch_mode")
     {
-        const int current = su_GetEnableTouch();
-        // Slot 0..2 map to ENABLE_TOUCH = 1..3. Action field is empty —
-        // touch_mode dispatches via su_SetEnableTouch directly in
-        // FireSlot, not through a uAction.
+        // Per-player mode: each player in split-screen can have their own
+        // touch style. Resolve via the viewport; fall back to global.
+        int current = su_GetEnableTouch();
+        if (vpIdx >= 0 && vpIdx < MAX_VIEWPORTS) {
+            int pid = sr_viewportBelongsToPlayer[vpIdx];
+            if (pid >= 0) current = su_GetEnableTouchForPlayer(pid);
+        }
+        // Slot 0..2 map to ENABLE_TOUCH = 1..3.
         slots_.push_back({tString(""), tString("1: zones"),    current == 1});
         slots_.push_back({tString(""), tString("2: gestures"), current == 2});
         slots_.push_back({tString(""), tString("3: buttons"),  current == 3});
@@ -369,9 +402,11 @@ void TouchButton::FireSlot(int idx, int vpIdx)
 
     if (pickerName_ == "touch_mode")
     {
-        // Slot 0..2 → ENABLE_TOUCH 1..3. Use the C bridge declared at
-        // the top of this file.
-        su_SetEnableTouch(idx + 1);
+        // Slot 0..2 → mode 1..3. Set per-player in split-screen.
+        if (vpIdx >= 0 && vpIdx < MAX_VIEWPORTS)
+            su_SetEnableTouchForPlayer(sr_viewportBelongsToPlayer[vpIdx], idx + 1);
+        else
+            su_SetEnableTouch(idx + 1);
         return;
     }
 
@@ -402,6 +437,13 @@ void TouchButton::OnPress(int vpIdx, float hx, float hy)
     pressStartHy_  = hy;
     dropdownState_ = DropdownState::Closed;
     hoveredSlot_   = -1;
+
+    // Instant-chat picker opens immediately on press — no threshold or
+    // release needed. The user slides to a slot and lifts to fire it.
+    if (pickerName_ == "instant_chat") {
+        OpenPicker(vpIdx);
+        return;
+    }
 
     // Fire rising-edge action immediately for hold-mode buttons (engine
     // consumes the press transition) and for plain tap-mode buttons
@@ -465,14 +507,16 @@ void TouchButton::OnRelease(int vpIdx)
         return;
     }
 
-    // No picker opened. Fire the deferred default for tap-mode picker
-    // buttons (drag never crossed threshold), or fire the release-0.0
-    // follow-up for hold-mode buttons. Tap-mode non-picker buttons
-    // already fired on press — nothing to do here.
-    if (pickerName_.Len() > 1)
+    // No picker opened (instant_chat always opens on press so never
+    // reaches here). For other picker buttons (e.g. ESC/touch_mode):
+    // fire the deferred default action on tap. For hold-mode non-picker
+    // buttons: fire the release-0.0 follow-up. Tap-mode non-picker
+    // buttons already fired on press — nothing to do here.
+    if (pickerName_.Len() > 1) {
         DispatchBoundAction(true, vpIdx);
-    else if (!tapMode_)
+    } else if (!tapMode_) {
         DispatchBoundAction(false, vpIdx);
+    }
 
     pressed_ = false;
 }
@@ -503,9 +547,12 @@ void TouchButton::Render()
             // Use ePlayer::spectate, not netPlayer->IsSpectating(): the
             // intent updates immediately on press; IsSpectating only
             // syncs between rounds (ePlayer.cpp:4694-4701).
-            if (ePlayer* p = ePlayer::PlayerConfig(player_ - 1)) {
-                state = p->spectate;
-            }
+            // In multi-viewport, each cockpit has a specific player — use
+            // m_Cockpit->GetPlayer() so each viewport's button reflects
+            // that viewport's player's spectate state.
+            ePlayer* p = m_Cockpit ? m_Cockpit->GetPlayer() : nullptr;
+            if (!p && player_ > 0) p = ePlayer::PlayerConfig(player_ - 1);
+            if (p) state = p->spectate;
         }
         else if (actionName_ == "SCORE") {
             // Derive our viewport idx from the cockpit's bound player.
@@ -539,6 +586,21 @@ void TouchButton::Render()
     const uint8_t tintG8 = applyTint ? static_cast<uint8_t>(std::min(1.0f, std::max(0.0f, tintG_)) * 255.0f) : 255;
     const uint8_t tintB8 = applyTint ? static_cast<uint8_t>(std::min(1.0f, std::max(0.0f, tintB_)) * 255.0f) : 255;
 
+    // Draw a semi-transparent background so the full hit-test area is
+    // always visible. SDF icons have padding (icon fills ~60-90% of the
+    // button box), which causes users to perceive the touch target as
+    // smaller than it really is. Showing the background prevents this.
+    // Background stays neutral dark — the icon carries the toggle tint.
+    {
+        const uint8_t bgAlpha = pressed_ ? 110 : (visualOn ? 75 : 45);
+        rRenderStateKey bgState = rRenderStateKey::HUD(0, rBlendMode::Alpha);
+        rRenderQueue::Instance().SubmitQuad(rRenderPhase::HUD, bgState,
+            rVertex20(x0, y1, 0, 40, 40, 40, bgAlpha, 0, 0),
+            rVertex20(x1, y1, 0, 40, 40, 40, bgAlpha, 0, 0),
+            rVertex20(x1, y0, 0, 40, 40, 40, bgAlpha, 0, 0),
+            rVertex20(x0, y0, 0, 40, 40, 40, bgAlpha, 0, 0));
+    }
+
     if (m_background.HasContent())
     {
         // Use Background gradient/texture from XML (supports SDF via Graphic sdf= attribute)
@@ -559,18 +621,16 @@ void TouchButton::Render()
             }
         }
         rRenderStateKey state = m_background.GetRenderStateKey(rBlendMode::Alpha);
+        // For SDF icons (fontMode sentinel = -4.0 in texMatrix[15]), the
+        // inside color lives in texMatrix[2..5] (insR, insG, insB, insA),
+        // NOT in the vertex color. Override it with the tint when active.
+        if (applyTint && state.texMatrix[15] < -3.0f) {
+            state.texMatrix[2] = tintR_;
+            state.texMatrix[3] = tintG_;
+            state.texMatrix[4] = tintB_;
+            // texMatrix[5] = insA stays 1.0
+        }
         rRenderQueue::Instance().Submit(rRenderPhase::HUD, state, verts.data(), verts.size());
-    }
-    else
-    {
-        // Default: semi-transparent blue quad
-        const uint8_t r = 80, g = 100, b = 220;
-        rVertex20 v0(x0, y1, 0, r, g, b, alpha, 0, 0);
-        rVertex20 v1(x1, y1, 0, r, g, b, alpha, 0, 0);
-        rVertex20 v2(x1, y0, 0, r, g, b, alpha, 0, 0);
-        rVertex20 v3(x0, y0, 0, r, g, b, alpha, 0, 0);
-        rRenderStateKey state = rRenderStateKey::HUD(0, rBlendMode::Alpha);
-        rRenderQueue::Instance().SubmitQuad(rRenderPhase::HUD, state, v0, v1, v2, v3);
     }
 
     // Render caption text centered in button
