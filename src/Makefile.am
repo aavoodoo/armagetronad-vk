@@ -217,6 +217,7 @@ libtron_a_SOURCES=tron/gAIBase.cpp tron/gAIBase.h tron/gAICharacter.cpp tron/gAI
 	tron/cockpit/cGauges.h tron/cockpit/cGauges.cpp \
 	tron/cockpit/cRectangle.h tron/cockpit/cRectangle.cpp \
 	tron/cockpit/cTouchButton.h tron/cockpit/cTouchButton.cpp \
+	tron/cockpit/cChatArea.h tron/cockpit/cChatArea.cpp \
 	tron/gFriends.h tron/gFriends.cpp
 
 if BUILDZONESV2

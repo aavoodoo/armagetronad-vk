@@ -120,14 +120,55 @@ sync_android_resources() {
     echo "=== Android resource/included/ synced ==="
 }
 
+# ---------------------------------------------------------------------------
+# Build directory targets — sync to active build output dirs
+# ---------------------------------------------------------------------------
+sync_macos() {
+    local DEST="$REPO_ROOT/build_client"
+    if [ ! -d "$DEST" ]; then echo "build_client/ not found, skipping macOS"; return; fi
+    echo "=== Syncing macOS build assets ==="
+    sync_resource_included "$DEST"
+    mkdir -p "$DEST/moviepacks" "$DEST/cockpits"
+    rsync -a --delete "$REPO_ROOT/moviepacks/" "$DEST/moviepacks/"
+    rsync -a --delete "$REPO_ROOT/cockpits/" "$DEST/cockpits/"
+    echo "=== macOS build assets synced ==="
+}
+
+sync_ios_build() {
+    local BUILD="$REPO_ROOT/build_ios"
+    if [ ! -d "$BUILD" ]; then echo "build_ios/ not found, skipping"; return; fi
+    echo "=== Syncing iOS build assets ==="
+    sync_resource_included "$BUILD"
+    # Also sync to the app bundle if it exists
+    for APP in "$BUILD"/Debug-iphoneos/armagetronad.app "$BUILD"/Debug-iphonesimulator/armagetronad.app; do
+        if [ -d "$APP" ]; then
+            echo "  → app bundle: $(basename $(dirname $APP))"
+            sync_resource_included "$APP"
+            mkdir -p "$APP/moviepacks" "$APP/cockpits"
+            rsync -a "$REPO_ROOT/moviepacks/" "$APP/moviepacks/"
+            rsync -a "$REPO_ROOT/cockpits/" "$APP/cockpits/"
+        fi
+    done
+    echo "=== iOS build assets synced ==="
+}
+
+sync_all_builds() {
+    sync_ios
+    sync_android
+    sync_macos
+    sync_ios_build
+}
+
 TARGET="${1:-}"
 case "$TARGET" in
     ios)                sync_ios ;;
     android)            sync_android ;;
     android-resources)  sync_android_resources ;;
-    all)                sync_ios; sync_android ;;
+    macos)              sync_macos ;;
+    build)              sync_all_builds ;;
+    all)                sync_all_builds ;;
     *)
-        echo "Usage: $0 {ios|android|android-resources|all}"
+        echo "Usage: $0 {ios|android|android-resources|macos|build|all}"
         exit 1
         ;;
 esac

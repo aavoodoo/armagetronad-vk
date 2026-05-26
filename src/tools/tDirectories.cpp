@@ -218,6 +218,7 @@ static tString st_UserDataDir(expand_home_c(USER_DATA_DIR));    // directory for
 // External storage path where users can place custom content (moviepacks, autoexec.cfg, etc.)
 // Accessible via the Android Files app under Android/data/org.armagetronad.game/files/
 static tString st_AndroidExternalDir;
+static tString st_AndroidDataDir;  // extracted APK data path, for content copy
 #endif
 
 // load data from unbranded configuration directory on branded builds in Linux
@@ -1326,6 +1327,7 @@ void tDirectories::InitAndroid()
         // Point data directory at the extracted copy — opendir, fopen, libxml2
         // all work natively on real filesystem paths.
         SetData(dataDir);
+        st_AndroidDataDir = dataDir;
         SetAutoResource(pref + "/resource/automatic");
         SetIncludedResource(dataDir + "/resource/included");
     }
@@ -1353,6 +1355,38 @@ void tDirectories::InitAndroid()
                 dir << ext << "/" << subdirs[i];
                 mkdir(static_cast<const char*>(dir), 0755);
             }
+
+            // Copy bundled moviepacks/cockpits from extracted APK data into
+            // external storage so users can see and manage them in the Files app.
+            {
+                const char* cats[] = {"moviepacks", "cockpits", nullptr};
+                for (int c = 0; cats[c]; ++c) {
+                    tString srcDir;
+                    srcDir << st_AndroidDataDir << "/" << cats[c];
+                    tString dstDir;
+                    dstDir << ext << "/" << cats[c];
+                    DIR* d = opendir(static_cast<const char*>(srcDir));
+                    if (!d) continue;
+                    struct dirent* e;
+                    while ((e = readdir(d)) != nullptr) {
+                        if (e->d_name[0] == '.') continue;
+                        tString sf, df;
+                        sf << srcDir << "/" << e->d_name;
+                        df << dstDir << "/" << e->d_name;
+                        struct stat st;
+                        if (stat(static_cast<const char*>(df), &st) == 0) continue;
+                        FILE* in  = fopen(static_cast<const char*>(sf), "rb");
+                        FILE* out = fopen(static_cast<const char*>(df), "wb");
+                        if (in && out) {
+                            char buf[8192]; size_t n;
+                            while ((n = fread(buf, 1, sizeof(buf), in)) > 0) fwrite(buf, 1, n, out);
+                        }
+                        if (in)  fclose(in);
+                        if (out) fclose(out);
+                    }
+                    closedir(d);
+                }
+            }
         }
     }
 }
@@ -1366,12 +1400,56 @@ extern "C" const char* tGetIOSDocumentsPath(void);
 // Called by InitiOS() after the user-data path has been set.
 static void tDirectories_CreateIOSUserDirs(const tString& base)
 {
-    const char* subdirs[] = { "config", "config/user", "var", "screenshot", "resource", "resource/automatic", nullptr };
+    const char* subdirs[] = { "config", "config/user", "var", "screenshot",
+                              "resource", "resource/automatic",
+                              "moviepacks", "cockpits", nullptr };
     for (int i = 0; subdirs[i]; ++i)
     {
         tString dir;
         dir << base << "/" << subdirs[i];
         mkdir(static_cast<const char*>(dir), 0755);
+    }
+}
+
+// Copy bundled moviepacks and cockpits from the app bundle into the
+// user-visible Documents directory on first launch. This lets users
+// see, manage, and delete them via the iOS Files app.
+static void tDirectories_CopyBundledContent(const tString& bundlePath, const tString& userPath)
+{
+    const char* categories[] = { "moviepacks", "cockpits", nullptr };
+    for (int c = 0; categories[c]; ++c)
+    {
+        tString srcDir;
+        srcDir << bundlePath << "/" << categories[c];
+        tString dstDir;
+        dstDir << userPath << "/" << categories[c];
+
+        DIR* dir = opendir(static_cast<const char*>(srcDir));
+        if (!dir) continue;
+        struct dirent* entry;
+        while ((entry = readdir(dir)) != nullptr)
+        {
+            if (entry->d_name[0] == '.') continue;
+            tString srcFile;
+            srcFile << srcDir << "/" << entry->d_name;
+            tString dstFile;
+            dstFile << dstDir << "/" << entry->d_name;
+            // Only copy if not already present (user may have deleted it).
+            struct stat st;
+            if (stat(static_cast<const char*>(dstFile), &st) == 0) continue;
+            // Simple file copy via stdio.
+            FILE* in  = fopen(static_cast<const char*>(srcFile), "rb");
+            FILE* out = fopen(static_cast<const char*>(dstFile), "wb");
+            if (in && out) {
+                char buf[8192];
+                size_t n;
+                while ((n = fread(buf, 1, sizeof(buf), in)) > 0)
+                    fwrite(buf, 1, n, out);
+            }
+            if (in)  fclose(in);
+            if (out) fclose(out);
+        }
+        closedir(dir);
     }
 }
 
@@ -1410,6 +1488,12 @@ void tDirectories::InitiOS()
         // which expands to "/armagetronad/resource" when XDG_CACHE_HOME is unset).
         SetAutoResource(pref + "/resource/automatic");
         tDirectories_CreateIOSUserDirs(pref);
+        // Copy bundled moviepacks/cockpits into user-visible Documents
+        // so they appear in the Files app and can be managed by the user.
+        tString bundle(basePath ? basePath : "");
+        if (bundle.size() > 1 && bundle[bundle.size()-1] == '/')
+            bundle = bundle.substr(0, bundle.size()-1);
+        tDirectories_CopyBundledContent(bundle, pref);
     }
     else
     {

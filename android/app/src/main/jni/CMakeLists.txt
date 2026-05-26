@@ -279,6 +279,7 @@ file(GLOB TRON_SRCS
     "${SRC}/tron/cockpit/cMap.cpp"
     "${SRC}/tron/cockpit/cRectangle.cpp"
     "${SRC}/tron/cockpit/cTouchButton.cpp"
+    "${SRC}/tron/cockpit/cChatArea.cpp"
     "${SRC}/tron/cockpit/cWidgetBase.cpp"
     "${SRC}/tron/zone/zEffectGroup.cpp"
     "${SRC}/tron/zone/zEffector.cpp"

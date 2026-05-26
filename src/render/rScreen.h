@@ -131,6 +131,11 @@ REAL sr_ScreenKeyboardHeightFraction();
 //! On tablets and desktops, returns 1.0 (no scaling).
 REAL sr_TouchUIScale();
 
+//! Safe area insets as fractions of screen width/height (0..1).
+//! Non-zero on iOS devices with notch/Dynamic Island. Zero on all other platforms.
+struct sr_SafeAreaInsets { float left, right, top, bottom; };
+sr_SafeAreaInsets sr_GetSafeAreaInsets();
+
 extern bool sr_glOut;           // do we have gl-output at all?
 extern bool sr_textOut;          // display game text graphically?
 extern bool sr_FPSOut;           // display frame counter?

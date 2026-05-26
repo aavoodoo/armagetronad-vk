@@ -624,16 +624,24 @@ void uMenu::OnEnter(){
                 // Reserve 2*arrowSize at each active edge so no item renders
                 // where the arrow body/stem would appear.
                 constexpr float arrowSize = 0.020f;
-                const REAL itemBot = moreBelow ? menuBot + 2.0f * arrowSize : menuBot;
-                const REAL itemTop = moreAbove ? menuTop - 2.0f * arrowSize : menuTop;
+                // During bounce overshoot, extend rendering bounds by one line
+                // so edge items stay visible instead of clipping out.
+                const REAL th = sr_MenuTextHeight(lineSpacingFactor_);
+                const REAL bounceMargin = (m_scrollOffset_ < 0 || m_scrollOffset_ > kmax) ? th : 0;
+                const REAL itemBot = (moreBelow ? menuBot + 2.0f * arrowSize : menuBot) - bounceMargin;
+                const REAL itemTop = (moreAbove ? menuTop - 2.0f * arrowSize : menuTop) + bounceMargin;
+
+                // Fade boundaries match rendering bounds (include bounce margin).
+                const REAL fadeBot = itemBot;
+                const REAL fadeTop = itemTop;
 
                 REAL blinkAlpha = 0.7f + 0.3f * sinf(blinkTime_ * 6.0f);
                 {
                     REAL selY = YPos(selected);
                     const REAL b = .1;
-                    if (selY < menuBot + b) blinkAlpha *= (selY - menuBot) / b;
-                    if (selY > menuTop - b) blinkAlpha *= (menuTop - selY) / b;
-                    if (selY > menuBot && selY < menuTop)
+                    if (selY < fadeBot + b) blinkAlpha *= (selY - fadeBot) / b;
+                    if (selY > fadeTop - b) blinkAlpha *= (fadeTop - selY) / b;
+                    if (selY > fadeBot && selY < fadeTop)
                         items[selected]->Render(center, selY, blinkAlpha, true);
                 }
 
@@ -642,10 +650,10 @@ void uMenu::OnEnter(){
                         REAL y=YPos(i);
                         REAL alpha=1;
                         const REAL b=.1;
-                        if (y<menuBot+b)
-                            alpha=(y-menuBot)/b;
-                        if (y>menuTop-b)
-                            alpha=(menuTop-y)/b;
+                        if (y<fadeBot+b)
+                            alpha=(y-fadeBot)/b;
+                        if (y>fadeTop-b)
+                            alpha=(fadeTop-y)/b;
                         if (y>itemBot && y<itemTop)
                         {
                             rTextField::SetDefaultColor( tColor(1,1,1,1) );

@@ -93,6 +93,13 @@ public:
 
     //! returns whether a center display is currently in progress
     static bool CenterDisplayActive();
+
+    // Public accessors for ChatArea widget rendering.
+    const tArray<tString>& Lines() const { return lines; }
+    int CurrentTop() const { return currentTop; }
+    int CurrentIn()  const { return currentIn; }
+    REAL GetTimeout() const { return timeout; }
+    double LastTimeout() const { return lastTimeout; }
 };
 
 

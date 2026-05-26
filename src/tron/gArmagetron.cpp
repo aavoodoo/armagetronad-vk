@@ -890,6 +890,16 @@ int main(int argc,char **argv){
         st_LoadConfig();
         su_EnableTouchDefault();  // set ENABLE_TOUCH default on mobile after config load
 
+#if defined(__ANDROID__) || (defined(__APPLE__) && TARGET_OS_IOS)
+        // Migrate: old default cockpit → mobile-optimized one.
+        // iOS preserves Documents across reinstalls, so saved config persists.
+        {
+            extern tString cockpit_file;
+            if (cockpit_file == tString("Anonymous/standard-0.0.1.aacockpit.xml"))
+                cockpit_file = "AATeam/mobile-0.0.1.aacockpit.xml";
+        }
+#endif
+
         // migrate user configuration from previous versions
         if(sn_configurationSavedInVersion != st_programVersion)
         {

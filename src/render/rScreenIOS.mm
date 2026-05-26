@@ -107,6 +107,36 @@ void sr_ForceLandscapeOrientation(void)
 // (cross-platform, handles iOS CoreMotion internally via SDL_SENSOR_COREMOTION).
 // See uInput.cpp: SDL_EVENT_SENSOR_UPDATE handler + eCamera::ApplyGyroLook().
 
+// Safe area insets — fractional values (0..1) relative to screen dimensions.
+// On devices with a notch/Dynamic Island, these are non-zero on the
+// corresponding edges. Landscape-right: notch is on the left.
+extern "C" void sr_iOSGetSafeAreaInsets(float* outLeft, float* outRight, float* outTop, float* outBottom)
+{
+    @autoreleasepool {
+        UIWindow *window = nil;
+        for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {
+            if ([scene isKindOfClass:[UIWindowScene class]]) {
+                UIWindowScene *ws = (UIWindowScene *)scene;
+                window = ws.windows.firstObject;
+                if (window) break;
+            }
+        }
+        if (!window) {
+            *outLeft = *outRight = *outTop = *outBottom = 0.0f;
+            return;
+        }
+        UIEdgeInsets insets = window.safeAreaInsets;
+        CGSize screenSize = [UIScreen mainScreen].bounds.size;
+        // Normalize to 0..1 fractions of the screen dimension.
+        float sw = (float)screenSize.width;
+        float sh = (float)screenSize.height;
+        *outLeft   = (sw > 0) ? (float)insets.left   / sw : 0.0f;
+        *outRight  = (sw > 0) ? (float)insets.right  / sw : 0.0f;
+        *outTop    = (sh > 0) ? (float)insets.top    / sh : 0.0f;
+        *outBottom = (sh > 0) ? (float)insets.bottom / sh : 0.0f;
+    }
+}
+
 // Recursively remove a directory using NSFileManager (sandbox-safe).
 extern "C" void sr_iOSRemoveDirectoryRecursive(const char* path)
 {

@@ -309,6 +309,7 @@ file(GLOB TRON_SRCS
     "${SRC}/tron/cockpit/cMap.cpp"
     "${SRC}/tron/cockpit/cRectangle.cpp"
     "${SRC}/tron/cockpit/cTouchButton.cpp"
+    "${SRC}/tron/cockpit/cChatArea.cpp"
     "${SRC}/tron/cockpit/cWidgetBase.cpp"
     "${SRC}/tron/zone/zEffectGroup.cpp"
     "${SRC}/tron/zone/zEffector.cpp"
@@ -661,8 +662,8 @@ set_source_files_properties(
 add_custom_command(TARGET armagetronad POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_BUNDLE_DIR:armagetronad>/moviepacks"
     COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_BUNDLE_DIR:armagetronad>/cockpits"
-    COMMAND ${CMAKE_COMMAND} -E copy_directory "${REPO_ROOT}/ios/app/assets/moviepacks" "$<TARGET_BUNDLE_DIR:armagetronad>/moviepacks"
-    COMMAND ${CMAKE_COMMAND} -E copy_directory "${REPO_ROOT}/ios/app/assets/cockpits" "$<TARGET_BUNDLE_DIR:armagetronad>/cockpits"
+    COMMAND ${CMAKE_COMMAND} -E copy_directory "${REPO_ROOT}/moviepacks" "$<TARGET_BUNDLE_DIR:armagetronad>/moviepacks"
+    COMMAND ${CMAKE_COMMAND} -E copy_directory "${REPO_ROOT}/cockpits" "$<TARGET_BUNDLE_DIR:armagetronad>/cockpits"
     COMMENT "Copying moviepacks and cockpits to app bundle"
 )
 

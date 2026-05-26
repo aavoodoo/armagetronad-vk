@@ -30,6 +30,7 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 #ifndef DEDICATED
 
 #include "rFont.h"
+#include "rScreen.h"
 #include <numeric>
 
 namespace cWidget {
@@ -87,18 +88,40 @@ void Label::Render()
         c<<m_caption;
     }
 
+    // Scale cockpit text for small screens (phones). sr_TouchUIScale()
+    // returns 1.0 on desktop/tablets, up to 2.0 on phones.
+    const float uiScale = sr_TouchUIScale();
+    const float scaledH = m_size.y * uiScale;
+    const float scaledW = m_size.x * uiScale;
+
+    // Compute total content width for anchor alignment.
+    float totalWidth = 0;
+    for (auto it = coloumns.begin(); it != coloumns.end(); ++it)
+        totalWidth += *it * uiScale;
+    if (maxlen > 1) totalWidth += (maxlen - 1) * scaledW;
+
+    // Anchor-aware horizontal start: right-anchor means text's right
+    // edge at m_position, not its left edge.
+    float startX = m_position.x;
+    if (m_useAnchorPos) {
+        if (m_anchor.anchorH == AnchorSpec::Anchor::Max)
+            startX -= totalWidth;
+        else if (m_anchor.anchorH == AnchorSpec::Anchor::Center)
+            startX -= totalWidth * 0.5f;
+    }
+
     tCoord pos(0.,m_position.y);
     //now displaying the results
     {
         for(std::deque<std::deque<tString> >::iterator i(contents.begin()); i != contents.end(); ++i) {
-            pos.x = m_position.x;
+            pos.x = startX;
             std::deque<float>::iterator m(coloumns.begin());
             for(std::deque<tString>::iterator j(i->begin()); j != i->end(); ++j, ++m) {
-                rTextField c(pos.x,pos.y,m_size.y, sr_fontCockpit);
+                rTextField c(pos.x,pos.y,scaledH, sr_fontCockpit);
                 c<<*j;
-                pos.x += *m+m_size.x;
+                pos.x += (*m * uiScale)+scaledW;
             }
-            pos.y -= m_size.y;
+            pos.y -= scaledH;
         }
     }
 }

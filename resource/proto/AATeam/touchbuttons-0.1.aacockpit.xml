@@ -37,6 +37,15 @@
           author="AATeam" category="touch">
     <Cockpit version="0.0.1">
 
+        <!-- ==================== CHAT AREA ==================== -->
+        <!-- Positioned between the system button columns. Disables the
+             default full-width console rendering when present. -->
+        <ChatArea camera="^in" bgAlpha="0.4">
+            <Position anchorH="left" anchorV="top"
+                      offsetX="0.07" offsetY="0.02" />
+            <Size width="0.43" height="0.40" />
+        </ChatArea>
+
         <!-- ==================== LEFT SYSTEM COLUMN ==================== -->
 
         <!-- ESC / menu. Tap toggles the in-game menu (INGAME_MENU global

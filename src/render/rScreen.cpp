@@ -146,6 +146,26 @@ static tSettingItem<int>  at_ch("CUSTOM_SCREEN_HEIGHT"	, height[ArmageTron_Custo
 static tSettingItem<int>  at_cw("CUSTOM_SCREEN_WIDTH" 	, width	[ArmageTron_Custom]);
 static tSettingItem<REAL> at_ca("CUSTOM_SCREEN_ASPECT" , aspect[ArmageTron_Custom]);
 
+// Safe area insets — cached once per frame or on screen change.
+#if defined(__APPLE__) && TARGET_OS_IOS
+extern "C" void sr_iOSGetSafeAreaInsets(float* left, float* right, float* top, float* bottom);
+#endif
+
+sr_SafeAreaInsets sr_GetSafeAreaInsets()
+{
+    // Cache — safe area doesn't change mid-frame.
+    static sr_SafeAreaInsets cached{0,0,0,0};
+    static bool initialized = false;
+    if (!initialized) {
+        initialized = true;
+#if defined(__APPLE__) && TARGET_OS_IOS
+        sr_iOSGetSafeAreaInsets(&cached.left, &cached.right, &cached.top, &cached.bottom);
+#endif
+        // Other platforms: zero insets (no notch).
+    }
+    return cached;
+}
+
     #define MAXEMERGENCY 7
 
 rScreenSettings lastSuccess(ArmageTron_Desktop, true);
@@ -1320,9 +1340,16 @@ void sr_GetDrawableSize()
 #ifndef DEDICATED
     if(sr_screen)
     {
-        // SDL3: SDL_GL_GetDrawableSize → SDL_GetWindowSizeInPixels
-        // SDL3: SDL_GL_GetDrawableSize → SDL_GetWindowSizeInPixels
+        // Pixels = physical drawable size (used for rendering, font sizing).
         SDL_GetWindowSizeInPixels(sr_screen, &sr_screenWidth, &sr_screenHeight);
+        // Points = logical window size (used for UI scaling, touch scaling).
+        // On macOS HiDPI, points < pixels. On non-HiDPI, points == pixels.
+        int pw = 0, ph = 0;
+        SDL_GetWindowSize(sr_screen, &pw, &ph);
+        if (pw > 0 && ph > 0) {
+            sr_screenWidthInPoints  = pw;
+            sr_screenHeightInPoints = ph;
+        }
         return;
     }
     sr_screenWidth = sr_screenWidthInPoints;

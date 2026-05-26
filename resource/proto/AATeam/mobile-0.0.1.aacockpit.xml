@@ -1,0 +1,308 @@
+<?xml version="1.0" encoding="ISO-8859-1" standalone="no"?>
+<!DOCTYPE Resource SYSTEM "cockpit.dtd">
+
+<Resource type="aacockpit" name="mobile" version="0.0.1" author="AATeam" category="">
+    <Cockpit version="0.0.1">
+
+        <!-- ==================== HUD OVERLAY (camera="^in") ==================== -->
+        <!-- Visible in all external camera modes (smart, follow, free, etc.)     -->
+
+        <!-- FPS / Clock / Play time / Ping — single line, top area -->
+        <Label camera="^in" viewport="top">
+            <DataSet id="fps">
+                <AtomicData source="current_framerate" />
+            </DataSet>
+            <DataSet id="hours">
+                <AtomicData source="current_hours12h" minwidth="2" fill="0" />
+            </DataSet>
+            <DataSet id="minutes">
+                <AtomicData source="current_minutes" minwidth="2" fill="0" />
+            </DataSet>
+            <DataSet id="seconds">
+                <AtomicData source="time_since_start" />
+            </DataSet>
+            <DataSet id="ping">
+                <AtomicData source="current_ping" />
+            </DataSet>
+            <Position anchorH="right" anchorV="top"
+                      offsetX="-0.01" offsetY="0.02" />
+            <Size height="0.075" width="0.038" />
+            <Caption location="off" />
+            <Face>
+                <Table>
+                    <Row>
+                        <Cell><GameData data="fps" /><Text value=" FPS / " /><GameData data="hours" /><Text value=":" /><GameData data="minutes" /><Text value=" / " /><GameData data="seconds" /><Text value="s / " /><GameData data="ping" /><Text value="ms" /></Cell>
+                    </Row>
+                </Table>
+            </Face>
+        </Label>
+
+        <!-- Bottom row, left to right: Enemies/Friends, Brakes, Minimap, Rubber -->
+
+        <!-- Enemies/Friends — bottom left corner -->
+        <Label camera="^in">
+            <DataSet id="enemies">
+                <AtomicData field="source" source="enemies_alive" />
+            </DataSet>
+            <DataSet id="friends">
+                <AtomicData field="source" source="friends_alive" />
+            </DataSet>
+            <Position x="-0.75" y="-0.93" />
+            <Size height="0.053" width="0.026" />
+            <Caption location="off" />
+            <Face>
+                <Table>
+                    <Row>
+                        <Cell><Text value="E:" /></Cell>
+                        <Cell><GameData data="enemies" /></Cell>
+                        <Cell><Text value=" F:" /></Cell>
+                        <Cell><GameData data="friends" /></Cell>
+                    </Row>
+                </Table>
+            </Face>
+        </Label>
+
+        <!-- Brakes bar — between enemies and map -->
+        <BarGauge camera="^in">
+            <DataSet>
+                <AtomicData field="source" source="player_brakes" />
+                <AtomicData field="minimum" source="0" />
+                <AtomicData field="maximum" source="1" />
+            </DataSet>
+            <Position x="-0.38" y="-0.95" />
+            <Size height="0.03" width="0.13" />
+            <ShowCurrent value="false" />
+            <ShowMaximum value="false" />
+            <ShowMinimum value="false" />
+            <Caption location="top">
+                <Text value="Brakes" />
+            </Caption>
+            <Background>
+                <Image>
+                    <Graphic author="wrtlprnft" version="1" name="gauge_horizontal" uri="http://wrtlprnft.ath.cx/gauge_horizontal.png" />
+                </Image>
+                <Solid>
+                    <Color r="1." g="1." b="1." alpha=".5" />
+                </Solid>
+            </Background>
+            <Foreground>
+                <Image>
+                    <Graphic author="wrtlprnft" version="1" name="gauge_horizontal_filled" uri="http://wrtlprnft.ath.cx/gauge_horizontal_filled.png" />
+                </Image>
+                <Gradient orientation="value">
+                    <Color r="1." g="0." b="0." alpha=".8" at="0." />
+                    <Color r="1." g="1." b="0." alpha=".8" at=".5" />
+                    <Color r="0." g="1." b="0." alpha=".8" at="1." />
+                </Gradient>
+            </Foreground>
+            <LineColor>
+                <Solid>
+                    <Color r="0" g="0" b="0" alpha="0" />
+                </Solid>
+            </LineColor>
+        </BarGauge>
+
+        <!-- Minimap — bottom center. Key 1 cycles modes, key 2 toggles visibility -->
+        <Map camera="^in" toggle="2" toggleSticky="true" toggleDefault="on">
+            <Position x="0" y="-0.80" />
+            <Size height="0.20" width="0.20" />
+            <Background>
+                <Image scale_x=".075" scale_y=".075" repeat="both">
+                    <Graphic author="wrtlprnft" version="1" name="floor" extension="png" uri="http://wrtlprnft.ath.cx/floor.png" />
+                </Image>
+                <Solid>
+                    <Color r=".5" g="1." b=".5" alpha="1." />
+                </Solid>
+            </Background>
+            <MapModes toggleKey="1">
+                <MapMode mode="full" rotation="spawn" />
+                <MapMode mode="closestZone" rotation="spawn" />
+                <MapMode mode="cycle" rotation="camera" zoomFactor="3" clipMode="ellipse" />
+                <MapMode mode="cycle" rotation="cycle" zoomFactor="3" />
+                <MapMode mode="cycle" rotation="spawn" zoomFactor="4" />
+                <MapMode mode="full" rotation="fixed" />
+            </MapModes>
+        </Map>
+
+        <!-- Rubber bar — between map and right edge -->
+        <BarGauge camera="^in">
+            <DataSet>
+                <AtomicData field="source" source="player_rubber" />
+                <AtomicData field="minimum" source="0" />
+                <AtomicData field="maximum" source="cycle_rubber" />
+            </DataSet>
+            <Position x="0.38" y="-0.95" />
+            <Size height="0.03" width="0.13" />
+            <ShowCurrent value="false" />
+            <ShowMaximum value="false" />
+            <ShowMinimum value="false" />
+            <Caption location="top">
+                <Text value="Rubber" />
+            </Caption>
+            <Background>
+                <Image>
+                    <Graphic author="wrtlprnft" version="1" name="gauge_horizontal" uri="http://wrtlprnft.ath.cx/gauge_horizontal.png" />
+                </Image>
+                <Solid>
+                    <Color r="1." g="1." b="1." alpha=".5" />
+                </Solid>
+            </Background>
+            <Foreground>
+                <Image>
+                    <Graphic author="wrtlprnft" version="1" name="gauge_horizontal_filled" uri="http://wrtlprnft.ath.cx/gauge_horizontal_filled.png" />
+                </Image>
+                <Gradient orientation="value">
+                    <Color r="0." g="1." b="0." alpha=".8" at="0." />
+                    <Color r="0." g="1." b="0." alpha=".8" at=".3" />
+                    <Color r="1." g="1." b="0." alpha=".8" at=".6" />
+                    <Color r="1." g="0." b="0." alpha=".8" at="1." />
+                </Gradient>
+            </Foreground>
+            <LineColor>
+                <Solid>
+                    <Color r="0.4" g="0.4" b="0.4" alpha="0.3" />
+                </Solid>
+            </LineColor>
+        </BarGauge>
+
+        <!-- ==================== IN-COCKPIT (camera="in") ==================== -->
+        <!-- Same bottom layout + camview mirrors flanking the minimap          -->
+
+        <!-- Left rear mirror — square, left of minimap, above brakes bar -->
+        <Camview camera="in" view="in">
+            <Position x="-0.38" y="-0.72" />
+            <Size height="0.12" width="0.12" />
+            <Translation x="0.5" y="0" z="0" />
+            <Rotation value="150" />
+            <Mirror value="true" />
+        </Camview>
+
+        <!-- Right rear mirror — square, right of minimap, above rubber bar -->
+        <Camview camera="in" view="in">
+            <Position x="0.38" y="-0.72" />
+            <Size height="0.12" width="0.12" />
+            <Translation x="-0.5" y="0" z="0" />
+            <Rotation value="210" />
+            <Mirror value="true" />
+        </Camview>
+
+        <!-- In-cockpit brakes bar -->
+        <BarGauge camera="in">
+            <DataSet>
+                <AtomicData field="source" source="player_brakes" />
+                <AtomicData field="minimum" source="0" />
+                <AtomicData field="maximum" source="1" />
+            </DataSet>
+            <Position x="-0.38" y="-0.95" />
+            <Size height="0.03" width="0.13" />
+            <ShowCurrent value="false" />
+            <ShowMaximum value="false" />
+            <ShowMinimum value="false" />
+            <Caption location="top">
+                <Text value="Brakes" />
+            </Caption>
+            <Background>
+                <Image>
+                    <Graphic author="wrtlprnft" version="1" name="gauge_horizontal" uri="http://wrtlprnft.ath.cx/gauge_horizontal.png" />
+                </Image>
+                <Solid>
+                    <Color r="1." g="1." b="1." alpha=".5" />
+                </Solid>
+            </Background>
+            <Foreground>
+                <Image>
+                    <Graphic author="wrtlprnft" version="1" name="gauge_horizontal_filled" uri="http://wrtlprnft.ath.cx/gauge_horizontal_filled.png" />
+                </Image>
+                <Gradient orientation="value">
+                    <Color r="1." g="0." b="0." alpha=".8" at="0." />
+                    <Color r="1." g="1." b="0." alpha=".8" at=".5" />
+                    <Color r="0." g="1." b="0." alpha=".8" at="1." />
+                </Gradient>
+            </Foreground>
+            <LineColor>
+                <Solid>
+                    <Color r="0" g="0" b="0" alpha="0" />
+                </Solid>
+            </LineColor>
+        </BarGauge>
+
+        <!-- In-cockpit minimap -->
+        <Map camera="in" toggle="2" toggleSticky="true" toggleDefault="on">
+            <Position x="0" y="-0.80" />
+            <Size height="0.20" width="0.20" />
+            <Background>
+                <Image scale_x=".075" scale_y=".075" repeat="both">
+                    <Graphic author="wrtlprnft" version="1" name="floor" extension="png" uri="http://wrtlprnft.ath.cx/floor.png" />
+                </Image>
+                <Solid>
+                    <Color r=".5" g="1." b=".5" alpha="1." />
+                </Solid>
+            </Background>
+        </Map>
+
+        <!-- In-cockpit rubber bar -->
+        <BarGauge camera="in">
+            <DataSet>
+                <AtomicData field="source" source="player_rubber" />
+                <AtomicData field="minimum" source="0" />
+                <AtomicData field="maximum" source="cycle_rubber" />
+            </DataSet>
+            <Position x="0.38" y="-0.95" />
+            <Size height="0.03" width="0.13" />
+            <ShowCurrent value="false" />
+            <ShowMaximum value="false" />
+            <ShowMinimum value="false" />
+            <Caption location="top">
+                <Text value="Rubber" />
+            </Caption>
+            <Background>
+                <Image>
+                    <Graphic author="wrtlprnft" version="1" name="gauge_horizontal" uri="http://wrtlprnft.ath.cx/gauge_horizontal.png" />
+                </Image>
+                <Solid>
+                    <Color r="1." g="1." b="1." alpha=".5" />
+                </Solid>
+            </Background>
+            <Foreground>
+                <Image>
+                    <Graphic author="wrtlprnft" version="1" name="gauge_horizontal_filled" uri="http://wrtlprnft.ath.cx/gauge_horizontal_filled.png" />
+                </Image>
+                <Gradient orientation="value">
+                    <Color r="0." g="1." b="0." alpha=".8" at="0." />
+                    <Color r="0." g="1." b="0." alpha=".8" at=".3" />
+                    <Color r="1." g="1." b="0." alpha=".8" at=".6" />
+                    <Color r="1." g="0." b="0." alpha=".8" at="1." />
+                </Gradient>
+            </Foreground>
+            <LineColor>
+                <Solid>
+                    <Color r="0" g="0" b="0" alpha="0" />
+                </Solid>
+            </LineColor>
+        </BarGauge>
+
+        <!-- In-cockpit enemies/friends -->
+        <Label camera="in">
+            <DataSet id="enemies">
+                <AtomicData field="source" source="enemies_alive" />
+            </DataSet>
+            <DataSet id="friends">
+                <AtomicData field="source" source="friends_alive" />
+            </DataSet>
+            <Position x="-0.75" y="-0.93" />
+            <Size height="0.045" width="0.013" />
+            <Caption location="off" />
+            <Face>
+                <Table>
+                    <Row>
+                        <Cell><Text value="E:" /></Cell>
+                        <Cell><GameData data="enemies" /></Cell>
+                        <Cell><Text value=" F:" /></Cell>
+                        <Cell><GameData data="friends" /></Cell>
+                    </Row>
+                </Table>
+            </Face>
+        </Label>
+
+    </Cockpit>
+</Resource>

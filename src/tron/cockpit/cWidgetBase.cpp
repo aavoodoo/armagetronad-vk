@@ -242,21 +242,29 @@ void WithCoordinates::ApplyAnchorLayout(float factor) {
         // in landscape because EqualAspectBottom extends the cockpit
         // viewport above the actual screen — see rViewport.cpp:449).
 
-        // Anchor reference in NDC.
-        auto anchorXNdc = [](AnchorSpec::Anchor a) -> float {
+        // Safe area insets (notch/Dynamic Island on iOS, zero on other platforms).
+        // Insets are screen fractions → NDC: fraction * 2.0 (NDC range is 2.0).
+        const sr_SafeAreaInsets sa = sr_GetSafeAreaInsets();
+        const float saLeft  = sa.left  * 2.0f;
+        const float saRight = sa.right * 2.0f;
+        const float saTop   = sa.top   * visRangeY;
+        const float saBot   = sa.bottom * visRangeY;
+
+        // Anchor reference in NDC, inset by safe area.
+        auto anchorXNdc = [&](AnchorSpec::Anchor a) -> float {
             switch (a) {
-                case AnchorSpec::Anchor::Min:     return -1.0f;
+                case AnchorSpec::Anchor::Min:     return -1.0f + saLeft;
                 case AnchorSpec::Anchor::Center:  return  0.0f;
-                case AnchorSpec::Anchor::Max:     return  1.0f;
+                case AnchorSpec::Anchor::Max:     return  1.0f - saRight;
                 case AnchorSpec::Anchor::Stretch: return  0.0f;
             }
             return 0.0f;
         };
         auto anchorYNdc = [&](AnchorSpec::Anchor a) -> float {
             switch (a) {
-                case AnchorSpec::Anchor::Min:     return visTopY;
+                case AnchorSpec::Anchor::Min:     return visTopY - saTop;
                 case AnchorSpec::Anchor::Center:  return 0.5f * (visTopY + visBotY);
-                case AnchorSpec::Anchor::Max:     return visBotY;
+                case AnchorSpec::Anchor::Max:     return visBotY + saBot;
                 case AnchorSpec::Anchor::Stretch: return 0.5f * (visTopY + visBotY);
             }
             return 0.0f;

@@ -1,0 +1,162 @@
+<?xml version="1.0" encoding="ISO-8859-1" standalone="no"?>
+<!DOCTYPE Resource SYSTEM "cockpit.dtd">
+
+<!-- Test cockpit: exercises all positioning and sizing modes.
+     Activate with: COCKPIT_FILE AATeam/test-cockpit-0.0.1.aacockpit.xml
+     Each label shows its anchor/position mode so you can verify visually. -->
+
+<Resource type="aacockpit" name="test-cockpit" version="0.0.1" author="AATeam" category="">
+    <Cockpit version="0.0.1">
+
+        <!-- ===== ANCHOR TESTS (viewport="top" overlay) ===== -->
+
+        <!-- Top-left anchor -->
+        <Label camera="^in" viewport="top">
+            <DataSet id="d"><AtomicData source="current_framerate" /></DataSet>
+            <Position anchorH="left" anchorV="top" offsetX="0.01" offsetY="0.02" />
+            <Size height="0.05" width="0.025" />
+            <Caption location="off" />
+            <Face><Table><Row>
+                <Cell><Text value="TL anchor / " /><GameData data="d" /><Text value=" FPS" /></Cell>
+            </Row></Table></Face>
+        </Label>
+
+        <!-- Top-right anchor -->
+        <Label camera="^in" viewport="top">
+            <DataSet id="d"><AtomicData source="current_framerate" /></DataSet>
+            <Position anchorH="right" anchorV="top" offsetX="-0.01" offsetY="0.02" />
+            <Size height="0.05" width="0.025" />
+            <Caption location="off" />
+            <Face><Table><Row>
+                <Cell><Text value="TR anchor / " /><GameData data="d" /><Text value=" FPS" /></Cell>
+            </Row></Table></Face>
+        </Label>
+
+        <!-- Top-center anchor -->
+        <Label camera="^in" viewport="top">
+            <DataSet id="d"><AtomicData source="time_since_start" /></DataSet>
+            <Position anchorH="center" anchorV="top" offsetX="0" offsetY="0.02" />
+            <Size height="0.05" width="0.025" />
+            <Caption location="off" />
+            <Face><Table><Row>
+                <Cell><Text value="TC anchor / " /><GameData data="d" /><Text value="s" /></Cell>
+            </Row></Table></Face>
+        </Label>
+
+        <!-- ===== ANCHOR TESTS (camera="^in" HUD) ===== -->
+
+        <!-- Bottom-left anchor -->
+        <Label camera="^in">
+            <DataSet id="d"><AtomicData source="enemies_alive" /></DataSet>
+            <Position anchorH="left" anchorV="bottom" offsetX="0.01" offsetY="-0.02" />
+            <Size height="0.05" width="0.025" />
+            <Caption location="off" />
+            <Face><Table><Row>
+                <Cell><Text value="BL anchor / E:" /><GameData data="d" /></Cell>
+            </Row></Table></Face>
+        </Label>
+
+        <!-- Bottom-right anchor -->
+        <Label camera="^in">
+            <DataSet id="d"><AtomicData source="player_rubber" /></DataSet>
+            <Position anchorH="right" anchorV="bottom" offsetX="-0.01" offsetY="-0.02" />
+            <Size height="0.05" width="0.025" />
+            <Caption location="off" />
+            <Face><Table><Row>
+                <Cell><Text value="BR anchor / R:" /><GameData data="d" /></Cell>
+            </Row></Table></Face>
+        </Label>
+
+        <!-- Bottom-center anchor -->
+        <Label camera="^in">
+            <DataSet id="d"><AtomicData source="player_speed" /></DataSet>
+            <Position anchorH="center" anchorV="bottom" offsetX="0" offsetY="-0.02" />
+            <Size height="0.05" width="0.025" />
+            <Caption location="off" />
+            <Face><Table><Row>
+                <Cell><Text value="BC anchor / SPD:" /><GameData data="d" /></Cell>
+            </Row></Table></Face>
+        </Label>
+
+        <!-- ===== CENTER ROW ===== -->
+
+        <!-- Center-left anchor -->
+        <Label camera="^in">
+            <Position anchorH="left" anchorV="center" offsetX="0.01" offsetY="0" />
+            <Size height="0.05" width="0.025" />
+            <Caption location="off" />
+            <Face><Table><Row>
+                <Cell><Text value="CL anchor" /></Cell>
+            </Row></Table></Face>
+        </Label>
+
+        <!-- Center-center anchor -->
+        <Label camera="^in">
+            <Position anchorH="center" anchorV="center" offsetX="0" offsetY="0" />
+            <Size height="0.05" width="0.025" />
+            <Caption location="off" />
+            <Face><Table><Row>
+                <Cell><Text value="CC anchor" /></Cell>
+            </Row></Table></Face>
+        </Label>
+
+        <!-- Center-right anchor -->
+        <Label camera="^in">
+            <Position anchorH="right" anchorV="center" offsetX="-0.01" offsetY="0" />
+            <Size height="0.05" width="0.025" />
+            <Caption location="off" />
+            <Face><Table><Row>
+                <Cell><Text value="CR anchor" /></Cell>
+            </Row></Table></Face>
+        </Label>
+
+        <!-- ===== GAUGE TESTS ===== -->
+
+        <!-- Rubber bar with anchor bottom-left, above BL label -->
+        <BarGauge camera="^in">
+            <DataSet>
+                <AtomicData field="source" source="player_rubber" />
+                <AtomicData field="minimum" source="0" />
+                <AtomicData field="maximum" source="cycle_rubber" />
+            </DataSet>
+            <Position anchorH="left" anchorV="bottom" offsetX="0.01" offsetY="-0.10" />
+            <Size mode="aspect-locked" longest="0.15" aspect="5.0" />
+            <ShowCurrent value="false" />
+            <ShowMaximum value="false" />
+            <ShowMinimum value="false" />
+            <Background>
+                <Image>
+                    <Graphic author="wrtlprnft" version="1" name="gauge_horizontal" uri="http://wrtlprnft.ath.cx/gauge_horizontal.png" />
+                </Image>
+                <Solid><Color r="1." g="1." b="1." alpha=".5" /></Solid>
+            </Background>
+            <Foreground>
+                <Image>
+                    <Graphic author="wrtlprnft" version="1" name="gauge_horizontal_filled" uri="http://wrtlprnft.ath.cx/gauge_horizontal_filled.png" />
+                </Image>
+                <Gradient orientation="value">
+                    <Color r="0." g="1." b="0." alpha=".8" at="0." />
+                    <Color r="1." g="0." b="0." alpha=".8" at="1." />
+                </Gradient>
+            </Foreground>
+            <LineColor><Solid><Color r="0" g="0" b="0" alpha="0" /></Solid></LineColor>
+        </BarGauge>
+
+        <!-- Minimap with anchor -->
+        <Map camera="^in">
+            <Position anchorH="right" anchorV="bottom" offsetX="-0.01" offsetY="-0.10" />
+            <Size mode="aspect-locked" longest="0.20" aspect="1.0" />
+            <Background>
+                <Image scale_x=".075" scale_y=".075" repeat="both">
+                    <Graphic author="wrtlprnft" version="1" name="floor" extension="png" uri="http://wrtlprnft.ath.cx/floor.png" />
+                </Image>
+                <Solid><Color r=".5" g="1." b=".5" alpha="1." /></Solid>
+            </Background>
+            <MapModes toggleKey="1">
+                <MapMode mode="full" rotation="spawn" />
+                <MapMode mode="cycle" rotation="camera" zoomFactor="3" clipMode="ellipse" />
+            </MapModes>
+        </Map>
+
+    </Cockpit>
+</Resource>

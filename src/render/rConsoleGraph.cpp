@@ -59,6 +59,10 @@ static REAL Time;
 // flag memorizing whether the console already has been rendered this frame
 static bool sr_alreadyDisplayed = false;
 
+// When true, a ChatArea cockpit widget handles console rendering —
+// the default rConsole::Render() is disabled.
+bool sr_chatAreaActive = false;
+
 // Left/right insets in OpenGL units (0 = no inset). Auto-driven by the
 // touch-buttons cockpit's side columns when ENABLE_TOUCH is on (see the
 // inset computation at the top of rConsole::Render). Values are in the
@@ -126,57 +130,27 @@ void rConsole::Render(){
     if (!sr_glOut)
         return;
 
-    // When the touch-buttons cockpit is active (ENABLE_TOUCH >= 1), the
-    // left and right system columns occupy the screen edges. Pull the
-    // chat scroll inward so it doesn't render under them. The buttons
-    // ship with longest=0.057 (5.7% of viewport longest pixel axis) and
-    // a small offset from the edge; 0.13 in NDC clears them with a
-    // sliver of margin. 0 when touch is off — chat reclaims full width.
-    if (su_GetEnableTouch() >= 1) {
-        sr_consoleInsetLeft  = 0.13f;
-        sr_consoleInsetRight = 0.13f;
-    } else {
-        sr_consoleInsetLeft  = 0.0f;
-        sr_consoleInsetRight = 0.0f;
-    }
+    sr_consoleInsetLeft  = 0.0f;
+    sr_consoleInsetRight = 0.0f;
 
     static REAL lastBottom = -1.0;
-
-    sr_ResetRenderState(true);
 
     REAL W=sr_screenWidth;
     REAL H=sr_screenHeight;
 
-    // previous logic
-    //REAL MW=400;
-    //REAL MH=(MW*3)/4;
-    //if(W>MW)
-    //    W=MW;
-    //if(H>MH)
-    //    H=MH;
-    // rCWIDTH_CON=10/W;
-    // rCHEIGHT_CON=18/H;
-
     auto columns = sr_columns;
     if(columns == 0 && (W < 1280 || H < 720))
-        columns = 78; // the old default for small screens
+        columns = 78;
 
     if(columns > 0)
     {
-        // the text field has an openGL coordinate with of 1.9; cram the specified number
-        // of columns in it
         rCWIDTH_CON=1.9/columns;
-
-        // get corresponding character height
         rCHEIGHT_CON=rCWIDTH_CON*W*9/(5*H);
     }
     else
     {
-        // show big font in its native pixel size
         rCHEIGHT_CON=31*2.0/H;
         rCWIDTH_CON=15*2.0/W;
-
-        // but don't make it more than MAX_ROWS of text rows for the whole screen, more may be too small for hires small screens
         constexpr auto MAX_ROWS = 47;
         if(columns == 0 && rCHEIGHT_CON * MAX_ROWS < 2)
         {
@@ -189,17 +163,18 @@ void rConsole::Render(){
     if (sr_screen){
         Time=tSysTimeFloat();
 
-        // Chat / console log scroll. Hidden in split-screen — per the user's
-        // brief on 2026-05-21, the rolling text overlay doesn't have a clean
-        // home in any single viewport and shouldn't appear globally either.
-        // Single-viewport mode renders it normally below.
         if (!sr_MultipleViewports() &&
             (sr_textOut || rForceTextCallback::ForceText())){
+            // Timeout advancement: old messages scroll off. Runs even when
+            // ChatArea handles rendering so the scroll state stays correct.
             if (lastCustomTimeout<Time-5 &&
                     lastTimeout+timeout<Time && currentTop<currentIn){
                 currentTop++;
                 lastTimeout=Time;
             }
+
+            // ChatArea widget handles the actual drawing.
+            if (!sr_chatAreaActive) {
 
             rTextField out(rTextField::Pixelize(-.95f + sr_consoleInsetLeft, W),
                            rTextField::Pixelize(.99f, H),
@@ -260,7 +235,7 @@ void rConsole::Render(){
            
             // track console height
             lastBottom = out.GetBottom();
-
+            } // !sr_chatAreaActive
         }
 
         rTextField::SetDefaultColor( tColor(1,1,1) );

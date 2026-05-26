@@ -35,6 +35,7 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 #include "cockpit/cCamview.h"
 #include "cockpit/cRectangle.h"
 #include "cockpit/cTouchButton.h"
+#include "cockpit/cChatArea.h"
 #include "nConfig.h"
 #include "tResourceManager.h"
 
@@ -641,6 +642,8 @@ cWidget::Base_ptr cCockpit::ProcessWidgetType(node cur) {
         m_TouchButtons.push_back(w);
         return cWidget::Base_ptr(w);
     }
+    if(cur.IsOfType("ChatArea"))
+        return cWidget::Base_ptr(new cWidget::ChatArea());
     return cWidget::Base_ptr();
 }
 

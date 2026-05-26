@@ -18,7 +18,7 @@
     usetemplate CDATA ''
 ">
 
-<!ELEMENT Cockpit ((BarGauge | NeedleGauge | Map | Label | VerticalBarGauge | Rectangle | WidgetTemplate | Camview | TouchButton )+)>
+<!ELEMENT Cockpit ((BarGauge | NeedleGauge | Map | Label | VerticalBarGauge | Rectangle | WidgetTemplate | Camview | TouchButton | ChatArea )+)>
 <!ATTLIST Cockpit version CDATA #REQUIRED>
 
 <!ELEMENT WidgetTemplate ((DataSet |
@@ -240,6 +240,14 @@
     picker        CDATA #IMPLIED
     tintActive    CDATA #IMPLIED
     visibleIf     CDATA #IMPLIED
+    %CommonWidgetAttributes;
+>
+
+<!-- Chat area widget — positions the console/chat scroll area.
+     When present, disables the default full-width console rendering. -->
+<!ELEMENT ChatArea (Position?, Size?) >
+<!ATTLIST ChatArea
+    bgAlpha CDATA "0.5"
     %CommonWidgetAttributes;
 >
 

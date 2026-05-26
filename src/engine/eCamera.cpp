@@ -1650,9 +1650,19 @@ void eCamera::Render(){
     pos_diff = pos_diff + CenterPos();
     */
 
-    // CHECK: is this still what you intend it to be?
-    if (!se_ClampCamera(mode))
-        Bound(0, pos);
+    // Wall visibility check: use gyro-adjusted position so walls that
+    // block the gyro-rotated view are correctly lowered.
+    if (!se_ClampCamera(mode)) {
+        eCoord boundPos = pos;
+        if (s_gyroCamYawOffset != 0.0f) {
+            eCoord gDir = dir.Turn(s_gyroCosYaw, s_gyroSinYaw);
+            eCoord focus = CenterPos();
+            REAL dist = (focus - pos).Norm();
+            if (dist > 0.1f)
+                boundPos = focus - gDir * dist;
+        }
+        Bound(0, boundPos);
+    }
 
     // Bound( dt );
 
