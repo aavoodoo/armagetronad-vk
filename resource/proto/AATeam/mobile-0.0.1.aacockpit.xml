@@ -25,7 +25,7 @@
                 <AtomicData source="current_ping" />
             </DataSet>
             <Position anchorH="right" anchorV="top"
-                      offsetX="-0.01" offsetY="0.02" />
+                      offsetX="-0.15" offsetY="0.02" />
             <Size height="0.075" width="0.038" />
             <Caption location="off" />
             <Face>

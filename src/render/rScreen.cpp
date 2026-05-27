@@ -151,19 +151,23 @@ static tSettingItem<REAL> at_ca("CUSTOM_SCREEN_ASPECT" , aspect[ArmageTron_Custo
 extern "C" void sr_iOSGetSafeAreaInsets(float* left, float* right, float* top, float* bottom);
 #endif
 
+// Cached safe area — invalidated on screen mode change via sr_InvalidateSafeArea().
+static sr_SafeAreaInsets s_safeAreaCache{0,0,0,0};
+static bool s_safeAreaValid = false;
+
+void sr_InvalidateSafeArea() { s_safeAreaValid = false; }
+
 sr_SafeAreaInsets sr_GetSafeAreaInsets()
 {
-    // Cache — safe area doesn't change mid-frame.
-    static sr_SafeAreaInsets cached{0,0,0,0};
-    static bool initialized = false;
-    if (!initialized) {
-        initialized = true;
+    if (!s_safeAreaValid) {
+        s_safeAreaCache = {0,0,0,0};
 #if defined(__APPLE__) && TARGET_OS_IOS
-        sr_iOSGetSafeAreaInsets(&cached.left, &cached.right, &cached.top, &cached.bottom);
+        sr_iOSGetSafeAreaInsets(&s_safeAreaCache.left, &s_safeAreaCache.right,
+                                &s_safeAreaCache.top, &s_safeAreaCache.bottom);
 #endif
-        // Other platforms: zero insets (no notch).
+        s_safeAreaValid = true;
     }
-    return cached;
+    return s_safeAreaCache;
 }
 
     #define MAXEMERGENCY 7
@@ -1177,6 +1181,7 @@ static bool lowlevel_sr_InitDisplay(){
 
     sr_ResetRenderState(true);
 
+    sr_InvalidateSafeArea();
     rCallbackAfterScreenModeChange::Exec();
 
     // store last display index

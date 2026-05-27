@@ -228,7 +228,6 @@ void WithCoordinates::ApplyAnchorLayout(float factor) {
     }
 
     if (m_useAnchorSize) {
-        // m_size half-extent in [-1,+1] space equals fraction of viewport.
         m_size.x = wFrac;
         m_size.y = hFrac;
         m_originalSize = m_size;

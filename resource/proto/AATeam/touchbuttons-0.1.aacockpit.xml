@@ -40,10 +40,11 @@
         <!-- ==================== CHAT AREA ==================== -->
         <!-- Positioned between the system button columns. Disables the
              default full-width console rendering when present. -->
-        <ChatArea camera="^in" bgAlpha="0.4">
-            <Position anchorH="left" anchorV="top"
-                      offsetX="0.07" offsetY="0.02" />
-            <Size width="0.43" height="0.40" />
+        <ChatArea camera="^in" viewport="all" bgAlpha="0.4">
+            <Position anchorH="stretch" anchorV="top"
+                      stretchMinX="0.15" stretchMaxX="0.85"
+                      offsetY="0.02" />
+            <Size mode="proportional" width="0.86" height="0.40" />
         </ChatArea>
 
         <!-- ==================== LEFT SYSTEM COLUMN ==================== -->

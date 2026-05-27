@@ -781,9 +781,21 @@ bool vkRenderer::RecreateSwapchain(int width, int height)
         semInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
         for (uint32_t i = 0; i < newImageCount; i++)
         {
+            imageAvailableSemaphores_[i] = VK_NULL_HANDLE;
+            renderFinishedSemaphores_[i] = VK_NULL_HANDLE;
+        }
+        for (uint32_t i = 0; i < newImageCount; i++)
+        {
             if (vkCreateSemaphore(device, &semInfo, nullptr, &imageAvailableSemaphores_[i]) != VK_SUCCESS ||
                 vkCreateSemaphore(device, &semInfo, nullptr, &renderFinishedSemaphores_[i]) != VK_SUCCESS)
+            {
+                // Cleanup partially created semaphores.
+                for (uint32_t j = 0; j <= i; j++) {
+                    if (imageAvailableSemaphores_[j]) vkDestroySemaphore(device, imageAvailableSemaphores_[j], nullptr);
+                    if (renderFinishedSemaphores_[j]) vkDestroySemaphore(device, renderFinishedSemaphores_[j], nullptr);
+                }
                 return false;
+            }
         }
         acquireSemaphoreIndex_ = 0;
     }

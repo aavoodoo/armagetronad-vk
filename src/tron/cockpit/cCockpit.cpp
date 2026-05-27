@@ -528,6 +528,11 @@ static char const * const sg_touchCockpitFile =
     "AATeam/touch/touchbuttons-0.1.aacockpit.xml";
 
 void cCockpit::ProcessTouchOverlay(void) {
+    // Touch overlay only loads when touch controls are enabled.
+    // On desktop (ENABLE_TOUCH=0) the overlay is not loaded at all.
+    extern int su_GetEnableTouch();
+    if (su_GetEnableTouch() < 1) return;
+
     // Optional file — silent no-op when not present (touch overlay isn't
     // shipped on every install). Probe first so we don't get parser noise
     // for a missing-by-design file.
@@ -1078,10 +1083,10 @@ bool cCockpit::ProcessTouch(float x, float y, uint32_t type, int64_t fingerId) {
                 if (rotDeg == 90 || rotDeg == 270) std::swap(vpW, vpH);
                 if (vpW > 0.0f && vpH > 0.0f) {
                     float factor = 4.f/3.f * vpH / vpW;
-                    static float lastFactor = -1.0f;
-                    if (fabsf(factor - lastFactor) > 0.001f) {
+                    static float lastFactor[MAX_VIEWPORTS] = {-1,-1,-1,-1};
+                    if (i < MAX_VIEWPORTS && fabsf(factor - lastFactor[i]) > 0.001f) {
                         cockpit->Readjust(factor);
-                        lastFactor = factor;
+                        lastFactor[i] = factor;
                     }
                 }
             }

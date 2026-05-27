@@ -164,6 +164,10 @@ static int l_config_get(lua_State* L)
 }
 
 // l_config_set(name, value) -> bool
+// NOTE: Runs with owner-level access. Scripts loaded via initialize.lua or
+// effect .lua have full config authority. This is intentional — scripts are
+// local content, not remote code. Network-received scripts should NOT use
+// this binding.
 static int l_config_set(lua_State* L)
 {
     const char* name  = luaL_checkstring(L, 1);

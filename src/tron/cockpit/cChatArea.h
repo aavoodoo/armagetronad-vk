@@ -14,6 +14,10 @@ namespace cWidget {
 
 class ChatArea : public WithCoordinates {
     float bgAlpha_ = 0.5f;  // background opacity (0=transparent, 1=opaque)
+    // Prediction state for background auto-sizing (reset on cockpit reload).
+    static float s_lastBottom_;
+    static int   s_lastTop_;
+    static int   s_lastIn_;
 public:
     ChatArea();
     ~ChatArea() override;

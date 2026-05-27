@@ -1292,15 +1292,16 @@ static void su_TransformEvent( SDL_Event & e, std::vector< uTransformEventInfo >
         {
             break; // consumed by a cockpit button
         }
+        // Mode 1 brake finger — file-scope so config reset works across mode switches.
+        static SDL_FingerID su_m1Finger = 0;
+        static int su_m1Player = 1;
+        {
+            static int lastConf1 = -1;
+            int c = rViewportConfiguration::CurrentConfNum();
+            if (c != lastConf1) { lastConf1 = c; su_m1Finger = 0; su_m1Player = 1; }
+        }
         if (su_enableTouch==1 || su_AnyPlayerHasTouchMode(1))
         {
-            static SDL_FingerID finger = 0;
-            static int finger_player = 1; // 1-based player for tracked brake finger
-            // Reset brake tracking on viewport config change.
-            static int lastConf1 = -1;
-            { int c = rViewportConfiguration::CurrentConfNum();
-              if (c != lastConf1) { lastConf1 = c; finger = 0; finger_player = 1; } }
-
             if (e.type == SDL_EVENT_FINGER_DOWN) {
                 float tx = e.tfinger.x;
                 float ty = e.tfinger.y;
@@ -1325,16 +1326,16 @@ static void su_TransformEvent( SDL_Event & e, std::vector< uTransformEventInfo >
                 if (effectiveMode == 1) {
                     if (tx<0.33)      info.push_back( uTransformEventInfo( su_GetTouchInput(playerN).turnLeft, 1 ) );
                     else if (tx>0.67) info.push_back( uTransformEventInfo( su_GetTouchInput(playerN).turnRight, 1 ) );
-                    else if (!finger) {
-                        finger = e.tfinger.fingerID;
-                        finger_player = playerN;
+                    else if (!su_m1Finger) {
+                        su_m1Finger = e.tfinger.fingerID;
+                        su_m1Player = playerN;
                         info.push_back( uTransformEventInfo( su_GetTouchInput(playerN).brake, 1 ) );
                     }
                 }
             } else if (e.type == SDL_EVENT_FINGER_UP) {
-                if (finger == e.tfinger.fingerID) {
-                    finger = 0;
-                    info.push_back( uTransformEventInfo( su_GetTouchInput(finger_player).brake, 0 ) );
+                if (su_m1Finger == e.tfinger.fingerID) {
+                    su_m1Finger = 0;
+                    info.push_back( uTransformEventInfo( su_GetTouchInput(su_m1Player).brake, 0 ) );
                 }
             }
         }

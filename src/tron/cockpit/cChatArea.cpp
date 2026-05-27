@@ -15,12 +15,19 @@
 #include "rVertex.h"
 #include "tSysTime.h"
 #include "tColor.h"
+#include "rViewport.h"
+#include <algorithm>
 
 // Defined in rConsoleGraph.cpp — set to true to suppress default rendering.
 extern bool sr_chatAreaActive;
 extern rConsole sr_con;
 
+
 namespace cWidget {
+
+float ChatArea::s_lastBottom_ = 1.0f;
+int   ChatArea::s_lastTop_    = 0;
+int   ChatArea::s_lastIn_     = 0;
 
 ChatArea::ChatArea() {}
 
@@ -45,12 +52,31 @@ bool ChatArea::Process(tXmlParser::node cur)
 void ChatArea::PostParsingProcess()
 {
     // Disable the hardcoded rConsole::Render() — this widget takes over.
+    // The touch overlay only loads when ENABLE_TOUCH >= 1, so this is
+    // safe — desktop never reaches here.
     sr_chatAreaActive = true;
+    // Reset prediction state so a fresh cockpit load doesn't see stale values.
+    s_lastBottom_ = 1.0f;
+    s_lastTop_    = 0;
+    s_lastIn_     = 0;
 }
 
 void ChatArea::Render()
 {
     if (!sr_glOut) return;
+    // Hide in split-screen — same as default console (no clean home in
+    // any single viewport, shouldn't appear globally either).
+    {
+        rViewportConfiguration* vp = rViewportConfiguration::CurrentViewportConfiguration();
+        if (vp && vp->num_viewports > 1) return;
+    }
+
+    static int dbgCount = 0;
+    if (dbgCount++ < 5) {
+        SDL_Log("[ChatArea] pos=(%.3f,%.3f) size=(%.3f,%.3f) useAnchorPos=%d useAnchorSize=%d",
+                m_position.x, m_position.y, m_size.x, m_size.y,
+                m_useAnchorPos, m_useAnchorSize);
+    }
 
     // Widget bounds in NDC [-1, +1].
     const float left  = m_position.x - m_size.x;
@@ -65,11 +91,12 @@ void ChatArea::Render()
     // to the area height, with a sensible maximum number of visible lines.
     const float W = static_cast<float>(sr_screenWidth);
     const float H = static_cast<float>(sr_screenHeight);
-    // Target ~12-15 visible lines in the area.
-    float charH = areaH / 12.0f;
-    // Minimum readable size.
-    const float minCharH = 18.0f * 2.0f / H;
-    if (charH < minCharH) charH = minCharH;
+    // Character height: same as default console (rConsoleGraph.cpp).
+    float charH = 31.0f * 2.0f / H;
+    // This widget only loads when touch is enabled (ProcessTouchOverlay
+    // gates on ENABLE_TOUCH >= 1). On touch devices, cap at 4 lines
+    // to avoid covering gameplay. Desktop uses the default console.
+    const int maxVisibleLines = 4;
 
     // Advance timeout — same logic as rConsole::Render().
     double now = tSysTimeFloat();
@@ -87,21 +114,20 @@ void ChatArea::Render()
     }
 
     const auto& lines  = sr_con.Lines();
-    int currentTop      = sr_con.CurrentTop();
     int currentIn       = sr_con.CurrentIn();
-    int maxH            = sr_con.Height();
+    // Show only the last maxVisibleLines lines (most recent messages).
+    int currentTop      = std::max(sr_con.CurrentTop(), currentIn - maxVisibleLines);
 
     if (currentTop >= currentIn) return;  // nothing to show
+    int maxH            = maxVisibleLines;
 
     // Predict content bottom for background sizing (same approach as
     // rConsole::Render — track the previous frame's actual text bottom
     // and adjust for line count changes).
-    static REAL lastBottom = 1.0f;
-    static int  lastTop = 0, lastIn = 0;
-    REAL predictBottom = lastBottom - (lastTop - currentTop + currentIn - lastIn) * charH;
-    if (lastTop != currentTop || lastIn != currentIn) {
-        lastTop = currentTop;
-        lastIn  = currentIn;
+    REAL predictBottom = s_lastBottom_ - (s_lastTop_ - currentTop + currentIn - s_lastIn_) * charH;
+    if (s_lastTop_ != currentTop || s_lastIn_ != currentIn) {
+        s_lastTop_ = currentTop;
+        s_lastIn_  = currentIn;
     }
 
     // Background: auto-sized from predicted text bottom to widget top.
@@ -141,7 +167,7 @@ void ChatArea::Render()
     }
 
     // Track actual text bottom for next frame's background prediction.
-    lastBottom = out.GetBottom();
+    s_lastBottom_ = out.GetBottom();
 }
 
 } // namespace cWidget

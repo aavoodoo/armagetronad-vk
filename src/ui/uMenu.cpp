@@ -180,7 +180,7 @@ REAL uMenu::YPos(int num){
 int uMenu::TouchYToItem(float touchY, bool clamp) const {
     float menuY = 1.0f - 2.0f * touchY;   // touch Y+ down → menu Y+ up
     REAL th = sr_MenuTextHeight(lineSpacingFactor_);
-    if (th < 0.001f) return clamp ? 0 : -1;
+    if (th < 0.001f || items.Len() <= 0) return -1;
     int idx = (int)roundf(menuentries - (yOffset - menuY) / th);
     if (idx < 0) { if (clamp) idx = 0; else return -1; }
     if (idx >= items.Len()) { if (clamp) idx = items.Len() - 1; else return -1; }

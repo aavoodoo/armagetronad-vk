@@ -164,7 +164,9 @@ void rEndCycleRendering()
         }
     };
 
-    std::unordered_map<GroupKey, std::vector<rInstanceData>, GroupKeyHash> groups;
+    // Reuse static map to avoid per-frame heap allocation.
+    static std::unordered_map<GroupKey, std::vector<rInstanceData>, GroupKeyHash> groups;
+    groups.clear();
     for (const auto& ci : sg_cycleInstances)
     {
         GroupKey key{ci.geometryKey, ci.textureId};
